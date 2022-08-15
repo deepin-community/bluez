@@ -1,0 +1,42 @@
+From 1501f2b90e4df38cbab3e8ec2ba37e1211102c3c Mon Sep 17 00:00:00 2001
+From: Nobuhiro Iwamatsu <iwamatsu@debian.org>
+Date: Wed, 23 May 2018 08:27:12 +0900
+Subject: [PATCH] shared/gatt-client: Fix segfault after PIN entry (Closes: #884663)
+
+This fixes the problem of referring to NULL when ext_prop_read_cb() callback
+function is called with the value variable of read_cb not initialized.
+
+Signed-off-by: Nobuhiro Iwamatsu <iwamatsu@debian.org>
+---
+ src/shared/gatt-client.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/src/shared/gatt-client.c b/src/shared/gatt-client.c
+index 1285c37ef..57f9e3d0f 100644
+--- a/src/shared/gatt-client.c
++++ b/src/shared/gatt-client.c
+@@ -2128,6 +2128,10 @@ static void read_cb(uint8_t opcode, const void *pdu, uint16_t length,
+ 	const uint8_t *value = NULL;
+ 	uint16_t value_len = 0;
+ 
++	value_len = length;
++	if (value_len)
++		value = pdu;
++
+ 	if (opcode == BT_ATT_OP_ERROR_RSP) {
+ 		success = false;
+ 		att_ecode = process_error(pdu, length);
+@@ -2140,10 +2144,6 @@ static void read_cb(uint8_t opcode, const void *pdu, uint16_t length,
+ 	}
+ 
+ 	success = true;
+-	value_len = length;
+-	if (value_len)
+-		value = pdu;
+-
+ done:
+ 	if (op->callback)
+ 		op->callback(success, att_ecode, value, length, op->user_data);
+-- 
+2.17.0
+

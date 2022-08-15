@@ -1,0 +1,5 @@
+bluez (5.64-deepin) stable; urgency=medium
+
+  * ['Rebuild  against by  current gcc 11.2']
+
+ -- Deepin Packages Builder <packages@deepin.org>  Thu, 11 Aug 2022 21:42:54 +0800

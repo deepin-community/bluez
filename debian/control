@@ -1,0 +1,188 @@
+Source: bluez
+Maintainer: Deepin Developer <deepin-dev@deepin.org>
+Uploaders: Deepin Packages Builder <packages@deepin.org>
+Section: admin
+Priority: optional
+Build-Depends: debhelper-compat (= 13),
+               flex,
+               bison,
+               libdbus-1-dev (>= 1.6),
+               libglib2.0-dev,
+               libdw-dev,
+               libudev-dev,
+               libreadline-dev,
+               libical-dev,
+               libasound2-dev,
+               libell-dev (>= 0.39),
+               libjson-c-dev (>= 0.13),
+               python3-docutils,
+               udev,
+               check <!nocheck>,
+               systemd
+Standards-Version: 4.5.1
+Rules-Requires-Root: no
+#Vcs-Browser
+#Vcs-Git
+Homepage: http://www.bluez.org
+
+Package: libbluetooth3
+Architecture: linux-any
+Multi-Arch: same
+Section: libs
+Depends: ${shlibs:Depends},
+         ${misc:Depends}
+Pre-Depends: ${misc:Pre-Depends}
+Conflicts: libsdp2 (<= 1.5-2)
+Replaces: libsdp2 (<= 1.5-2)
+Description: Library to use the BlueZ Linux Bluetooth stack
+ BlueZ is the official Linux Bluetooth protocol stack. It is an Open Source
+ project distributed under GNU General Public License (GPL).
+
+Package: libbluetooth-dev
+Architecture: linux-any
+Multi-Arch: same
+Section: libdevel
+Depends: libbluetooth3 (= ${binary:Version}),
+         libc6-dev | libc-dev,
+         ${misc:Depends}
+Suggests: pkg-config
+Conflicts: libbluetooth-dev,
+           libsdp2-dev (<= 1.5.2),
+           bluez-pan
+Provides: libbluetooth3-dev
+Replaces: libsdp2-dev (<= 1.5.2)
+Description: Development files for using the BlueZ Linux Bluetooth library
+ BlueZ is the official Linux Bluetooth protocol stack. It is an Open Source
+ project distributed under GNU General Public License (GPL).
+ .
+ This package contains the development libraries and header files you need to
+ develop your programs using the libbluetooth library.
+
+Package: bluetooth
+Architecture: all
+Depends: ${misc:Depends},
+         bluez
+Suggests: bluez-cups,
+	  bluez-obexd,
+	  bluez-meshd
+Description: Bluetooth support (metapackage)
+ This package provides all of the different plugins supported
+ by the Bluez bluetooth stack.
+
+Package: bluez
+Architecture: linux-any
+Multi-Arch: foreign
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         kmod,
+         udev,
+         lsb-base,
+         default-dbus-system-bus | dbus-system-bus
+Pre-Depends: ${misc:Pre-Depends}
+Suggests: pulseaudio-module-bluetooth
+Breaks: udev (<< 170-1)
+Conflicts: bluez-utils (<= 3.36-3),
+           bluez-audio (<= 3.36-3)
+Replaces: bluez-input,
+          bluez-network,
+          bluez-serial,
+          bluez-utils (<= 3.36-3),
+          bluez-audio (<= 3.36-3),
+          udev (<< 170-1)
+Description: Bluetooth tools and daemons
+ This package contains tools and system daemons for using Bluetooth devices.
+ .
+ BlueZ is the official Linux Bluetooth protocol stack. It is an Open Source
+ project distributed under GNU General Public License (GPL).
+
+Package: bluez-cups
+Architecture: linux-any
+Depends: ${shlibs:Depends},
+         cups,
+         ${misc:Depends}
+Description: Bluetooth printer driver for CUPS
+ This package contains a driver to let CUPS print to Bluetooth-connected
+ printers.
+ .
+ BlueZ is the official Linux Bluetooth protocol stack. It is an Open Source
+ project distributed under GNU General Public License (GPL).
+
+Package: bluez-obexd
+Architecture: linux-any
+Depends: ${shlibs:Depends},
+         ${misc:Depends}
+Recommends: dbus-user-session
+Conflicts: obexd-server,
+           obexd-client
+Replaces: obexd-server,
+          obexd-client
+Description: bluez obex daemon
+ This package contains a OBEX(OBject EXchange) daemon.
+ .
+ OBEX is communication protocol to facilitate the exchange of the binary
+ object between the devices.
+ .
+ This was the software that is independent as obexd, but this has been
+ integrated into BlueZ from BlueZ 5.0.
+ .
+ BlueZ is the official Linux Bluetooth protocol stack. It is an Open Source
+ project distributed under GNU General Public License (GPL).
+
+Package: bluez-meshd
+Architecture: linux-any
+Depends: ${shlibs:Depends},
+         ${misc:Depends}
+Description: bluetooth mesh daemon
+ The Bluetooth Mesh network is a new Bluetooth feature that extends "Bluetooth
+ Low Energy (BLE)".
+ .
+ This package provides daemon (meshd) and tools that provide Bluetooth mesh
+ functionality.
+ .
+ BlueZ is the official Linux Bluetooth protocol stack. It is an Open Source
+ project distributed under GNU General Public License (GPL).
+
+Package: bluez-hcidump
+Architecture: linux-any
+Depends: ${shlibs:Depends},
+         ${misc:Depends}
+Description: Analyses Bluetooth HCI packets
+ The hcidump utility allows the monitoring of Bluetooth activity.
+ It provides a disassembly of the Bluetooth traffic and can display
+ packets from higher level protocols such as RFCOMM, SDP and BNEP.
+ .
+ This was the software that is independent as bluez-hcidump, but this has been
+ integrated into BlueZ from BlueZ 5.0.
+ .
+ BlueZ is the official Linux Bluetooth protocol stack. It is an Open Source
+ project distributed under GNU General Public License (GPL).
+
+Package: bluez-test-tools
+Architecture: linux-any
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         bluez (= ${binary:Version})
+Description: test tools of bluez
+ This package contains test tools for using BlueZ.
+ .
+ BlueZ is the official Linux Bluetooth protocol stack. It is an Open Source
+ project distributed under GNU General Public License (GPL).
+
+Package: bluez-test-scripts
+Architecture: all
+Depends: ${misc:Depends}
+Description: test scripts of bluez
+ This package contains test scripts for using BlueZ.
+ .
+ BlueZ is the official Linux Bluetooth protocol stack. It is an Open Source
+ project distributed under GNU General Public License (GPL).
+
+Package: bluez-source
+Architecture: all
+Depends: ${misc:Depends}
+Description: Source code for the BlueZ Linux Bluetooth stack
+ This package contains the sources and patches which are needed
+ to build bluez.
+ .
+ BlueZ is the official Linux Bluetooth protocol stack. It is an Open Source
+ project distributed under GNU General Public License (GPL).

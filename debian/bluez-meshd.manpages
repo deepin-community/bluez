@@ -1,0 +1,3 @@
+debian/manpages/mesh-cfgclient.1
+debian/manpages/mesh-cfgtest.1
+debian/manpages/meshctl.1

@@ -1,0 +1,342 @@
+From 8e96de127ff1ef03af947e542283ff0b1999cf19 Mon Sep 17 00:00:00 2001
+From: Nobuhiro Iwamatsu <iwamatsu@debian.org>
+Date: Wed, 28 Jul 2021 21:55:12 +0900
+Subject: [PATCH] Change shebang from /usr/bin/python to /usr/bin/python3
+
+Signed-off-by: Nobuhiro Iwamatsu <iwamatsu@debian.org>
+---
+ test/example-adv-monitor     | 2 +-
+ test/example-advertisement   | 2 +-
+ test/example-endpoint        | 2 +-
+ test/example-player          | 2 +-
+ test/exchange-business-cards | 2 +-
+ test/ftp-client              | 2 +-
+ test/get-managed-objects     | 2 +-
+ test/get-obex-capabilities   | 2 +-
+ test/list-devices            | 2 +-
+ test/list-folders            | 2 +-
+ test/map-client              | 2 +-
+ test/monitor-bluetooth       | 2 +-
+ test/opp-client              | 2 +-
+ test/pbap-client             | 2 +-
+ test/simple-agent            | 2 +-
+ test/simple-endpoint         | 2 +-
+ test/simple-obex-agent       | 2 +-
+ test/simple-player           | 2 +-
+ test/test-adapter            | 2 +-
+ test/test-device             | 2 +-
+ test/test-discovery          | 2 +-
+ test/test-gatt-profile       | 2 +-
+ test/test-health             | 2 +-
+ test/test-health-sink        | 2 +-
+ test/test-hfp                | 2 +-
+ test/test-manager            | 2 +-
+ test/test-nap                | 2 +-
+ test/test-network            | 2 +-
+ test/test-profile            | 2 +-
+ test/test-sap-server         | 2 +-
+ 30 files changed, 30 insertions(+), 30 deletions(-)
+
+diff --git a/test/example-adv-monitor b/test/example-adv-monitor
+index a405fc7b0..7f586e7b6 100644
+--- a/test/example-adv-monitor
++++ b/test/example-adv-monitor
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ import argparse
+diff --git a/test/example-advertisement b/test/example-advertisement
+index 5f022ee67..9d232a525 100755
+--- a/test/example-advertisement
++++ b/test/example-advertisement
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import print_function
+diff --git a/test/example-endpoint b/test/example-endpoint
+index 16651c683..8fe0161ff 100644
+--- a/test/example-endpoint
++++ b/test/example-endpoint
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import absolute_import, print_function, unicode_literals
+diff --git a/test/example-player b/test/example-player
+index 1497d1107..481d91805 100644
+--- a/test/example-player
++++ b/test/example-player
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import print_function
+diff --git a/test/exchange-business-cards b/test/exchange-business-cards
+index 9a3aa29fb..6cfd4b2fc 100755
+--- a/test/exchange-business-cards
++++ b/test/exchange-business-cards
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ import sys
+diff --git a/test/ftp-client b/test/ftp-client
+index ef756ab2b..f6081b911 100755
+--- a/test/ftp-client
++++ b/test/ftp-client
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import absolute_import, print_function, unicode_literals
+diff --git a/test/get-managed-objects b/test/get-managed-objects
+index 5125ee524..0166b34bf 100755
+--- a/test/get-managed-objects
++++ b/test/get-managed-objects
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import absolute_import, print_function, unicode_literals
+diff --git a/test/get-obex-capabilities b/test/get-obex-capabilities
+index a7980a442..339b57df7 100755
+--- a/test/get-obex-capabilities
++++ b/test/get-obex-capabilities
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ import sys
+diff --git a/test/list-devices b/test/list-devices
+index b112556c3..f700b0d33 100755
+--- a/test/list-devices
++++ b/test/list-devices
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import absolute_import, print_function, unicode_literals
+diff --git a/test/list-folders b/test/list-folders
+index b4e3f100b..15a0c2087 100755
+--- a/test/list-folders
++++ b/test/list-folders
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ import sys
+diff --git a/test/map-client b/test/map-client
+index a2d96ae5f..05ad6e8bf 100755
+--- a/test/map-client
++++ b/test/map-client
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import absolute_import, print_function, unicode_literals
+diff --git a/test/monitor-bluetooth b/test/monitor-bluetooth
+index a3977e206..7ca236f89 100755
+--- a/test/monitor-bluetooth
++++ b/test/monitor-bluetooth
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import absolute_import, print_function, unicode_literals
+diff --git a/test/opp-client b/test/opp-client
+index 4f00a41c0..32ec55f61 100755
+--- a/test/opp-client
++++ b/test/opp-client
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import absolute_import, print_function, unicode_literals
+diff --git a/test/pbap-client b/test/pbap-client
+index e6cafdd30..979c3932d 100755
+--- a/test/pbap-client
++++ b/test/pbap-client
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import absolute_import, print_function, unicode_literals
+diff --git a/test/simple-agent b/test/simple-agent
+index 4fdaff1eb..a176b15c2 100755
+--- a/test/simple-agent
++++ b/test/simple-agent
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import absolute_import, print_function, unicode_literals
+diff --git a/test/simple-endpoint b/test/simple-endpoint
+index 59ca189ce..21f687df0 100755
+--- a/test/simple-endpoint
++++ b/test/simple-endpoint
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import absolute_import, print_function, unicode_literals
+diff --git a/test/simple-obex-agent b/test/simple-obex-agent
+index 064f6d30b..08514afaf 100755
+--- a/test/simple-obex-agent
++++ b/test/simple-obex-agent
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import absolute_import, print_function, unicode_literals
+diff --git a/test/simple-player b/test/simple-player
+index 92682844d..67310b1c9 100755
+--- a/test/simple-player
++++ b/test/simple-player
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import print_function
+diff --git a/test/test-adapter b/test/test-adapter
+index a216140ba..9d0a1584e 100755
+--- a/test/test-adapter
++++ b/test/test-adapter
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import absolute_import, print_function, unicode_literals
+diff --git a/test/test-device b/test/test-device
+index a1e508166..be3abb38f 100755
+--- a/test/test-device
++++ b/test/test-device
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import absolute_import, print_function, unicode_literals
+diff --git a/test/test-discovery b/test/test-discovery
+index eccc7c7e3..97b3c2236 100755
+--- a/test/test-discovery
++++ b/test/test-discovery
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import absolute_import, print_function, unicode_literals
+diff --git a/test/test-gatt-profile b/test/test-gatt-profile
+index a973ae14e..352bec2f8 100755
+--- a/test/test-gatt-profile
++++ b/test/test-gatt-profile
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import absolute_import, print_function, unicode_literals
+diff --git a/test/test-health b/test/test-health
+index d6b437ed8..45011edde 100755
+--- a/test/test-health
++++ b/test/test-health
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import absolute_import, print_function, unicode_literals
+diff --git a/test/test-health-sink b/test/test-health-sink
+index 57665d2ba..305ab6c82 100755
+--- a/test/test-health-sink
++++ b/test/test-health-sink
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import absolute_import, print_function, unicode_literals
+diff --git a/test/test-hfp b/test/test-hfp
+index 11e328e54..3898b07a8 100755
+--- a/test/test-hfp
++++ b/test/test-hfp
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import absolute_import, print_function, unicode_literals
+diff --git a/test/test-manager b/test/test-manager
+index 3fa7205a0..34d4549f9 100755
+--- a/test/test-manager
++++ b/test/test-manager
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import absolute_import, print_function, unicode_literals
+diff --git a/test/test-nap b/test/test-nap
+index d5c757b79..f270ca417 100755
+--- a/test/test-nap
++++ b/test/test-nap
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import absolute_import, print_function, unicode_literals
+diff --git a/test/test-network b/test/test-network
+index acc7dff65..c3487ec37 100755
+--- a/test/test-network
++++ b/test/test-network
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import absolute_import, print_function, unicode_literals
+diff --git a/test/test-profile b/test/test-profile
+index af1e23f76..e6448da98 100755
+--- a/test/test-profile
++++ b/test/test-profile
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import absolute_import, print_function, unicode_literals
+diff --git a/test/test-sap-server b/test/test-sap-server
+index ddb1efe9b..353f58e4c 100755
+--- a/test/test-sap-server
++++ b/test/test-sap-server
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/python3
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ 
+ from __future__ import absolute_import, print_function, unicode_literals
+-- 
+2.32.0
+

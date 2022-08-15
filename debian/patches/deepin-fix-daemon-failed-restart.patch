@@ -1,0 +1,18 @@
+Description: Fix bluetoothd con't automatically in case of run failure.
+ Fix bluetoothd con't automatically in case of run failure
+Author: huxiaodong <huxiaodong@uniontech.com>
+Origin: https://gerrit.uniontech.com/plugins/gitiles/base/bluez/+/e30d38138b44b123f4fd3269074d51588bebabdf
+Bug: https://pms.deepin.cn/bug-view-8866.html
+Last-Update: 2022-05-20
+
+--- bluez-5.64.orig/src/bluetooth.service.in
++++ bluez-5.64/src/bluetooth.service.in
+@@ -9,7 +9,7 @@ BusName=org.bluez
+ ExecStart=@pkglibexecdir@/bluetoothd
+ NotifyAccess=main
+ #WatchdogSec=10
+-#Restart=on-failure
++Restart=on-failure
+ CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+ LimitNPROC=1
+ 

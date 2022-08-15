@@ -1,0 +1,24 @@
+Description: pair failed: Already Paired(0x13)
+ 在操作移除蓝牙鼠标设备时，快速去关闭蓝牙，当重新与该蓝牙设备连接时，报错(0x13)
+Author: ut000745 <wangyouwan@uniontech.com>
+
+Origin: https://gerrit.uniontech.com/plugins/gitiles/base/bluez/+/470fb7c7c357536ab4987874c21ef800a5237104
+Bug: https://pms.uniontech.com/bug-view-112222.html
+Last-Update: 2022-05-20
+
+--- bluez-5.64.orig/src/device.c
++++ bluez-5.64/src/device.c
+@@ -3089,7 +3089,12 @@ static DBusMessage *cancel_pairing(DBusC
+ 	DBG("");
+ 
+ 	if (!req)
+-		return btd_error_does_not_exist(msg);
++	{
++		btd_adapter_remove_bonding(device->adapter, &device->bdaddr,
++							device->bdaddr_type);
++
++ 		return btd_error_does_not_exist(msg);
++	}
+ 
+ 	device_cancel_bonding(device, MGMT_STATUS_CANCELLED);
+ 

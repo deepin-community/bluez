@@ -1,0 +1,10 @@
+rm_conffile /etc/bluetooth/network.service 3.30-1~ bluez-utils
+rm_conffile /etc/bluetooth/serial.service 3.30-1~ bluez-utils
+rm_conffile /etc/bluetooth/input.service 3.30-1~ bluez-utils
+rm_conffile /etc/dbus-1/system.d/bluez-hcid.conf 3.7-1~ bluez-utils
+rm_conffile /etc/bluetooth/rfcomm.conf 5.21-2~ bluez
+rm_conffile /etc/bluetooth/serial.conf 5.21-2~ bluez
+rm_conffile /etc/bluetooth/audio.conf 5.21-2~ bluez
+rm_conffile /etc/bluetooth/proximity.conf 5.50-1~ bluez
+mv_conffile /etc/dbus-1/system.d/bluez-hcid.conf /etc/dbus-1/system.d/bluetooth.conf 3.7-1 bluez
+mv_conffile /etc/modprobe.d/bluez /etc/modprobe.d/bluez.conf 4.42-1 bluez

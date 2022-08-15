@@ -1,0 +1,21 @@
+From: vagrant@reproducible-builds.org
+Subject: Use relative symlinks when linking to headers.
+Date: 2021-07-23
+
+Using the absolute build path only works during the build; the
+symlinks are included in the tarball, which results in broken symlinks
+in the tarball included in the bluez-source package.
+
+diff --git a/Makefile.am b/Makefile.am
+index 8bca5acfa..b2eafcb5f 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -617,7 +617,7 @@ $(lib_libbluetooth_la_OBJECTS): $(local_headers)
+ 
+ lib/bluetooth/%.h: lib/%.h
+ 	$(AM_V_at)$(MKDIR_P) lib/bluetooth
+-	$(AM_V_GEN)$(LN_S) -f $(abspath $<) $@
++	$(AM_V_GEN)$(LN_S) -f ../$(shell basename $@) $@
+ 
+ ell/shared: Makefile
+ 	$(AM_V_at)$(MKDIR_P) ell

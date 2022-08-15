@@ -1,0 +1,82 @@
+Description: Add huawei patch to support pangu machine.
+ hisi_init in hciattach tools.
+ Migrate the pangu machine changes to the mainline.
+Author: lishengyu <lishengyu@uniontech.com>
+Origin: https://gerrit.uniontech.com/plugins/gitiles/base/bluez/+/c8b440b4e8f3880ab34337bc4ec70489c36cb531
+Last-Update: 2022-05-20
+
+--- bluez-5.64.orig/tools/hciattach.c
++++ bluez-5.64/tools/hciattach.c
+@@ -1097,6 +1097,11 @@ struct uart_t uart[] = {
+ 	{ "amp",	0x0000, 0x0000, HCI_UART_H4, 115200, 115200,
+ 			AMP_DEV, DISABLE_PM, NULL, NULL, NULL },
+ 
++	/*Hisi Bluetooth Module */
++	{ "hisi",		0x0000, 0x0000, HCI_UART_H4,   115200, 4000000,
++			FLOW_CTL, DISABLE_PM, NULL, NULL, NULL },
++
++
+ 	{ NULL, 0 }
+ };
+ 
+@@ -1210,6 +1215,31 @@ fail:
+ 	return -1;
+ }
+ 
++/* Initialize UART driver */
++static int hisi_init(char *dev, struct uart_t *u)
++{
++	printf("hisi_init\n");
++	int fd;
++	fd = open(dev, O_RDWR);
++	printf("dev open, fd = %d\n",fd);
++
++	if (fd < 0) {
++		perror("Can't open device hisi");
++		goto fail;
++	}
++
++	if (ioctl(fd, BT_IOCTL_HCISETPROTO, u->proto) < 0) {
++		perror("Can't set device hisi");
++		goto fail;
++	}
++
++	return fd;
++
++fail:
++	close(fd);
++	return -1;
++}
++
+ static void usage(void)
+ {
+ 	printf("hciattach - HCI UART driver initialization utility\n");
+@@ -1346,6 +1376,18 @@ int main(int argc, char *argv[])
+ 		exit(1);
+ 	}
+ 
++	/*hisi init*/
++	if(u->type == "hisi"){
++		n = hisi_init(dev,u);
++
++		if (n < 0) {
++			perror("Can't initialize device");
++			exit(1);
++		}
++
++		return 0;
++	}
++
+ 	/* If user specified a initial speed, use that instead of
+ 	   the hardware's default */
+ 	if (init_speed)
+--- bluez-5.64.orig/tools/hciattach.h
++++ bluez-5.64/tools/hciattach.h
+@@ -14,6 +14,7 @@
+ #define N_HCI	15
+ #endif
+ 
++#define BT_IOCTL_HCISETPROTO     101
+ #define HCIUARTSETPROTO		_IOW('U', 200, int)
+ #define HCIUARTGETPROTO		_IOR('U', 201, int)
+ #define HCIUARTGETDEVICE	_IOR('U', 202, int)

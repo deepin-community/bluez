@@ -1,0 +1,28 @@
+From 57873ffe2415901bc237934b2ae5390328a7eae4 Mon Sep 17 00:00:00 2001
+From: Nobuhiro Iwamatsu <iwamatsu@nigauri.org>
+Date: Sun, 29 Jul 2018 16:10:18 +0900
+Subject: [PATCH] main.conf: Add more datails (Closes: #904212)
+
+Signed-off-by: Nobuhiro Iwamatsu <iwamatsu@nigauri.org>
+---
+ src/main.conf | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/src/main.conf b/src/main.conf
+index cbae32ec5..88214d4a0 100644
+--- a/src/main.conf
++++ b/src/main.conf
+@@ -1,7 +1,8 @@
+ [General]
+ 
+-# Default adapter name
+-# Defaults to 'BlueZ X.YZ'
++# Defaults to 'BlueZ X.YZ', if Name is not set here and plugin 'hostname' is not loaded.
++# The plugin 'hostname' is loaded by default and overides the Name set here so
++# consider modifying /etc/machine-info with variable PRETTY_HOSTNAME=<NewName> instead.
+ #Name = BlueZ
+ 
+ # Default device class. Only the major and minor device class bits are
+-- 
+2.18.0
+

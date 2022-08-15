@@ -1,0 +1,93 @@
+#!/usr/bin/make -f
+# Uncomment this to turn on verbose mode.
+#export DH_VERBOSE=1
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export DEB_CFLAGS_MAINT_APPEND = -pie -fPIC
+export DEB_CXXFLAGS_MAINT_APPEND = -pie -fPIC
+
+CONFIGURE_FLAGS := \
+	--disable-silent-rules \
+	--libdir=\$${prefix}/lib/$(DEB_HOST_MULTIARCH) \
+	--enable-static \
+	--enable-tools \
+	--enable-cups \
+	--enable-mesh \
+	--enable-midi	\
+	--enable-datafiles \
+	--enable-threads \
+	--enable-backtrace \
+	--enable-debug \
+	--enable-library \
+	--enable-test \
+	--enable-nfc \
+	--enable-sap \
+	--enable-monitor \
+	--enable-udev \
+	--enable-obex \
+	--enable-client \
+	--enable-testing \
+	--enable-systemd \
+	--enable-threads \
+	--enable-sixaxis \
+	--enable-deprecated \
+	--enable-health \
+	--enable-hid2hci \
+	--enable-external-ell \
+	--enable-experimental
+
+ifeq ($(shell dpkg-vendor --is Ubuntu && echo yes) $(DEB_HOST_ARCH), yes i386)
+   skip_packages = -Nbluez-cups
+endif
+
+%:
+	dh $@ --exclude=.la
+
+override_dh_install:
+	# Remove test scripts, and these are taken directly into the package
+	# from the test directory
+	rm -rf debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/bluez
+	install -m 755 -D src/bluetoothd.sh debian/tmp/usr/libexec/bluetooth
+	dh_install
+
+override_dh_auto_configure:
+	dh_auto_configure -- $(CONFIGURE_FLAGS)
+
+override_dh_installinit:
+	dh_installinit -pbluez --name=bluetooth --restart-after-upgrade
+
+override_dh_installsystemd:
+	dh_installsystemd -pbluez --name=bluetooth bluetooth.service
+
+override_dh_auto_test:
+	# disable
+
+override_dh_builddeb:
+	dh_builddeb ${skip_packages}
+
+override_dh_gencontrol:
+	dh_gencontrol ${skip_packages}
+
+override_dh_fixperms-indep:
+	dh_fixperms
+	chmod 0644 debian/bluez-test-scripts/usr/share/doc/bluez-test-scripts/examples/*
+
+override_dh_auto_install-indep: build_bluez-source
+BUILDDIRSOURCE := $(shell pwd)/debian/tmp-source/bluez-source
+build_bluez-source:
+	install -d debian/bluez-source/usr/src
+	mkdir -p $(BUILDDIRSOURCE)
+	tar --exclude debian --exclude .git --exclude .pc \
+		--exclude autom4te.cache \
+		--exclude config.log \
+		--exclude config.status \
+		--exclude Makefile \
+		--exclude libtool \
+		-cf - . | (cd $(BUILDDIRSOURCE) && tar -xf -)
+	cd $(dir $(BUILDDIRSOURCE)) \
+		&& tar --sort=name \
+			--mtime="@${SOURCE_DATE_EPOCH}" \
+			--owner=0 --group=0 --numeric-owner \
+			--pax-option=exthdr.name=%d/PaxHeaders/%f,delete=atime,delete=ctime \
+			-cjf $(shell pwd)/debian/bluez-source/usr/src/bluez.tar.bz2 \
+		$(notdir $(BUILDDIRSOURCE))

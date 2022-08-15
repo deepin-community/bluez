@@ -1,0 +1,689 @@
+From 7b9990be13f483bb2daa03d1a350f95bf9aa819f Mon Sep 17 00:00:00 2001
+From: Nobuhiro Iwamatsu <iwamatsu@debian.org>
+Date: Tue, 14 Dec 2021 15:18:02 +0900
+Subject: [PATCH] Fix typo
+
+This commit fixes following typo:
+
+  Refrence -> Reference
+  Unkown -> Unknown
+  disappered -> disappeared
+  WRITTING -> WRITING
+  fragement -> fragment
+  specifiy -> specify
+  errror -> error
+  retreive -> retrieve
+  Successfuly -> Successfully
+  avaiable -> available
+  bandwith -> bandwidth
+  futher -> further
+  occured -> occurred
+  immediatelly -> immediately
+  Seach -> Search
+  Lenght -> Length
+  miliseconds -> milliseconds
+  missmatch -> mismatch
+  UNKOWN -> UNKNOWN
+  formely -> formerly
+  Toogle -> Toggle
+  Igoring -> Ignoring
+  withouth -> without
+  Succcess -> Success
+  Unexpexted -> Unexpected
+  Supressing -> Suppressing
+  wich -> which
+
+Signed-off-by: Nobuhiro Iwamatsu <iwamatsu@debian.org>
+---
+ android/tester-main.c      |  6 +++---
+ attrib/att.c               |  2 +-
+ emulator/btdev.c           |  2 +-
+ lib/bluetooth.c            |  2 +-
+ mesh/net.c                 |  2 +-
+ monitor/avctp.c            |  6 +++---
+ monitor/ll.c               |  2 +-
+ obexd/plugins/bluetooth.c  |  2 +-
+ obexd/plugins/pcsuite.c    |  2 +-
+ obexd/src/manager.c        |  2 +-
+ plugins/policy.c           |  4 ++--
+ profiles/battery/battery.c |  2 +-
+ profiles/gap/gas.c         |  2 +-
+ profiles/health/mcap.c     |  2 +-
+ profiles/midi/midi.c       |  2 +-
+ src/adapter.c              | 10 +++++-----
+ src/profile.c              |  4 ++--
+ src/shared/util.c          |  2 +-
+ tools/btattach.rst         |  2 +-
+ tools/btmgmt.c             |  4 ++--
+ tools/btpclient.c          |  4 ++--
+ tools/ciptool.c            |  2 +-
+ tools/l2cap-tester.c       |  2 +-
+ tools/l2test.c             |  6 +++---
+ tools/mgmt-tester.c        |  4 ++--
+ tools/parser/att.c         |  2 +-
+ tools/parser/avrcp.c       | 10 +++++-----
+ tools/parser/hci.c         |  6 +++---
+ tools/parser/l2cap.c       |  4 ++--
+ tools/parser/smp.c         |  4 ++--
+ tools/rctest.c             |  6 +++---
+ 31 files changed, 56 insertions(+), 56 deletions(-)
+
+diff --git a/android/tester-main.c b/android/tester-main.c
+index ff5ecdf83..8fe4e09c4 100644
+--- a/android/tester-main.c
++++ b/android/tester-main.c
+@@ -497,20 +497,20 @@ static bool match_mas_inst(btmce_mas_instance_t *exp_inst,
+ 				btmce_mas_instance_t *rec_inst, int inst_num)
+ {
+ 	if (exp_inst->id && (exp_inst->id != rec_inst->id)) {
+-		tester_debug("MAS inst. [%d] id missmatch %d vs %d", inst_num,
++		tester_debug("MAS inst. [%d] id mismatch %d vs %d", inst_num,
+ 						rec_inst->id, exp_inst->id);
+ 		return 0;
+ 	}
+ 
+ 	if (exp_inst->scn && (exp_inst->scn != rec_inst->scn)) {
+-		tester_debug("MAS inst. [%d] scn missmatch %d vs %d", inst_num,
++		tester_debug("MAS inst. [%d] scn mismatch %d vs %d", inst_num,
+ 						rec_inst->scn, exp_inst->scn);
+ 		return 0;
+ 	}
+ 
+ 	if (exp_inst->msg_types &&
+ 			(exp_inst->msg_types != rec_inst->msg_types)) {
+-		tester_debug("Mas inst. [%d] mesg type missmatch %d vs %d",
++		tester_debug("Mas inst. [%d] mesg type mismatch %d vs %d",
+ 					inst_num, rec_inst->scn, exp_inst->scn);
+ 		return 0;
+ 	}
+diff --git a/attrib/att.c b/attrib/att.c
+index fa53c90aa..bf98fe2d8 100644
+--- a/attrib/att.c
++++ b/attrib/att.c
+@@ -74,7 +74,7 @@ const char *att_ecode2str(uint8_t status)
+ 	case ATT_ECODE_IO:
+ 		return "Internal application error: I/O";
+ 	case ATT_ECODE_TIMEOUT:
+-		return "A timeout occured";
++		return "A timeout occurred";
+ 	case ATT_ECODE_ABORTED:
+ 		return "The operation was aborted";
+ 	default:
+diff --git a/emulator/btdev.c b/emulator/btdev.c
+index 148e32b7d..735c84ad7 100644
+--- a/emulator/btdev.c
++++ b/emulator/btdev.c
+@@ -219,7 +219,7 @@ struct inquiry_data {
+ 	int iter;
+ };
+ 
+-#define DEFAULT_INQUIRY_INTERVAL 100 /* 100 miliseconds */
++#define DEFAULT_INQUIRY_INTERVAL 100 /* 100 milliseconds */
+ 
+ #define MAX_BTDEV_ENTRIES 16
+ 
+diff --git a/lib/bluetooth.c b/lib/bluetooth.c
+index 84e40c819..ccfd0254c 100644
+--- a/lib/bluetooth.c
++++ b/lib/bluetooth.c
+@@ -1106,7 +1106,7 @@ const char *bt_compidtostr(int compid)
+ 	case 421:
+ 		return "Icon Health and Fitness";
+ 	case 422:
+-		return "Wille Engineering (formely as Asandoo GmbH)";
++		return "Wille Engineering (formerly as Asandoo GmbH)";
+ 	case 423:
+ 		return "ENERGOUS CORPORATION";
+ 	case 424:
+diff --git a/mesh/net.c b/mesh/net.c
+index aa220f762..9643d390d 100644
+--- a/mesh/net.c
++++ b/mesh/net.c
+@@ -1029,7 +1029,7 @@ static bool msg_in_cache(struct mesh_net *net, uint16_t src, uint32_t seq,
+ 	msg = l_queue_remove_if(net->msg_cache, match_cache, &tst);
+ 
+ 	if (msg) {
+-		l_debug("Supressing duplicate %4.4x + %6.6x + %8.8x",
++		l_debug("Suppressing duplicate %4.4x + %6.6x + %8.8x",
+ 							src, seq, mic);
+ 		l_queue_push_head(net->msg_cache, msg);
+ 		return true;
+diff --git a/monitor/avctp.c b/monitor/avctp.c
+index dc03195a8..73ef50c17 100644
+--- a/monitor/avctp.c
++++ b/monitor/avctp.c
+@@ -1314,13 +1314,13 @@ static bool avrcp_get_play_status(struct avctp_frame *avctp_frame,
+ 	if (!l2cap_frame_get_be32(frame, &interval))
+ 		return false;
+ 
+-	print_field("%*cSongLength: 0x%08x (%u miliseconds)",
++	print_field("%*cSongLength: 0x%08x (%u milliseconds)",
+ 					(indent - 8), ' ', interval, interval);
+ 
+ 	if (!l2cap_frame_get_be32(frame, &interval))
+ 		return false;
+ 
+-	print_field("%*cSongPosition: 0x%08x (%u miliseconds)",
++	print_field("%*cSongPosition: 0x%08x (%u milliseconds)",
+ 					(indent - 8), ' ', interval, interval);
+ 
+ 	if (!l2cap_frame_get_u8(frame, &status))
+@@ -1385,7 +1385,7 @@ response:
+ 		if (!l2cap_frame_get_be32(frame, &interval))
+ 			return false;
+ 
+-		print_field("%*cPosition: 0x%08x (%u miliseconds)",
++		print_field("%*cPosition: 0x%08x (%u milliseconds)",
+ 					(indent - 8), ' ', interval, interval);
+ 		break;
+ 	case AVRCP_EVENT_BATT_STATUS_CHANGED:
+diff --git a/monitor/ll.c b/monitor/ll.c
+index f588d5e99..db2354991 100644
+--- a/monitor/ll.c
++++ b/monitor/ll.c
+@@ -256,7 +256,7 @@ static void data_packet(const void *data, uint8_t size, bool padded)
+ 	switch (llid) {
+ 	case 0x01:
+ 		if (length > 0)
+-			str = "Continuation fragement of L2CAP message";
++			str = "Continuation fragment of L2CAP message";
+ 		else
+ 			str = "Empty message";
+ 		break;
+diff --git a/obexd/plugins/bluetooth.c b/obexd/plugins/bluetooth.c
+index d232d3fd5..0db6db303 100644
+--- a/obexd/plugins/bluetooth.c
++++ b/obexd/plugins/bluetooth.c
+@@ -338,7 +338,7 @@ static void name_released(DBusConnection *conn, void *user_data)
+ {
+ 	GSList *l;
+ 
+-	DBG("org.bluez disappered");
++	DBG("org.bluez disappeared");
+ 
+ 	for (l = profiles; l; l = l->next) {
+ 		struct bluetooth_profile *profile = l->data;
+diff --git a/obexd/plugins/pcsuite.c b/obexd/plugins/pcsuite.c
+index b2232ea09..fd69cae00 100644
+--- a/obexd/plugins/pcsuite.c
++++ b/obexd/plugins/pcsuite.c
+@@ -444,7 +444,7 @@ static ssize_t backup_write(void *object, const void *buf, size_t count)
+ 	if (obj->fd != -1) {
+ 		ret = write(obj->fd, buf, count);
+ 
+-		DBG("cmd = %s, WRITTING", obj->cmd);
++		DBG("cmd = %s, WRITING", obj->cmd);
+ 
+ 		if (ret < 0) {
+ 			error("backup: cmd = %s", obj->cmd);
+diff --git a/obexd/src/manager.c b/obexd/src/manager.c
+index 01741fe62..dae2d3ecb 100644
+--- a/obexd/src/manager.c
++++ b/obexd/src/manager.c
+@@ -39,7 +39,7 @@
+ #define SESSION_INTERFACE OBEXD_SERVICE ".Session1"
+ #define AGENT_INTERFACE OBEXD_SERVICE ".Agent1"
+ 
+-#define TIMEOUT 60*1000 /* Timeout for user response (miliseconds) */
++#define TIMEOUT 60*1000 /* Timeout for user response (milliseconds) */
+ 
+ struct agent {
+ 	char *bus_name;
+diff --git a/plugins/policy.c b/plugins/policy.c
+index 051db82e1..f790b7a77 100644
+--- a/plugins/policy.c
++++ b/plugins/policy.c
+@@ -277,7 +277,7 @@ static void sink_cb(struct btd_service *service, btd_service_state_t old_state,
+ 		}
+ 
+ 		/* Check if service initiate the connection then proceed
+-		 * immediatelly otherwise set timer
++		 * immediately otherwise set timer
+ 		 */
+ 		if (btd_service_is_initiator(service))
+ 			policy_connect(data, controller);
+@@ -428,7 +428,7 @@ static void source_cb(struct btd_service *service,
+ 		}
+ 
+ 		/* Check if service initiate the connection then proceed
+-		 * immediatelly otherwise set timer
++		 * immediately otherwise set timer
+ 		 */
+ 		if (btd_service_is_initiator(service))
+ 			policy_connect(data, target);
+diff --git a/profiles/battery/battery.c b/profiles/battery/battery.c
+index 176d127f6..2efe9beb8 100644
+--- a/profiles/battery/battery.c
++++ b/profiles/battery/battery.c
+@@ -151,7 +151,7 @@ static void read_initial_battery_level_cb(bool success,
+ 	struct batt *batt = user_data;
+ 
+ 	if (!success) {
+-		DBG("Reading battery level failed with ATT errror: %u",
++		DBG("Reading battery level failed with ATT error: %u",
+ 								att_ecode);
+ 		return;
+ 	}
+diff --git a/profiles/gap/gas.c b/profiles/gap/gas.c
+index ea3249be9..780f749aa 100644
+--- a/profiles/gap/gas.c
++++ b/profiles/gap/gas.c
+@@ -91,7 +91,7 @@ static void read_device_name_cb(bool success, uint8_t att_ecode,
+ 	char *name;
+ 
+ 	if (!success) {
+-		DBG("Reading device name failed with ATT errror: %u",
++		DBG("Reading device name failed with ATT error: %u",
+ 								att_ecode);
+ 		return;
+ 	}
+diff --git a/profiles/health/mcap.c b/profiles/health/mcap.c
+index 5161ef77c..1097ca70f 100644
+--- a/profiles/health/mcap.c
++++ b/profiles/health/mcap.c
+@@ -2854,7 +2854,7 @@ static void proc_sync_set_req(struct mcap_mcl *mcl, uint8_t *cmd, uint32_t len)
+ 			return;
+ 		}
+ 
+-		/* Convert to miliseconds */
++		/* Convert to milliseconds */
+ 		phase2_delay = bt2ms(phase2_delay);
+ 
+ 		if (phase2_delay > 61*1000) {
+diff --git a/profiles/midi/midi.c b/profiles/midi/midi.c
+index 737d1b5f6..43203efbe 100644
+--- a/profiles/midi/midi.c
++++ b/profiles/midi/midi.c
+@@ -309,7 +309,7 @@ static int midi_accept(struct btd_service *service)
+ 
+ 	err = snd_seq_client_id(midi->seq_handle);
+ 	if (err < 0) {
+-		error("Could retreive ALSA client: %s (%d)", snd_strerror(err), err);
++		error("Could retrieve ALSA client: %s (%d)", snd_strerror(err), err);
+ 		goto _err_handle;
+ 	}
+ 	midi->seq_client_id = err;
+diff --git a/src/adapter.c b/src/adapter.c
+index 5846f0396..4601e02c8 100644
+--- a/src/adapter.c
++++ b/src/adapter.c
+@@ -4012,7 +4012,7 @@ static void set_privacy_complete(uint8_t status, uint16_t length,
+ 		return;
+ 	}
+ 
+-	DBG("Successfuly set privacy for index %u", adapter->dev_id);
++	DBG("Successfully set privacy for index %u", adapter->dev_id);
+ }
+ 
+ static int set_privacy(struct btd_adapter *adapter, uint8_t privacy)
+@@ -5346,7 +5346,7 @@ void adapter_auto_connect_add(struct btd_adapter *adapter,
+ 	bdaddr_type = btd_device_get_bdaddr_type(device);
+ 
+ 	if (bdaddr_type == BDADDR_BREDR) {
+-		DBG("auto-connection feature is not avaiable for BR/EDR");
++		DBG("auto-connection feature is not available for BR/EDR");
+ 		return;
+ 	}
+ 
+@@ -5494,7 +5494,7 @@ void adapter_auto_connect_remove(struct btd_adapter *adapter,
+ 	bdaddr_type = btd_device_get_bdaddr_type(device);
+ 
+ 	if (bdaddr_type == BDADDR_BREDR) {
+-		DBG("auto-connection feature is not avaiable for BR/EDR");
++		DBG("auto-connection feature is not available for BR/EDR");
+ 		return;
+ 	}
+ 
+@@ -9760,7 +9760,7 @@ static void read_info_complete(uint8_t status, uint16_t length,
+ 	case BT_MODE_BREDR:
+ 		if (!(adapter->supported_settings & MGMT_SETTING_BREDR)) {
+ 			btd_error(adapter->dev_id,
+-				"Ignoring adapter withouth BR/EDR support");
++				"Ignoring adapter without BR/EDR support");
+ 			goto failed;
+ 		}
+ 
+@@ -9774,7 +9774,7 @@ static void read_info_complete(uint8_t status, uint16_t length,
+ 	case BT_MODE_LE:
+ 		if (!(adapter->supported_settings & MGMT_SETTING_LE)) {
+ 			btd_error(adapter->dev_id,
+-				"Ignoring adapter withouth LE support");
++				"Ignoring adapter without LE support");
+ 			goto failed;
+ 		}
+ 
+diff --git a/src/profile.c b/src/profile.c
+index e1bebf1ee..5b651ce7b 100644
+--- a/src/profile.c
++++ b/src/profile.c
+@@ -1250,7 +1250,7 @@ static void ext_confirm(GIOChannel *io, gpointer user_data)
+ 	DBG("incoming connect from %s", addr);
+ 
+ 	if (!btd_adapter_is_uuid_allowed(adapter_find(&src), uuid)) {
+-		info("UUID %s is not allowed. Igoring the connection", uuid);
++		info("UUID %s is not allowed. Ignoring the connection", uuid);
+ 		return;
+ 	}
+ 
+@@ -1292,7 +1292,7 @@ static void ext_direct_connect(GIOChannel *io, GError *err, gpointer user_data)
+ 	}
+ 
+ 	if (!btd_adapter_is_uuid_allowed(adapter_find(&src), uuid)) {
+-		info("UUID %s is not allowed. Igoring the connection", uuid);
++		info("UUID %s is not allowed. Ignoring the connection", uuid);
+ 		return;
+ 	}
+ 
+diff --git a/src/shared/util.c b/src/shared/util.c
+index 81b20d86f..205d3f35d 100644
+--- a/src/shared/util.c
++++ b/src/shared/util.c
+@@ -205,7 +205,7 @@ static const struct {
+ 	{ 0x111d, "Imaging Referenced Objects"			},
+ 	{ 0x111e, "Handsfree"					},
+ 	{ 0x111f, "Handsfree Audio Gateway"			},
+-	{ 0x1120, "Direct Printing Refrence Objects Service"	},
++	{ 0x1120, "Direct Printing Reference Objects Service"	},
+ 	{ 0x1121, "Reflected UI"				},
+ 	{ 0x1122, "Basic Printing"				},
+ 	{ 0x1123, "Printing Status"				},
+diff --git a/tools/btattach.rst b/tools/btattach.rst
+index 787d5c49e..d4f3f7f0c 100644
+--- a/tools/btattach.rst
++++ b/tools/btattach.rst
+@@ -60,7 +60,7 @@ OPTIONS
+ 
+    * - qca
+ 
+--S baudrate, --speed baudrate       Specify wich baudrate to use
++-S baudrate, --speed baudrate       Specify which baudrate to use
+ 
+ -N, --noflowctl            Disable flow control
+ 
+diff --git a/tools/btmgmt.c b/tools/btmgmt.c
+index 42ef9acef..3f84659bb 100644
+--- a/tools/btmgmt.c
++++ b/tools/btmgmt.c
+@@ -5527,7 +5527,7 @@ static const struct bt_shell_menu main_menu = {
+ 	{ "ssp",		"<on/off>",
+ 		cmd_ssp,		"Toggle SSP mode"		},
+ 	{ "sc",			"<on/off/only>",
+-		cmd_sc,			"Toogle SC support"		},
++		cmd_sc,			"Toggle SC support"		},
+ 	{ "hs",			"<on/off>",
+ 		cmd_hs,			"Toggle HS support"		},
+ 	{ "le",			"<on/off>",
+@@ -5589,7 +5589,7 @@ static const struct bt_shell_menu main_menu = {
+ 	{ "ext-config",		"<on/off>",
+ 		cmd_ext_config,		"External configuration"	},
+ 	{ "debug-keys",		"<on/off>",
+-		cmd_debug_keys,		"Toogle debug keys"		},
++		cmd_debug_keys,		"Toggle debug keys"		},
+ 	{ "conn-info",		"[-t type] <remote address>",
+ 		cmd_conn_info,		"Get connection information"	},
+ 	{ "io-cap",		"<cap>",
+diff --git a/tools/btpclient.c b/tools/btpclient.c
+index bdfff5df8..f4eea093a 100644
+--- a/tools/btpclient.c
++++ b/tools/btpclient.c
+@@ -2297,7 +2297,7 @@ static void btp_gap_pair(uint8_t index, const void *param, uint16_t length,
+ 	if (!device)
+ 		goto failed;
+ 
+-	/* This command is asynchronous, send reply immediatelly to not block
++	/* This command is asynchronous, send reply immediately to not block
+ 	 * pairing process eg. passkey request.
+ 	 */
+ 	btp_send(btp, BTP_GAP_SERVICE, BTP_OP_GAP_PAIR, adapter->index, 0,
+@@ -2493,7 +2493,7 @@ static void btp_gap_confirm_entry_rsp(uint8_t index, const void *param,
+ 	} else {
+ 		reply = l_dbus_message_new_error(ag.pending_req,
+ 						"org.bluez.Error.Rejected",
+-						"Passkey missmatch");
++						"Passkey mismatch");
+ 	}
+ 
+ 	l_dbus_send_with_reply(dbus, ag.pending_req, passkey_confirm_rsp_reply,
+diff --git a/tools/ciptool.c b/tools/ciptool.c
+index 0d6272da9..4ba33f87e 100644
+--- a/tools/ciptool.c
++++ b/tools/ciptool.c
+@@ -300,7 +300,7 @@ static void cmd_release(int ctl, bdaddr_t *bdaddr, int argc, char **argv)
+ 			return;
+ 
+ 		if (cl.cnum != 1) {
+-			fprintf(stderr, "You have to specifiy the device address.\n");
++			fprintf(stderr, "You have to specify the device address.\n");
+ 			exit(1);
+ 		}
+ 
+diff --git a/tools/l2cap-tester.c b/tools/l2cap-tester.c
+index d78b1e29c..3200ed074 100644
+--- a/tools/l2cap-tester.c
++++ b/tools/l2cap-tester.c
+@@ -1908,7 +1908,7 @@ static void test_getpeername_not_connected(const void *test_data)
+ 	}
+ 
+ 	if (errno != ENOTCONN) {
+-		tester_warn("Unexpexted getpeername error: %s (%d)",
++		tester_warn("Unexpected getpeername error: %s (%d)",
+ 						strerror(errno), errno);
+ 		tester_test_failed();
+ 		goto done;
+diff --git a/tools/l2test.c b/tools/l2test.c
+index fbaca747e..fb208c0c3 100644
+--- a/tools/l2test.c
++++ b/tools/l2test.c
+@@ -901,7 +901,7 @@ static void recv_mode(int sk)
+ 			/* Check sequence */
+ 			sq = get_le32(buf);
+ 			if (seq != sq) {
+-				syslog(LOG_INFO, "seq missmatch: %d -> %d", seq, sq);
++				syslog(LOG_INFO, "seq mismatch: %d -> %d", seq, sq);
+ 				seq = sq;
+ 			}
+ 			seq++;
+@@ -909,14 +909,14 @@ static void recv_mode(int sk)
+ 			/* Check length */
+ 			l = get_le16(buf + 4);
+ 			if (len != l) {
+-				syslog(LOG_INFO, "size missmatch: %d -> %d", len, l);
++				syslog(LOG_INFO, "size mismatch: %d -> %d", len, l);
+ 				continue;
+ 			}
+ 
+ 			/* Verify data */
+ 			for (i = 6; i < len; i++) {
+ 				if (buf[i] != 0x7f)
+-					syslog(LOG_INFO, "data missmatch: byte %d 0x%2.2x", i, buf[i]);
++					syslog(LOG_INFO, "data mismatch: byte %d 0x%2.2x", i, buf[i]);
+ 			}
+ 
+ 			total += len;
+diff --git a/tools/mgmt-tester.c b/tools/mgmt-tester.c
+index 8bddf6b03..38f670324 100644
+--- a/tools/mgmt-tester.c
++++ b/tools/mgmt-tester.c
+@@ -12343,10 +12343,10 @@ int main(int argc, char *argv[])
+ 	test_bredrle50("Set PHY 2m Success", &set_phy_2m_success,
+ 					NULL, test_command_generic);
+ 
+-	test_bredrle50("Set PHY coded Succcess", &set_phy_coded_success,
++	test_bredrle50("Set PHY coded Success", &set_phy_coded_success,
+ 					NULL, test_command_generic);
+ 
+-	test_bredrle50("Set PHY 1m 2m coded Succcess", &set_phy_all_success,
++	test_bredrle50("Set PHY 1m 2m coded Success", &set_phy_all_success,
+ 					NULL, test_command_generic);
+ 
+ 	test_bredrle50("Set PHY 2m tx success", &set_phy_2m_tx_success,
+diff --git a/tools/parser/att.c b/tools/parser/att.c
+index bef583a1a..fe1165bdd 100644
+--- a/tools/parser/att.c
++++ b/tools/parser/att.c
+@@ -522,7 +522,7 @@ static void att_exec_write_req_dump(int level, struct frame *frm)
+ 	if (flags == 0x00)
+ 		printf("cancel all prepared writes ");
+ 	else
+-		printf("immediatelly write all pending prepared values ");
++		printf("immediately write all pending prepared values ");
+ 
+ 	printf("(0x%2.2x)\n", flags);
+ }
+diff --git a/tools/parser/avrcp.c b/tools/parser/avrcp.c
+index e73a6317e..1480e4eef 100644
+--- a/tools/parser/avrcp.c
++++ b/tools/parser/avrcp.c
+@@ -378,7 +378,7 @@ static const char *error2str(uint8_t status)
+ 	case AVRCP_STATUS_NOW_PLAYING_LIST_FULL:
+ 		return "Now Playing List Full";
+ 	case AVRCP_STATUS_SEARCH_NOT_SUPPORTED:
+-		return "Seach Not Supported";
++		return "Search Not Supported";
+ 	case AVRCP_STATUS_SEARCH_IN_PROGRESS:
+ 		return "Search in Progress";
+ 	case AVRCP_STATUS_INVALID_PLAYER_ID:
+@@ -1088,7 +1088,7 @@ static void avrcp_get_play_status_dump(int level, struct frame *frm,
+ 	}
+ 
+ 	interval = p_get_u32(frm);
+-	printf("SongLength: 0x%08x (%u miliseconds)\n", interval, interval);
++	printf("SongLength: 0x%08x (%u milliseconds)\n", interval, interval);
+ 
+ 	p_indent(level, frm);
+ 
+@@ -1154,7 +1154,7 @@ response:
+ 		break;
+ 	case AVRCP_EVENT_PLAYBACK_POS_CHANGED:
+ 		interval = p_get_u32(frm);
+-		printf("Position: 0x%08x (%u miliseconds)\n", interval,
++		printf("Position: 0x%08x (%u milliseconds)\n", interval,
+ 								interval);
+ 		break;
+ 	case AVRCP_EVENT_BATT_STATUS_CHANGED:
+@@ -1176,7 +1176,7 @@ response:
+ 			printf("(UNPLUGGED)\n");
+ 			break;
+ 		default:
+-			printf("(UNKOWN)\n");
++			printf("(UNKNOWN)\n");
+ 			break;
+ 		}
+ 		break;
+@@ -1562,7 +1562,7 @@ static void avrcp_passthrough_dump(int level, struct frame *frm)
+ 
+ 	len = p_get_u8(frm);
+ 
+-	printf("Lenght: 0x%02x\n", len);
++	printf("Length: 0x%02x\n", len);
+ 
+ 	raw_dump(level, frm);
+ }
+diff --git a/tools/parser/hci.c b/tools/parser/hci.c
+index db7d32c01..a0b62f915 100644
+--- a/tools/parser/hci.c
++++ b/tools/parser/hci.c
+@@ -1175,7 +1175,7 @@ static inline void qos_setup_dump(int level, struct frame *frm)
+ 	p_indent(level, frm);
+ 	printf("Token rate: %d\n", btohl(cp->qos.token_rate));
+ 	p_indent(level, frm);
+-	printf("Peak bandwith: %d\n", btohl(cp->qos.peak_bandwidth));
++	printf("Peak bandwidth/: %d\n", btohl(cp->qos.peak_bandwidth));
+ 	p_indent(level, frm);
+ 	printf("Latency: %d\n", btohl(cp->qos.latency));
+ 	p_indent(level, frm);
+@@ -3208,7 +3208,7 @@ static inline void qos_setup_complete_dump(int level, struct frame *frm)
+ 		p_indent(level, frm);
+ 		printf("Token rate: %d\n", btohl(evt->qos.token_rate));
+ 		p_indent(level, frm);
+-		printf("Peak bandwith: %d\n", btohl(evt->qos.peak_bandwidth));
++		printf("Peak bandwidth/: %d\n", btohl(evt->qos.peak_bandwidth));
+ 		p_indent(level, frm);
+ 		printf("Latency: %d\n", btohl(evt->qos.latency));
+ 		p_indent(level, frm);
+@@ -3363,7 +3363,7 @@ static inline void flow_spec_complete_dump(int level, struct frame *frm)
+ 		p_indent(level, frm);
+ 		printf("Token rate: %d\n", btohl(evt->qos.token_rate));
+ 		p_indent(level, frm);
+-		printf("Peak bandwith: %d\n", btohl(evt->qos.peak_bandwidth));
++		printf("Peak bandwidth/: %d\n", btohl(evt->qos.peak_bandwidth));
+ 		p_indent(level, frm);
+ 		printf("Latency: %d\n", btohl(evt->qos.latency));
+ 		p_indent(level, frm);
+diff --git a/tools/parser/l2cap.c b/tools/parser/l2cap.c
+index 562093ad0..8b6306ad8 100644
+--- a/tools/parser/l2cap.c
++++ b/tools/parser/l2cap.c
+@@ -291,7 +291,7 @@ static char *status2str(uint16_t status)
+ {
+ 	switch (status) {
+ 	case 0x0000:
+-		return "No futher information available";
++		return "No further information available";
+ 	case 0x0001:
+ 		return "Authentication pending";
+ 	case 0x0002:
+@@ -466,7 +466,7 @@ static char *a2mpcplstatus2str(uint8_t status)
+ 	case A2MP_STATUS_UNABLE_START_LINK_CREATION:
+ 		return "Failed - Unable to start link creation";
+ 	case A2MP_STATUS_COLLISION_OCCURED:
+-		return "Failed - Collision occured";
++		return "Failed - Collision occurred";
+ 	case A2MP_STATUS_DISCONN_REQ_RECVD:
+ 		return "Failed - Disconnect physical link received";
+ 	case A2MP_STATUS_PHYS_LINK_EXISTS:
+diff --git a/tools/parser/smp.c b/tools/parser/smp.c
+index 733795ac6..10d51de4d 100644
+--- a/tools/parser/smp.c
++++ b/tools/parser/smp.c
+@@ -107,7 +107,7 @@ static const char *smpio2str(uint8_t cap)
+ 	case SMP_IO_KEYBOARD_DISPLAY:
+ 		return "KeyboardDisplay";
+ 	default:
+-		return "Unkown";
++		return "Unknown";
+ 	}
+ }
+ 
+@@ -133,7 +133,7 @@ static const char *smpreason2str(uint8_t reason)
+ 	case SMP_REASON_REPEATED_ATTEMPTS:
+ 		return "Repeated Attempts";
+ 	default:
+-		return "Unkown";
++		return "Unknown";
+ 	}
+ }
+ 
+diff --git a/tools/rctest.c b/tools/rctest.c
+index 9eb8210d6..56e9c4f05 100644
+--- a/tools/rctest.c
++++ b/tools/rctest.c
+@@ -509,7 +509,7 @@ static void recv_mode(int sk)
+ 			/* Check sequence */
+ 			sq = btohl(*(uint32_t *) buf);
+ 			if (seq != sq) {
+-				syslog(LOG_INFO, "seq missmatch: %d -> %d", seq, sq);
++				syslog(LOG_INFO, "seq mismatch: %d -> %d", seq, sq);
+ 				seq = sq;
+ 			}
+ 			seq++;
+@@ -517,14 +517,14 @@ static void recv_mode(int sk)
+ 			/* Check length */
+ 			l = btohs(*(uint16_t *) (buf + 4));
+ 			if (r != l) {
+-				syslog(LOG_INFO, "size missmatch: %d -> %d", r, l);
++				syslog(LOG_INFO, "size mismatch: %d -> %d", r, l);
+ 				continue;
+ 			}
+ 
+ 			/* Verify data */
+ 			for (i = 6; i < r; i++) {
+ 				if (buf[i] != 0x7f)
+-					syslog(LOG_INFO, "data missmatch: byte %d 0x%2.2x", i, buf[i]);
++					syslog(LOG_INFO, "data mismatch: byte %d 0x%2.2x", i, buf[i]);
+ 			}
+ #endif
+ 			total += r;
+-- 
+2.33.1
+
