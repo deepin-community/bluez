@@ -37,7 +37,7 @@ struct mesh_node;
 #define SEGMENTED	0x80
 #define UNSEGMENTED	0x00
 #define SEG_HDR_SHIFT	31
-#define IS_SEGMENTED(hdr)	(!!((hdr) & (true << SEG_HDR_SHIFT)))
+#define IS_SEGMENTED(hdr)	(!!((hdr) & ((uint32_t) 0x1 << SEG_HDR_SHIFT)))
 
 #define KEY_ID_MASK	0x7f
 #define KEY_AID_MASK	0x3f
@@ -45,7 +45,7 @@ struct mesh_node;
 #define KEY_AID_SHIFT	0
 #define AKF_HDR_SHIFT	30
 #define KEY_HDR_SHIFT	24
-#define HAS_APP_KEY(hdr)	(!!((hdr) & (true << AKF_HDR_SHIFT)))
+#define HAS_APP_KEY(hdr)	(!!((hdr) & ((uint32_t) 0x1 << AKF_HDR_SHIFT)))
 
 #define OPCODE_MASK	0x7f
 #define OPCODE_HDR_SHIFT	24
@@ -55,8 +55,8 @@ struct mesh_node;
 #define SZMIC_HDR_SHIFT	23
 #define SEQ_ZERO_MASK	0x1fff
 #define SEQ_ZERO_HDR_SHIFT	10
-#define IS_RELAYED(hdr)	(!!((hdr) & (true << RELAY_HDR_SHIFT)))
-#define HAS_MIC64(hdr)	(!!((hdr) & (true << SZMIC_HDR_SHIFT)))
+#define IS_RELAYED(hdr)	(!!((hdr) & ((uint32_t) 0x1 << RELAY_HDR_SHIFT)))
+#define HAS_MIC64(hdr)	(!!((hdr) & ((uint32_t) 0x1 << SZMIC_HDR_SHIFT)))
 
 #define SEG_MASK	0x1f
 #define SEGO_HDR_SHIFT	5
@@ -236,8 +236,10 @@ void mesh_net_set_frnd_seq(struct mesh_net *net, bool seq);
 uint16_t mesh_net_get_address(struct mesh_net *net);
 bool mesh_net_register_unicast(struct mesh_net *net,
 					uint16_t unicast, uint8_t num_ele);
-void net_local_beacon(uint32_t net_key_id, uint8_t *beacon);
-bool mesh_net_set_beacon_mode(struct mesh_net *net, bool enable);
+void net_local_beacon(uint32_t key_id, uint32_t ivi, bool ivu, bool kr);
+bool mesh_net_set_snb_mode(struct mesh_net *net, bool enable);
+bool mesh_net_set_mpb_mode(struct mesh_net *net, bool enabla, uint8_t period,
+								bool init);
 bool mesh_net_set_proxy_mode(struct mesh_net *net, bool enable);
 bool mesh_net_set_relay_mode(struct mesh_net *net, bool enable, uint8_t cnt,
 							uint8_t interval);

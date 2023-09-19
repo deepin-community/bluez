@@ -1,6 +1,6 @@
 Source: bluez
-Maintainer: Deepin Developer <deepin-dev@deepin.org>
-Uploaders: Deepin Packages Builder <packages@deepin.org>
+Maintainer: Debian Bluetooth Maintainers <team+pkg-bluetooth@tracker.debian.org>
+Uploaders: Nobuhiro Iwamatsu <iwamatsu@debian.org>
 Section: admin
 Priority: optional
 Build-Depends: debhelper-compat (= 13),
@@ -19,10 +19,10 @@ Build-Depends: debhelper-compat (= 13),
                udev,
                check <!nocheck>,
                systemd
-Standards-Version: 4.5.1
+Standards-Version: 4.6.1
 Rules-Requires-Root: no
-#Vcs-Browser
-#Vcs-Git
+Vcs-Browser: https://salsa.debian.org/bluetooth-team/bluez
+Vcs-Git: https://salsa.debian.org/bluetooth-team/bluez.git
 Homepage: http://www.bluez.org
 
 Package: libbluetooth3
@@ -32,8 +32,6 @@ Section: libs
 Depends: ${shlibs:Depends},
          ${misc:Depends}
 Pre-Depends: ${misc:Pre-Depends}
-Conflicts: libsdp2 (<= 1.5-2)
-Replaces: libsdp2 (<= 1.5-2)
 Description: Library to use the BlueZ Linux Bluetooth stack
  BlueZ is the official Linux Bluetooth protocol stack. It is an Open Source
  project distributed under GNU General Public License (GPL).
@@ -46,11 +44,7 @@ Depends: libbluetooth3 (= ${binary:Version}),
          libc6-dev | libc-dev,
          ${misc:Depends}
 Suggests: pkg-config
-Conflicts: libbluetooth-dev,
-           libsdp2-dev (<= 1.5.2),
-           bluez-pan
 Provides: libbluetooth3-dev
-Replaces: libsdp2-dev (<= 1.5.2)
 Description: Development files for using the BlueZ Linux Bluetooth library
  BlueZ is the official Linux Bluetooth protocol stack. It is an Open Source
  project distributed under GNU General Public License (GPL).
@@ -76,19 +70,9 @@ Depends: ${shlibs:Depends},
          ${misc:Depends},
          kmod,
          udev,
-         lsb-base,
          default-dbus-system-bus | dbus-system-bus
 Pre-Depends: ${misc:Pre-Depends}
 Suggests: pulseaudio-module-bluetooth
-Breaks: udev (<< 170-1)
-Conflicts: bluez-utils (<= 3.36-3),
-           bluez-audio (<= 3.36-3)
-Replaces: bluez-input,
-          bluez-network,
-          bluez-serial,
-          bluez-utils (<= 3.36-3),
-          bluez-audio (<= 3.36-3),
-          udev (<< 170-1)
 Description: Bluetooth tools and daemons
  This package contains tools and system daemons for using Bluetooth devices.
  .
@@ -112,10 +96,6 @@ Architecture: linux-any
 Depends: ${shlibs:Depends},
          ${misc:Depends}
 Recommends: dbus-user-session
-Conflicts: obexd-server,
-           obexd-client
-Replaces: obexd-server,
-          obexd-client
 Description: bluez obex daemon
  This package contains a OBEX(OBject EXchange) daemon.
  .

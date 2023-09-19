@@ -1,0 +1,5 @@
+Name: bluez
+Repository: https://git.kernel.org/pub/scm/bluetooth/bluez.git
+Repository-Browse: https://git.kernel.org/pub/scm/bluetooth/bluez.git/
+Bug-Submit: linux-bluetooth@vger.kernel.org
+Contact: linux-bluetooth@vger.kernel.org

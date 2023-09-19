@@ -40,6 +40,7 @@
 #include "src/service.h"
 #include "src/log.h"
 #include "src/sdpd.h"
+#include "src/textfile.h"
 #include "src/shared/queue.h"
 #include "src/shared/timeout.h"
 #include "src/shared/util.h"
@@ -306,6 +307,7 @@ static int error_to_errno(struct avdtp_error *err)
 	switch (perr) {
 	case EHOSTDOWN:
 	case ECONNABORTED:
+	case EBADE:
 		return -perr;
 	default:
 		/*
@@ -829,14 +831,12 @@ static void store_remote_seps(struct a2dp_channel *chan)
 	char *data;
 	gsize length = 0;
 
-	if (queue_isempty(chan->seps))
-		return;
-
 	ba2str(device_get_address(device), dst_addr);
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/cache/%s",
+	create_filename(filename, PATH_MAX, "/%s/cache/%s",
 			btd_adapter_get_storage_dir(device_get_adapter(device)),
 			dst_addr);
+
 	key_file = g_key_file_new();
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
 		error("Unable to load key file from %s: (%s)", filename,
@@ -872,12 +872,10 @@ static void store_remote_seps(struct a2dp_channel *chan)
 static void invalidate_remote_cache(struct a2dp_setup *setup,
 						struct avdtp_error *err)
 {
-	if (err->category == AVDTP_ERRNO ||
-			err->err.error_code != AVDTP_UNSUPPORTED_CONFIGURATION)
+	if (err->category == AVDTP_ERRNO)
 		return;
 
-	/* Attempt to unregister Remote SEP if configuration
-	 * fails with Unsupported Configuration and it was
+	/* Attempt to unregister Remote SEP if configuration fails and it was
 	 * loaded from cache.
 	 */
 	if (setup->rsep && setup->rsep->from_cache) {
@@ -1008,9 +1006,10 @@ static void store_last_used(struct a2dp_channel *chan, uint8_t lseid,
 
 	ba2str(device_get_address(chan->device), dst_addr);
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/cache/%s",
+	create_filename(filename, PATH_MAX, "/%s/cache/%s",
 		btd_adapter_get_storage_dir(device_get_adapter(chan->device)),
 		dst_addr);
+
 	key_file = g_key_file_new();
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
 		error("Unable to load key file from %s: (%s)", filename,
@@ -1845,6 +1844,11 @@ static int a2dp_reconfig(struct a2dp_channel *chan, const char *sender,
 	GSList *l;
 	int err;
 
+	/* Check SEP not used by a different session */
+	if (lsep->stream && chan->session &&
+	    !avdtp_has_stream(chan->session, lsep->stream))
+		return -EBUSY;
+
 	setup = a2dp_setup_get(chan->session);
 	if (!setup)
 		return -ENOMEM;
@@ -1873,8 +1877,10 @@ static int a2dp_reconfig(struct a2dp_channel *chan, const char *sender,
 		if (tmp->stream) {
 			/* Only allow switching sep from the same sender */
 			if (strcmp(sender, tmp->endpoint->get_name(tmp,
-							tmp->user_data)))
-				return -EPERM;
+							tmp->user_data))) {
+				err = -EPERM;
+				goto fail;
+			}
 
 			/* Check if stream is for the channel */
 			if (!avdtp_has_stream(chan->session, tmp->stream))
@@ -2076,6 +2082,11 @@ static struct a2dp_remote_sep *register_remote_sep(void *data, void *user_data)
 	if (sep)
 		return sep;
 
+	if (!avdtp_get_codec(rsep)) {
+		error("Unable to get remote sep codec");
+		return NULL;
+	}
+
 	sep = new0(struct a2dp_remote_sep, 1);
 	sep->chan = chan;
 	sep->sep = rsep;
@@ -2150,6 +2161,7 @@ static void load_remote_sep(struct a2dp_channel *chan, GKeyFile *key_file,
 	struct avdtp_remote_sep *rsep;
 	uint8_t lseid, rseid;
 	char *value;
+	bool update = false;
 
 	if (!seids)
 		return;
@@ -2208,9 +2220,18 @@ static void load_remote_sep(struct a2dp_channel *chan, GKeyFile *key_file,
 		}
 
 		sep = register_remote_sep(rsep, chan);
-		if (sep)
-			sep->from_cache = true;
+		if (!sep) {
+			avdtp_unregister_remote_sep(chan->session, rsep);
+			update = true;
+			continue;
+		}
+
+		sep->from_cache = true;
 	}
+
+	/* Update cache */
+	if (update)
+		store_remote_seps(chan);
 
 	value = g_key_file_get_string(key_file, "Endpoints", "LastUsed", NULL);
 	if (!value)
@@ -2252,9 +2273,10 @@ static void load_remote_seps(struct a2dp_channel *chan)
 
 	ba2str(device_get_address(device), dst_addr);
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/cache/%s",
+	create_filename(filename, PATH_MAX, "/%s/cache/%s",
 			btd_adapter_get_storage_dir(device_get_adapter(device)),
 			dst_addr);
+
 	key_file = g_key_file_new();
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
 		error("Unable to load key file from %s: (%s)", filename,
@@ -2501,7 +2523,8 @@ static void confirm_cb(GIOChannel *io, gpointer data)
 		if (!setup || !setup->stream)
 			goto drop;
 
-		if (setup->io) {
+		if (setup->io || avdtp_stream_get_transport(setup->stream,
+						NULL, NULL, NULL, NULL)) {
 			error("transport channel already exists");
 			goto drop;
 		}
@@ -2668,8 +2691,6 @@ struct a2dp_sep *a2dp_add_sep(struct btd_adapter *adapter, uint8_t type,
 	sep->codec = codec;
 	sep->type = type;
 	sep->delay_reporting = delay_reporting;
-	sep->user_data = user_data;
-	sep->destroy = destroy;
 
 	if (type == AVDTP_SEP_TYPE_SOURCE) {
 		l = &server->sources;
@@ -2712,6 +2733,9 @@ struct a2dp_sep *a2dp_add_sep(struct btd_adapter *adapter, uint8_t type,
 
 add:
 	*l = g_slist_append(*l, sep);
+
+	sep->user_data = user_data;
+	sep->destroy = destroy;
 
 	if (err)
 		*err = 0;

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 AC_PREREQ(2.60)
-AC_INIT(bluez, 5.64)
+AC_INIT(bluez, 5.69)
 
 AM_INIT_AUTOMAKE([foreign subdir-objects color-tests silent-rules
 					tar-pax no-dist-gzip dist-xz])
@@ -32,8 +32,8 @@ AC_PROG_MKDIR_P
 m4_define([_LT_AC_TAGCONFIG], [])
 m4_ifdef([AC_LIBTOOL_TAGS], [AC_LIBTOOL_TAGS([])])
 
-AC_DISABLE_STATIC
-AC_PROG_LIBTOOL
+LT_PREREQ(2.2)
+LT_INIT([disable-static])
 
 if (test "$USE_MAINTAINER_MODE" = "yes"); then
 	AC_CHECK_PROG(enable_coverage, [lcov], [yes], [no])
@@ -85,8 +85,8 @@ if (test "${enable_threads}" = "yes"); then
 	GLIB_LIBS="$GLIB_LIBS $GTHREAD_LIBS"
 fi
 
-PKG_CHECK_MODULES(DBUS, dbus-1 >= 1.6, dummy=yes,
-				AC_MSG_ERROR(D-Bus >= 1.6 is required))
+PKG_CHECK_MODULES(DBUS, dbus-1 >= 1.10, dummy=yes,
+				AC_MSG_ERROR(D-Bus >= 1.10 is required))
 AC_SUBST(DBUS_CFLAGS)
 AC_SUBST(DBUS_LIBS)
 
@@ -95,7 +95,7 @@ AC_ARG_WITH([dbusconfdir], AS_HELP_STRING([--with-dbusconfdir=DIR],
 					[path_dbusconfdir=${withval}])
 if (test -z "${path_dbusconfdir}"); then
 	AC_MSG_CHECKING([D-Bus configuration directory])
-	path_dbusconfdir="`$PKG_CONFIG --variable=sysconfdir dbus-1`"
+	path_dbusconfdir="`$PKG_CONFIG --variable=datadir dbus-1`"
 	if (test -z "${path_dbusconfdir}"); then
 		AC_MSG_ERROR([D-Bus configuration directory is required])
 	fi
@@ -195,6 +195,26 @@ AC_ARG_ENABLE(health, AS_HELP_STRING([--enable-health],
 		[enable health profiles]), [enable_health=${enableval}])
 AM_CONDITIONAL(HEALTH, test "${enable_health}" = "yes")
 
+AC_ARG_ENABLE(bap, AS_HELP_STRING([--disable-bap],
+		[disable BAP profile]), [enable_bap=${enableval}])
+AM_CONDITIONAL(BAP, test "${enable_bap}" != "no")
+
+AC_ARG_ENABLE(bass, AS_HELP_STRING([--disable-bass],
+		[disable BASS service]), [enable_bass=${enableval}])
+AM_CONDITIONAL(BASS, test "${enable_bass}" != "no")
+
+AC_ARG_ENABLE(mcp, AS_HELP_STRING([--disable-mcp],
+        [disable MCP profile]), [enable_mcp=${enableval}])
+AM_CONDITIONAL(MCP, test "${enable_mcp}" != "no")
+
+AC_ARG_ENABLE(vcp, AS_HELP_STRING([--disable-vcp],
+		[disable VCP profile]), [enable_vcp=${enableval}])
+AM_CONDITIONAL(VCP, test "${enable_vcp}" != "no")
+
+AC_ARG_ENABLE(csip, AS_HELP_STRING([--disable-csip],
+		[disable CSIP profile]), [enable_csip=${enableval}])
+AM_CONDITIONAL(CSIP, test "${enable_csip}" != "no")
+
 AC_ARG_ENABLE(tools, AS_HELP_STRING([--disable-tools],
 		[disable Bluetooth tools]), [enable_tools=${enableval}])
 AM_CONDITIONAL(TOOLS, test "${enable_tools}" != "no")
@@ -276,6 +296,12 @@ if (test "${enable_external_ell}" = "yes"); then
 		AC_MSG_ERROR(Embedded Linux library >= 0.39 is required))
 	AC_SUBST(ELL_CFLAGS)
 	AC_SUBST(ELL_LIBS)
+fi
+if (test "${enable_external_ell}" != "yes"); then
+	if (test ! -f ${srcdir}/ell/ell.h) &&
+			(test ! -f ${srcdir}/../ell/ell/ell.h); then
+				AC_MSG_ERROR(ELL source is required or use --enable-external-ell)
+	fi
 fi
 AM_CONDITIONAL(EXTERNAL_ELL, test "${enable_external_ell}" = "yes" ||
 				(test "${enable_btpclient}" != "yes" &&

@@ -218,6 +218,4 @@ libbluetooth.so.3 libbluetooth3 #MINVER#
  str2ba@Base 4.91
  strtoba@Base 4.91
 sixaxis.so libbluetooth3 #MINVER#
- __start___debug@Base 5.46
- __stop___debug@Base 5.46
  bluetooth_plugin_desc@Base 5.20

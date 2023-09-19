@@ -502,7 +502,6 @@ static int admin_policy_adapter_probe(struct btd_adapter *adapter)
 	if (policy_data) {
 		btd_warn(policy_data->adapter_id,
 						"Policy data already exists");
-		admin_policy_free(policy_data);
 		policy_data = NULL;
 	}
 
@@ -618,13 +617,12 @@ static struct btd_adapter_driver admin_policy_driver = {
 	.resume = NULL,
 	.remove = admin_policy_remove,
 	.device_resolved = admin_policy_device_added,
-	.device_removed = admin_policy_device_removed
+	.device_removed = admin_policy_device_removed,
+	.experimental = true,
 };
 
 static int admin_init(void)
 {
-	DBG("");
-
 	dbus_conn = btd_get_dbus_connection();
 
 	return btd_register_adapter_driver(&admin_policy_driver);
@@ -632,8 +630,6 @@ static int admin_init(void)
 
 static void admin_exit(void)
 {
-	DBG("");
-
 	btd_unregister_adapter_driver(&admin_policy_driver);
 }
 

@@ -1,0 +1,44 @@
+From a97c1cc9c20ac7a97a33e999dc022caf21fd98da Mon Sep 17 00:00:00 2001
+From: xzl <xiangzelong@deepin.org>
+Date: Tue, 19 Sep 2023 16:35:02 +0800
+Subject: [PATCH 1/2] Add-custom-config-for-huawei
+
+---
+ src/bluetooth.service.in | 4 ++--
+ src/bluetoothd.sh        | 8 ++++++++
+ 2 files changed, 10 insertions(+), 2 deletions(-)
+ create mode 100644 src/bluetoothd.sh
+
+diff --git a/src/bluetooth.service.in b/src/bluetooth.service.in
+index beb98ce..f4eeaca 100644
+--- a/src/bluetooth.service.in
++++ b/src/bluetooth.service.in
+@@ -6,10 +6,10 @@ ConditionPathIsDirectory=/sys/class/bluetooth
+ [Service]
+ Type=dbus
+ BusName=org.bluez
+-ExecStart=@pkglibexecdir@/bluetoothd
++ExecStart=@pkglibexecdir@/bluetoothd.sh
+ NotifyAccess=main
+ #WatchdogSec=10
+-#Restart=on-failure
++Restart=on-failure
+ CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+ LimitNPROC=1
+ 
+diff --git a/src/bluetoothd.sh b/src/bluetoothd.sh
+new file mode 100644
+index 0000000..66d7160
+--- /dev/null
++++ b/src/bluetoothd.sh
+@@ -0,0 +1,8 @@
++#! /bin/sh
++
++if [ -d /usr/share/bluetooth ];then
++	tmp=$(cat /usr/share/bluetooth/bluetoothd.conf |grep -wi OParameter)
++	param=${tmp#*=}
++	echo $param
++fi
++/usr/libexec/bluetooth/bluetoothd $param
+-- 
+2.33.1

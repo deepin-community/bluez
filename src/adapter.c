@@ -141,6 +141,13 @@ static const struct mgmt_exp_uuid codec_offload_uuid = {
 	.str = "a6695ace-ee7f-4fb9-881a-5fac66c629af"
 };
 
+/* 6fbaf188-05e0-496a-9885-d6ddfdb4e03e */
+static const struct mgmt_exp_uuid iso_socket_uuid = {
+	.val = { 0x3e, 0xe0, 0xb4, 0xfd, 0xdd, 0xd6, 0x85, 0x98,
+		0x6a, 0x49, 0xe0, 0x05, 0x88, 0xf1, 0xba, 0x6f },
+	.str = "6fbaf188-05e0-496a-9885-d6ddfdb4e03e"
+};
+
 static DBusConnection *dbus_conn = NULL;
 
 static uint32_t kernel_features = 0;
@@ -232,6 +239,19 @@ struct btd_adapter_pin_cb_iter {
 	/* When the iterator reaches the end, it is NULL and attempt is 0 */
 };
 
+struct exp_pending {
+	struct btd_adapter *adapter;
+	unsigned int id;
+};
+
+enum {
+	ADAPTER_POWER_STATE_OFF,
+	ADAPTER_POWER_STATE_ON,
+	ADAPTER_POWER_STATE_ON_DISABLING,
+	ADAPTER_POWER_STATE_OFF_ENABLING,
+	ADAPTER_POWER_STATE_OFF_BLOCKED,
+};
+
 struct btd_adapter {
 	int ref_count;
 
@@ -245,6 +265,7 @@ struct btd_adapter {
 	char *short_name;		/* controller short name */
 	uint32_t supported_settings;	/* controller supported settings */
 	uint32_t pending_settings;	/* pending controller settings */
+	uint32_t power_state;		/* the power state */
 	uint32_t current_settings;	/* current controller settings */
 
 	char *path;			/* adapter object path */
@@ -315,8 +336,27 @@ struct btd_adapter {
 
 	bool is_default;		/* true if adapter is default one */
 
+	struct queue *exp_pending;
 	struct queue *exps;
 };
+
+static char *adapter_power_state_str(uint32_t power_state)
+{
+	switch (power_state) {
+	case ADAPTER_POWER_STATE_OFF:
+		return "off";
+	case ADAPTER_POWER_STATE_ON:
+		return "on";
+	case ADAPTER_POWER_STATE_ON_DISABLING:
+		return "on-disabling";
+	case ADAPTER_POWER_STATE_OFF_ENABLING:
+		return "off-enabling";
+	case ADAPTER_POWER_STATE_OFF_BLOCKED:
+		return "off-blocked";
+	}
+	DBG("Invalid power state %d", power_state);
+	return "";
+}
 
 typedef enum {
 	ADAPTER_AUTHORIZE_DISCONNECTED = 0,
@@ -535,9 +575,8 @@ static void store_adapter_info(struct btd_adapter *adapter)
 		g_key_file_set_string(key_file, "General", "Alias",
 							adapter->stored_alias);
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/settings",
+	create_filename(filename, PATH_MAX, "/%s/settings",
 					btd_adapter_get_storage_dir(adapter));
-
 	create_file(filename, 0600);
 
 	str = g_key_file_to_data(key_file, &length, NULL);
@@ -612,6 +651,29 @@ static void settings_changed(struct btd_adapter *adapter, uint32_t settings)
 	}
 }
 
+static void adapter_set_power_state(struct btd_adapter *adapter, uint32_t value)
+{
+	if (adapter->power_state == value)
+		return;
+
+	DBG("%s", adapter_power_state_str(value));
+	adapter->power_state = value;
+	g_dbus_emit_property_changed(dbus_conn, adapter->path,
+					ADAPTER_INTERFACE, "PowerState");
+}
+
+static void reset_power_state_target(struct btd_adapter *adapter,
+					uint32_t value)
+{
+	if (value &&
+	    adapter->power_state == ADAPTER_POWER_STATE_OFF_ENABLING) {
+		adapter_set_power_state(adapter, ADAPTER_POWER_STATE_ON);
+	} else if (!value &&
+		   adapter->power_state == ADAPTER_POWER_STATE_ON_DISABLING) {
+		adapter_set_power_state(adapter, ADAPTER_POWER_STATE_OFF);
+	}
+}
+
 static void new_settings_callback(uint16_t index, uint16_t length,
 					const void *param, void *user_data)
 {
@@ -629,19 +691,39 @@ static void new_settings_callback(uint16_t index, uint16_t length,
 	if (settings == adapter->current_settings)
 		return;
 
+	if ((adapter->current_settings ^ settings) & MGMT_SETTING_POWERED) {
+		reset_power_state_target(adapter,
+					settings & MGMT_SETTING_POWERED ?
+					0x01 : 0x00);
+	}
+
 	DBG("Settings: 0x%08x", settings);
 
 	settings_changed(adapter, settings);
 }
 
+struct set_mode_data {
+	struct btd_adapter *adapter;
+	uint32_t setting;
+	uint8_t value;
+};
+
 static void set_mode_complete(uint8_t status, uint16_t length,
 					const void *param, void *user_data)
 {
-	struct btd_adapter *adapter = user_data;
+	struct set_mode_data *data = user_data;
+	struct btd_adapter *adapter = data->adapter;
 
 	if (status != MGMT_STATUS_SUCCESS) {
 		btd_error(adapter->dev_id, "Failed to set mode: %s (0x%02x)",
 						mgmt_errstr(status), status);
+		if (status == MGMT_STATUS_RFKILLED)
+			adapter_set_power_state(adapter,
+					ADAPTER_POWER_STATE_OFF_BLOCKED);
+		adapter->pending_settings &= ~data->setting;
+		if (status != MGMT_STATUS_RFKILLED &&
+		    data->setting & MGMT_SETTING_POWERED)
+			reset_power_state_target(adapter, data->value);
 		return;
 	}
 
@@ -671,6 +753,7 @@ static bool set_mode(struct btd_adapter *adapter, uint16_t opcode,
 {
 	struct mgmt_mode cp;
 	uint32_t setting = 0;
+	struct set_mode_data *data;
 
 	memset(&cp, 0, sizeof(cp));
 	cp.val = mode;
@@ -678,6 +761,11 @@ static bool set_mode(struct btd_adapter *adapter, uint16_t opcode,
 	switch (opcode) {
 	case MGMT_OP_SET_POWERED:
 		setting = MGMT_SETTING_POWERED;
+		if (adapter->power_state != ADAPTER_POWER_STATE_OFF_BLOCKED) {
+			adapter_set_power_state(adapter, mode ?
+					ADAPTER_POWER_STATE_OFF_ENABLING :
+					ADAPTER_POWER_STATE_ON_DISABLING);
+		}
 		break;
 	case MGMT_OP_SET_CONNECTABLE:
 		setting = MGMT_SETTING_CONNECTABLE;
@@ -693,15 +781,26 @@ static bool set_mode(struct btd_adapter *adapter, uint16_t opcode,
 		break;
 	}
 
-	adapter->pending_settings |= setting;
-
 	DBG("sending set mode command for index %u", adapter->dev_id);
+
+	data = g_new0(struct set_mode_data, 1);
+	data->adapter = adapter;
+	data->setting = setting;
+	data->value = mode;
 
 	if (mgmt_send(adapter->mgmt, opcode,
 				adapter->dev_id, sizeof(cp), &cp,
-				set_mode_complete, adapter, NULL) > 0)
+				set_mode_complete, data, g_free) > 0) {
+		adapter->pending_settings |= setting;
 		return true;
-
+	}
+	g_free(data);
+	if (setting == MGMT_SETTING_POWERED) {
+		/* cancel the earlier setting */
+		adapter_set_power_state(adapter, mode ?
+					ADAPTER_POWER_STATE_OFF :
+					ADAPTER_POWER_STATE_ON);
+	}
 	btd_error(adapter->dev_id, "Failed to set mode for index %u",
 							adapter->dev_id);
 
@@ -712,6 +811,7 @@ static bool set_discoverable(struct btd_adapter *adapter, uint8_t mode,
 							uint16_t timeout)
 {
 	struct mgmt_cp_set_discoverable cp;
+	struct set_mode_data *data;
 
 	memset(&cp, 0, sizeof(cp));
 	cp.val = mode;
@@ -728,11 +828,16 @@ static bool set_discoverable(struct btd_adapter *adapter, uint8_t mode,
 									mode);
 	}
 
+	data = g_new0(struct set_mode_data, 1);
+	data->adapter = adapter;
+	data->setting = 0;
+
 	if (mgmt_send(adapter->mgmt, MGMT_OP_SET_DISCOVERABLE,
 				adapter->dev_id, sizeof(cp), &cp,
-				set_mode_complete, adapter, NULL) > 0)
+				set_mode_complete, data, g_free) > 0)
 		return true;
 
+	g_free(data);
 	btd_error(adapter->dev_id, "Failed to set mode for index %u",
 							adapter->dev_id);
 
@@ -1220,6 +1325,13 @@ int adapter_service_add(struct btd_adapter *adapter, sdp_record_t *rec)
 {
 	int ret;
 
+	/*
+	 * If the controller does not support BR/EDR operation,
+	 * there is no point in trying to add SDP records.
+	 */
+	if (btd_opts.mode == BT_MODE_LE)
+		return -ENOTSUP;
+
 	DBG("%s", adapter->path);
 
 	ret = add_record_to_server(&adapter->bdaddr, rec);
@@ -1233,10 +1345,17 @@ int adapter_service_add(struct btd_adapter *adapter, sdp_record_t *rec)
 
 void adapter_service_remove(struct btd_adapter *adapter, uint32_t handle)
 {
-	sdp_record_t *rec = sdp_record_find(handle);
+	sdp_record_t *rec;
+	/*
+	 * If the controller does not support BR/EDR operation,
+	 * there is no point in trying to remote SDP records.
+	 */
+	if (btd_opts.mode == BT_MODE_LE)
+		return;
 
 	DBG("%s", adapter->path);
 
+	rec = sdp_record_find(handle);
 	if (!rec)
 		return;
 
@@ -1342,6 +1461,39 @@ struct btd_device *btd_adapter_get_device(struct btd_adapter *adapter,
 		return device;
 
 	return adapter_create_device(adapter, addr, addr_type);
+}
+
+struct btd_device *btd_adapter_find_device_by_fd(int fd)
+{
+	bdaddr_t src, dst;
+	uint8_t dst_type;
+	GIOChannel *io = NULL;
+	GError *gerr = NULL;
+	struct btd_adapter *adapter;
+
+	io = g_io_channel_unix_new(fd);
+	if (!io)
+		return NULL;
+
+	bt_io_get(io, &gerr,
+			BT_IO_OPT_SOURCE_BDADDR, &src,
+			BT_IO_OPT_DEST_BDADDR, &dst,
+			BT_IO_OPT_DEST_TYPE, &dst_type,
+			BT_IO_OPT_INVALID);
+	if (gerr) {
+		error("bt_io_get: %s", gerr->message);
+		g_error_free(gerr);
+		g_io_channel_unref(io);
+		return NULL;
+	}
+
+	g_io_channel_unref(io);
+
+	adapter = adapter_find(&src);
+	if (!adapter)
+		return NULL;
+
+	return btd_adapter_find_device(adapter, &dst, dst_type);
 }
 
 sdp_list_t *btd_adapter_get_services(struct btd_adapter *adapter)
@@ -1979,7 +2131,7 @@ static bool set_discovery_discoverable(struct btd_adapter *adapter, bool enable)
 		return true;
 
 	/* Reset discoverable filter if already set */
-	if (enable && (adapter->current_settings & MGMT_OP_SET_DISCOVERABLE))
+	if (enable && (adapter->current_settings & MGMT_SETTING_DISCOVERABLE))
 		return true;
 
 	adapter->discovery_discoverable = enable;
@@ -2046,12 +2198,27 @@ static int merge_discovery_filters(struct btd_adapter *adapter, int *rssi,
 	bool empty_uuid = false;
 	bool has_regular_discovery = false;
 	bool has_filtered_discovery = false;
+	uint8_t adapter_scan_type = get_scan_type(adapter);
 
 	for (l = adapter->discovery_list; l != NULL; l = g_slist_next(l)) {
 		struct discovery_client *client = l->data;
 		struct discovery_filter *item = client->discovery_filter;
 
 		if (!item) {
+			has_regular_discovery = true;
+			continue;
+		}
+
+		/*
+		 * Detect empty filter with only discoverable
+		 * (which does not require a kernel filter) set.
+		 */
+		if (item->uuids == NULL &&
+		    item->pathloss == DISTANCE_VAL_INVALID &&
+		    item->rssi == DISTANCE_VAL_INVALID &&
+		    item->type == adapter_scan_type &&
+		    item->duplicate == false &&
+		    item->pattern == NULL) {
 			has_regular_discovery = true;
 			continue;
 		}
@@ -2105,7 +2272,7 @@ static int merge_discovery_filters(struct btd_adapter *adapter, int *rssi,
 		 * It there is both regular and filtered scan running, then
 		 * clear whole fitler to report all devices.
 		 */
-		*transport = get_scan_type(adapter);
+		*transport = adapter_scan_type;
 		*rssi = HCI_RSSI_INVALID;
 		g_slist_free(*uuids);
 		*uuids = NULL;
@@ -2215,7 +2382,7 @@ static int update_discovery_filter(struct btd_adapter *adapter)
 	/* Only attempt to overwrite current discoverable setting when not
 	 * discoverable.
 	 */
-	if (!(adapter->current_settings & MGMT_OP_SET_DISCOVERABLE)) {
+	if (!(adapter->current_settings & MGMT_SETTING_DISCOVERABLE)) {
 		GSList *l;
 
 		for (l = adapter->discovery_list; l; l = g_slist_next(l)) {
@@ -2857,7 +3024,9 @@ static gboolean property_get_mode(struct btd_adapter *adapter,
 
 struct property_set_data {
 	struct btd_adapter *adapter;
+	uint32_t setting;
 	GDBusPendingPropertySet id;
+	uint8_t value;
 };
 
 static void property_set_mode_complete(uint8_t status, uint16_t length,
@@ -2874,13 +3043,21 @@ static void property_set_mode_complete(uint8_t status, uint16_t length,
 		btd_error(adapter->dev_id, "Failed to set mode: %s (0x%02x)",
 						mgmt_errstr(status), status);
 
-		if (status == MGMT_STATUS_RFKILLED)
+		if (status == MGMT_STATUS_RFKILLED) {
 			dbus_err = ERROR_INTERFACE ".Blocked";
-		else
+			adapter_set_power_state(adapter,
+					ADAPTER_POWER_STATE_OFF_BLOCKED);
+		} else {
 			dbus_err = ERROR_INTERFACE ".Failed";
+		}
 
 		g_dbus_pending_property_error(data->id, dbus_err,
 							mgmt_errstr(status));
+
+		adapter->pending_settings &= ~data->setting;
+		if (status != MGMT_STATUS_RFKILLED &&
+		    data->setting & MGMT_SETTING_POWERED)
+			reset_power_state_target(adapter, data->value);
 		return;
 	}
 
@@ -2949,8 +3126,6 @@ static void property_set_mode(struct btd_adapter *adapter, uint32_t setting,
 
 	mode = (enable == TRUE) ? 0x01 : 0x00;
 
-	adapter->pending_settings |= setting;
-
 	switch (setting) {
 	case MGMT_SETTING_POWERED:
 		opcode = MGMT_OP_SET_POWERED;
@@ -3004,13 +3179,31 @@ static void property_set_mode(struct btd_adapter *adapter, uint32_t setting,
 		goto failed;
 
 	data->adapter = adapter;
+	data->setting = setting;
 	data->id = id;
+	data->setting = setting;
+	data->value = mode;
+
+	if (setting == MGMT_SETTING_POWERED &&
+	    adapter->power_state != ADAPTER_POWER_STATE_OFF_BLOCKED) {
+		adapter_set_power_state(adapter, mode ?
+					ADAPTER_POWER_STATE_OFF_ENABLING :
+					ADAPTER_POWER_STATE_ON_DISABLING);
+	}
 
 	if (mgmt_send(adapter->mgmt, opcode, adapter->dev_id, len, param,
-			property_set_mode_complete, data, g_free) > 0)
+			property_set_mode_complete, data, g_free) > 0) {
+		adapter->pending_settings |= setting;
 		return;
+	}
 
 	g_free(data);
+	if (setting == MGMT_SETTING_POWERED) {
+		/* cancel the earlier setting */
+		adapter_set_power_state(adapter, mode ?
+					ADAPTER_POWER_STATE_OFF :
+					ADAPTER_POWER_STATE_ON);
+	}
 
 failed:
 	btd_error(adapter->dev_id, "Failed to set mode for index %u",
@@ -3040,6 +3233,18 @@ static void property_set_powered(const GDBusPropertyTable *property,
 	}
 
 	property_set_mode(adapter, MGMT_SETTING_POWERED, iter, id);
+}
+
+static gboolean property_get_power_state(const GDBusPropertyTable *property,
+					DBusMessageIter *iter, void *user_data)
+{
+	struct btd_adapter *adapter = user_data;
+	const char *str;
+
+	str = adapter_power_state_str(adapter->power_state);
+	dbus_message_iter_append_basic(iter, DBUS_TYPE_STRING, &str);
+
+	return TRUE;
 }
 
 static gboolean property_get_discoverable(const GDBusPropertyTable *property,
@@ -3327,7 +3532,7 @@ static gboolean property_get_experimental(const GDBusPropertyTable *property,
 	return TRUE;
 }
 
-static gboolean property_experimental_exits(const GDBusPropertyTable *property,
+static gboolean property_experimental_exists(const GDBusPropertyTable *property,
 								void *data)
 {
 	struct btd_adapter *adapter = data;
@@ -3431,7 +3636,7 @@ static void device_connect_cb(GIOChannel *io, GError *gerr, gpointer user_data)
 
 	/* continue with service discovery and connection */
 	btd_device_set_temporary(device, false);
-	device_update_last_seen(device, data->dst_type);
+	device_update_last_seen(device, data->dst_type, true);
 
 	if (data->dst_type != BDADDR_BREDR){
 		g_io_channel_set_close_on_unref(io, FALSE);
@@ -3564,9 +3769,6 @@ static DBusMessage *connect_device(DBusConnection *conn,
 	if (!bacmp(&addr, BDADDR_ANY))
 		return btd_error_invalid_args(msg);
 
-	if (btd_adapter_find_device(adapter, &addr, addr_type))
-		return btd_error_already_exists(msg);
-
 	device_connect(adapter, &addr, addr_type, msg);
 	return NULL;
 }
@@ -3594,16 +3796,14 @@ static void add_uuid_to_uuid_set(void *data, void *user_data)
 static guint bt_uuid_hash(gconstpointer key)
 {
 	const bt_uuid_t *uuid = key;
-	bt_uuid_t uuid_128;
-	uint64_t *val;
+	uint64_t uuid_128[2];
 
 	if (!uuid)
 		return 0;
 
-	bt_uuid_to_uuid128(uuid, &uuid_128);
-	val = (uint64_t *)&uuid_128.value.u128;
+	bt_uuid_to_uuid128(uuid, (bt_uuid_t *)uuid_128);
 
-	return g_int64_hash(val) ^ g_int64_hash(val+1);
+	return g_int64_hash(uuid_128) ^ g_int64_hash(uuid_128+1);
 }
 
 static gboolean bt_uuid_equal(gconstpointer v1, gconstpointer v2)
@@ -3682,6 +3882,8 @@ static const GDBusPropertyTable adapter_properties[] = {
 	{ "Alias", "s", property_get_alias, property_set_alias },
 	{ "Class", "u", property_get_class },
 	{ "Powered", "b", property_get_powered, property_set_powered },
+	{ "PowerState", "s", property_get_power_state, NULL, NULL,
+			     G_DBUS_PROPERTY_FLAG_EXPERIMENTAL },
 	{ "Discoverable", "b", property_get_discoverable,
 					property_set_discoverable },
 	{ "DiscoverableTimeout", "u", property_get_discoverable_timeout,
@@ -3695,7 +3897,7 @@ static const GDBusPropertyTable adapter_properties[] = {
 					property_exists_modalias },
 	{ "Roles", "as", property_get_roles },
 	{ "ExperimentalFeatures", "as", property_get_experimental, NULL,
-					property_experimental_exits },
+					property_experimental_exists },
 	{ }
 };
 
@@ -3949,6 +4151,7 @@ static int generate_and_write_irk(uint8_t *irk, GKeyFile *key_file,
 
 	g_key_file_set_string(key_file, "General", "IdentityResolvingKey",
 								str_irk_out);
+	create_file(filename, S_IRUSR | S_IWUSR);
 	str = g_key_file_to_data(key_file, &length, NULL);
 	if (!g_file_set_contents(filename, str, length, &gerr)) {
 		error("Unable set contents for %s: (%s)", filename,
@@ -3968,7 +4171,7 @@ static int load_irk(struct btd_adapter *adapter, uint8_t *irk)
 	char *str_irk;
 	int ret;
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/identity",
+	create_filename(filename, PATH_MAX, "/%s/identity",
 					btd_adapter_get_storage_dir(adapter));
 
 	key_file = g_key_file_new();
@@ -4203,8 +4406,8 @@ static void load_ltks(struct btd_adapter *adapter, GSList *keys)
 		if (dev) {
 			device_set_paired(dev, info->bdaddr_type);
 			device_set_bonded(dev, info->bdaddr_type);
-			device_set_ltk_enc_size(dev, info->enc_size);
-			device_set_ltk_enc_size(dev, info->enc_size);
+			device_set_ltk(dev, info->val, info->central,
+						info->enc_size);
 		}
 	}
 
@@ -4639,8 +4842,8 @@ static void load_devices(struct btd_adapter *adapter)
 	DIR *dir;
 	struct dirent *entry;
 
-	snprintf(dirname, PATH_MAX, STORAGEDIR "/%s",
-					btd_adapter_get_storage_dir(adapter));
+	create_filename(dirname, PATH_MAX, "/%s",
+				btd_adapter_get_storage_dir(adapter));
 
 	dir = opendir(dirname);
 	if (!dir) {
@@ -4668,7 +4871,7 @@ static void load_devices(struct btd_adapter *adapter)
 		if (entry->d_type != DT_DIR || bachk(entry->d_name) < 0)
 			continue;
 
-		snprintf(filename, PATH_MAX, STORAGEDIR "/%s/%s/info",
+		create_filename(filename, PATH_MAX, "/%s/%s/info",
 					btd_adapter_get_storage_dir(adapter),
 					entry->d_name);
 
@@ -4747,6 +4950,9 @@ static void load_devices(struct btd_adapter *adapter)
 							key_file);
 		if (!device)
 			goto free;
+
+		if (irk_info)
+			device_set_rpa(device, true);
 
 		btd_device_set_temporary(device, false);
 		adapter_add_device(adapter, device);
@@ -5374,10 +5580,12 @@ void adapter_set_device_flags(struct btd_adapter *adapter,
 				mgmt_request_func_t func, void *user_data)
 {
 	struct mgmt_cp_set_device_flags cp;
+	uint32_t supported = btd_device_get_supported_flags(device);
 	const bdaddr_t *bdaddr;
 	uint8_t bdaddr_type;
 
-	if (!btd_has_kernel_features(KERNEL_CONN_CONTROL))
+	if (!btd_has_kernel_features(KERNEL_CONN_CONTROL) ||
+				(supported | flags) != supported)
 		return;
 
 	bdaddr = device_get_address(device);
@@ -5483,6 +5691,7 @@ static void adapter_start(struct btd_adapter *adapter)
 {
 	g_dbus_emit_property_changed(dbus_conn, adapter->path,
 						ADAPTER_INTERFACE, "Powered");
+	adapter_set_power_state(adapter, ADAPTER_POWER_STATE_ON);
 
 	DBG("adapter %s has been enabled", adapter->path);
 
@@ -5551,6 +5760,16 @@ static void remove_discovery_list(struct btd_adapter *adapter)
 	adapter->discovery_list = NULL;
 }
 
+static void cancel_exp_pending(void *data)
+{
+	struct exp_pending *pending = data;
+	struct btd_adapter *adapter = pending->adapter;
+
+	pending->adapter = NULL;
+	mgmt_cancel(adapter->mgmt, pending->id);
+	g_free(pending);
+}
+
 static void adapter_free(gpointer user_data)
 {
 	struct btd_adapter *adapter = user_data;
@@ -5578,6 +5797,8 @@ static void adapter_free(gpointer user_data)
 	g_queue_foreach(adapter->auths, free_service_auth, NULL);
 	g_queue_free(adapter->auths);
 	queue_destroy(adapter->exps, NULL);
+
+	queue_destroy(adapter->exp_pending, cancel_exp_pending);
 
 	/*
 	 * Unregister all handlers for this specific index since
@@ -5655,7 +5876,7 @@ static void convert_names_entry(char *key, char *value, void *user_data)
 	if (bachk(str) != 0)
 		return;
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/cache/%s", address, str);
+	create_filename(filename, PATH_MAX, "/%s/cache/%s", address, str);
 	create_file(filename, 0600);
 
 	key_file = g_key_file_new();
@@ -5880,7 +6101,7 @@ static void convert_entry(char *key, char *value, void *user_data)
 		struct stat st;
 		int err;
 
-		snprintf(filename, PATH_MAX, STORAGEDIR "/%s/%s",
+		create_filename(filename, PATH_MAX, "/%s/%s",
 				converter->address, key);
 
 		err = stat(filename, &st);
@@ -5888,7 +6109,7 @@ static void convert_entry(char *key, char *value, void *user_data)
 			return;
 	}
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/%s/info",
+	create_filename(filename, PATH_MAX, "/%s/%s/info",
 			converter->address, key);
 
 	key_file = g_key_file_new();
@@ -5924,7 +6145,7 @@ static void convert_file(char *file, char *address,
 	char filename[PATH_MAX];
 	struct device_converter converter;
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/%s", address, file);
+	create_filename(filename, PATH_MAX, "/%s/%s", address, file);
 
 	converter.address = address;
 	converter.cb = cb;
@@ -5995,7 +6216,7 @@ static void store_sdp_record(char *local, char *peer, int handle, char *value)
 	char *data;
 	gsize length = 0;
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/cache/%s", local, peer);
+	create_filename(filename, PATH_MAX, "/%s/cache/%s", local, peer);
 
 	key_file = g_key_file_new();
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
@@ -6052,7 +6273,7 @@ static void convert_sdp_entry(char *key, char *value, void *user_data)
 
 	/* Check if the device directory has been created as records should
 	 * only be converted for known devices */
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/%s", src_addr, dst_addr);
+	create_filename(filename, PATH_MAX, "/%s/%s", src_addr, dst_addr);
 
 	err = stat(filename, &st);
 	if (err || !S_ISDIR(st.st_mode))
@@ -6078,7 +6299,7 @@ static void convert_sdp_entry(char *key, char *value, void *user_data)
 	if (!gatt_parse_record(rec, &uuid, &psm, &start, &end))
 		goto failed;
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/%s/attributes", src_addr,
+	create_filename(filename, PATH_MAX, "/%s/%s/attributes", src_addr,
 								dst_addr);
 
 	key_file = g_key_file_new();
@@ -6139,8 +6360,8 @@ static void convert_primaries_entry(char *key, char *value, void *user_data)
 	sdp_uuid16_create(&uuid, GATT_PRIM_SVC_UUID);
 	prim_uuid = bt_uuid2string(&uuid);
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/%s/attributes", address,
-									key);
+	create_filename(filename, PATH_MAX, "/%s/%s/attributes", address, key);
+
 	key_file = g_key_file_new();
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
 		error("Unable to load key file from %s: (%s)", filename,
@@ -6179,7 +6400,7 @@ static void convert_primaries_entry(char *key, char *value, void *user_data)
 	g_free(data);
 	g_key_file_free(key_file);
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/%s/info", address, key);
+	create_filename(filename, PATH_MAX, "/%s/%s/info", address, key);
 
 	key_file = g_key_file_new();
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
@@ -6229,14 +6450,14 @@ static void convert_ccc_entry(char *key, char *value, void *user_data)
 
 	/* Check if the device directory has been created as records should
 	 * only be converted for known devices */
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/%s", src_addr, dst_addr);
+	create_filename(filename, PATH_MAX, "/%s/%s", src_addr, dst_addr);
 
 	err = stat(filename, &st);
 	if (err || !S_ISDIR(st.st_mode))
 		return;
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/%s/ccc", src_addr,
-								dst_addr);
+	create_filename(filename, PATH_MAX, "/%s/%s/ccc", src_addr, dst_addr);
+
 	key_file = g_key_file_new();
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
 		error("Unable to load key file from %s: (%s)", filename,
@@ -6285,14 +6506,14 @@ static void convert_gatt_entry(char *key, char *value, void *user_data)
 
 	/* Check if the device directory has been created as records should
 	 * only be converted for known devices */
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/%s", src_addr, dst_addr);
+	create_filename(filename, PATH_MAX, "/%s/%s", src_addr, dst_addr);
 
 	err = stat(filename, &st);
 	if (err || !S_ISDIR(st.st_mode))
 		return;
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/%s/gatt", src_addr,
-								dst_addr);
+	create_filename(filename, PATH_MAX, "/%s/%s/gatt", src_addr, dst_addr);
+
 	key_file = g_key_file_new();
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
 		error("Unable to load key file from %s: (%s)", filename,
@@ -6340,14 +6561,14 @@ static void convert_proximity_entry(char *key, char *value, void *user_data)
 
 	/* Check if the device directory has been created as records should
 	 * only be converted for known devices */
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/%s", src_addr, key);
+	create_filename(filename, PATH_MAX, "/%s/%s", src_addr, key);
 
 	err = stat(filename, &st);
 	if (err || !S_ISDIR(st.st_mode))
 		return;
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/%s/proximity", src_addr,
-									key);
+	create_filename(filename, PATH_MAX, "/%s/%s/proximity", src_addr, key);
+
 	key_file = g_key_file_new();
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
 		error("Unable to load key file from %s: (%s)", filename,
@@ -6379,7 +6600,7 @@ static void convert_device_storage(struct btd_adapter *adapter)
 	ba2str(&adapter->bdaddr, address);
 
 	/* Convert device's name cache */
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/names", address);
+	create_filename(filename, PATH_MAX, "/%s/names", address);
 	textfile_foreach(filename, convert_names_entry, address);
 
 	/* Convert aliases */
@@ -6395,7 +6616,7 @@ static void convert_device_storage(struct btd_adapter *adapter)
 	convert_file("profiles", address, convert_profiles_entry, TRUE);
 
 	/* Convert primaries */
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/primaries", address);
+	create_filename(filename, PATH_MAX, "/%s/primaries", address);
 	textfile_foreach(filename, convert_primaries_entry, address);
 
 	/* Convert linkkeys */
@@ -6411,22 +6632,22 @@ static void convert_device_storage(struct btd_adapter *adapter)
 	convert_file("did", address, convert_did_entry, FALSE);
 
 	/* Convert sdp */
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/sdp", address);
+	create_filename(filename, PATH_MAX, "/%s/sdp", address);
 	textfile_foreach(filename, convert_sdp_entry, address);
 
 	/* Convert ccc */
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/ccc", address);
+	create_filename(filename, PATH_MAX, "/%s/ccc", address);
 	textfile_foreach(filename, convert_ccc_entry, address);
 
 	/* Convert appearances */
 	convert_file("appearances", address, convert_appearances_entry, FALSE);
 
 	/* Convert gatt */
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/gatt", address);
+	create_filename(filename, PATH_MAX, "/%s/gatt", address);
 	textfile_foreach(filename, convert_gatt_entry, address);
 
 	/* Convert proximity */
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/proximity", address);
+	create_filename(filename, PATH_MAX, "/%s/proximity", address);
 	textfile_foreach(filename, convert_proximity_entry, address);
 }
 
@@ -6443,7 +6664,7 @@ static void convert_config(struct btd_adapter *adapter, const char *filename,
 	GError *gerr = NULL;
 
 	ba2str(&adapter->bdaddr, address);
-	snprintf(config_path, PATH_MAX, STORAGEDIR "/%s/config", address);
+	create_filename(config_path, PATH_MAX, "/%s/config", address);
 
 	if (read_pairable_timeout(address, &timeout) == 0)
 		g_key_file_set_integer(key_file, "General",
@@ -6481,7 +6702,8 @@ static void fix_storage(struct btd_adapter *adapter)
 
 	ba2str(&adapter->bdaddr, address);
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/config", address);
+	create_filename(filename, PATH_MAX, "/%s/config", address);
+
 	converted = textfile_get(filename, "converted");
 	if (!converted)
 		return;
@@ -6490,49 +6712,49 @@ static void fix_storage(struct btd_adapter *adapter)
 
 	textfile_del(filename, "converted");
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/names", address);
+	create_filename(filename, PATH_MAX, "/%s/names", address);
 	textfile_del(filename, "converted");
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/aliases", address);
+	create_filename(filename, PATH_MAX, "/%s/aliases", address);
 	textfile_del(filename, "converted");
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/trusts", address);
+	create_filename(filename, PATH_MAX, "/%s/trusts", address);
 	textfile_del(filename, "converted");
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/blocked", address);
+	create_filename(filename, PATH_MAX, "/%s/blocked", address);
 	textfile_del(filename, "converted");
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/profiles", address);
+	create_filename(filename, PATH_MAX, "/%s/profiles", address);
 	textfile_del(filename, "converted");
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/primaries", address);
+	create_filename(filename, PATH_MAX, "/%s/primaries", address);
 	textfile_del(filename, "converted");
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/linkkeys", address);
+	create_filename(filename, PATH_MAX, "/%s/linkkeys", address);
 	textfile_del(filename, "converted");
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/longtermkeys", address);
+	create_filename(filename, PATH_MAX, "/%s/longtermkeys", address);
 	textfile_del(filename, "converted");
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/classes", address);
+	create_filename(filename, PATH_MAX, "/%s/classes", address);
 	textfile_del(filename, "converted");
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/did", address);
+	create_filename(filename, PATH_MAX, "/%s/did", address);
 	textfile_del(filename, "converted");
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/sdp", address);
+	create_filename(filename, PATH_MAX, "/%s/sdp", address);
 	textfile_del(filename, "converted");
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/ccc", address);
+	create_filename(filename, PATH_MAX, "/%s/ccc", address);
 	textfile_del(filename, "converted");
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/appearances", address);
+	create_filename(filename, PATH_MAX, "/%s/appearances", address);
 	textfile_del(filename, "converted");
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/gatt", address);
+	create_filename(filename, PATH_MAX, "/%s/gatt", address);
 	textfile_del(filename, "converted");
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/proximity", address);
+	create_filename(filename, PATH_MAX, "/%s/proximity", address);
 	textfile_del(filename, "converted");
 }
 
@@ -6545,7 +6767,7 @@ static void load_config(struct btd_adapter *adapter)
 
 	key_file = g_key_file_new();
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/settings",
+	create_filename(filename, PATH_MAX, "/%s/settings",
 					btd_adapter_get_storage_dir(adapter));
 
 	if (stat(filename, &st) < 0) {
@@ -6601,6 +6823,7 @@ static void load_config(struct btd_adapter *adapter)
 static struct btd_adapter *btd_adapter_new(uint16_t index)
 {
 	struct btd_adapter *adapter;
+	int blocked;
 
 	adapter = g_try_new0(struct btd_adapter, 1);
 	if (!adapter)
@@ -6609,6 +6832,9 @@ static struct btd_adapter *btd_adapter_new(uint16_t index)
 	adapter->dev_id = index;
 	adapter->mgmt = mgmt_ref(mgmt_primary);
 	adapter->pincode_requested = false;
+	blocked = rfkill_get_blocked(index);
+	if (blocked > 0)
+		adapter->power_state = ADAPTER_POWER_STATE_OFF_BLOCKED;
 
 	/*
 	 * Setup default configuration values. These are either adapter
@@ -6634,9 +6860,13 @@ static struct btd_adapter *btd_adapter_new(uint16_t index)
 	DBG("Modalias: %s", adapter->modalias);
 	DBG("Discoverable timeout: %u seconds", adapter->discoverable_timeout);
 	DBG("Pairable timeout: %u seconds", adapter->pairable_timeout);
+	if (blocked > 0)
+		DBG("Power state: %s",
+			adapter_power_state_str(adapter->power_state));
 
 	adapter->auths = g_queue_new();
 	adapter->exps = queue_new();
+	adapter->exp_pending = queue_new();
 
 	return btd_adapter_ref(adapter);
 }
@@ -6684,6 +6914,8 @@ static void adapter_remove(struct btd_adapter *adapter)
 
 	g_slist_free(adapter->msd_callbacks);
 	adapter->msd_callbacks = NULL;
+
+	queue_remove_all(adapter->exp_pending, NULL, NULL, cancel_exp_pending);
 }
 
 const char *adapter_get_path(struct btd_adapter *adapter)
@@ -6875,12 +7107,10 @@ static bool device_is_discoverable(struct btd_adapter *adapter,
 	return discoverable;
 }
 
-void btd_adapter_update_found_device(struct btd_adapter *adapter,
+void btd_adapter_device_found(struct btd_adapter *adapter,
 					const bdaddr_t *bdaddr,
 					uint8_t bdaddr_type, int8_t rssi,
-					bool confirm, bool legacy,
-					bool not_connectable,
-					bool name_resolve_failed,
+					uint32_t flags,
 					const uint8_t *data, uint8_t data_len,
 					bool monitoring)
 {
@@ -6889,10 +7119,23 @@ void btd_adapter_update_found_device(struct btd_adapter *adapter,
 	struct eir_data eir_data;
 	bool name_known, discoverable;
 	char addr[18];
+	bool confirm;
+	bool legacy;
+	bool not_connectable;
+	bool name_resolve_failed;
+	bool scan_rsp;
 	bool duplicate = false;
 	struct queue *matched_monitors = NULL;
 
-	if (!btd_adv_monitor_offload_enabled(adapter->adv_monitor_manager)) {
+	confirm = (flags & MGMT_DEV_FOUND_CONFIRM_NAME);
+	legacy = (flags & MGMT_DEV_FOUND_LEGACY_PAIRING);
+	not_connectable = (flags & MGMT_DEV_FOUND_NOT_CONNECTABLE);
+	name_resolve_failed = (flags & MGMT_DEV_FOUND_NAME_REQUEST_FAILED);
+	scan_rsp = (flags & MGMT_DEV_FOUND_SCAN_RSP);
+
+	if (!btd_adv_monitor_offload_enabled(adapter->adv_monitor_manager) ||
+				(MGMT_VERSION(mgmt_version, mgmt_revision) <
+							MGMT_VERSION(1, 22))) {
 		if (bdaddr_type != BDADDR_BREDR)
 			ad = bt_ad_new_with_data(data_len, data);
 
@@ -6922,7 +7165,23 @@ void btd_adapter_update_found_device(struct btd_adapter *adapter,
 
 	dev = btd_adapter_find_device(adapter, bdaddr, bdaddr_type);
 	if (!dev) {
-		if (!discoverable && !monitoring) {
+		/* In case of being just a scan response don't attempt to create
+		 * the device.
+		 */
+		if (scan_rsp) {
+			eir_data_free(&eir_data);
+			return;
+		}
+
+		/* Monitor Devices advertising Broadcast Announcements if the
+		 * adapter is capable of synchronizing to it.
+		 */
+		if (eir_get_service_data(&eir_data, BCAA_SERVICE_UUID) &&
+				btd_adapter_has_settings(adapter,
+				MGMT_SETTING_ISO_SYNC_RECEIVER))
+			monitoring = true;
+
+		if (!discoverable && !monitoring && !eir_data.rsi) {
 			eir_data_free(&eir_data);
 			return;
 		}
@@ -6937,7 +7196,7 @@ void btd_adapter_update_found_device(struct btd_adapter *adapter,
 		return;
 	}
 
-	device_update_last_seen(dev, bdaddr_type);
+	device_update_last_seen(dev, bdaddr_type, !not_connectable);
 
 	/*
 	 * FIXME: We need to check for non-zero flags first because
@@ -6949,7 +7208,7 @@ void btd_adapter_update_found_device(struct btd_adapter *adapter,
 					!(eir_data.flags & EIR_BREDR_UNSUP)) {
 		device_set_bredr_support(dev);
 		/* Update last seen for BR/EDR in case its flag is set */
-		device_update_last_seen(dev, BDADDR_BREDR);
+		device_update_last_seen(dev, BDADDR_BREDR, !not_connectable);
 	}
 
 	if (eir_data.name != NULL && eir_data.name_complete)
@@ -6969,7 +7228,7 @@ void btd_adapter_update_found_device(struct btd_adapter *adapter,
 	/* If there is no matched Adv monitors, don't continue if not
 	 * discoverable or if active discovery filter don't match.
 	 */
-	if (!monitoring && (!discoverable ||
+	if (!eir_data.rsi && !monitoring && (!discoverable ||
 		(adapter->filtered_discovery && !is_filter_match(
 				adapter->discovery_list, &eir_data, rssi)))) {
 		eir_data_free(&eir_data);
@@ -7102,10 +7361,6 @@ static void device_found_callback(uint16_t index, uint16_t length,
 	const uint8_t *eir;
 	uint16_t eir_len;
 	uint32_t flags;
-	bool confirm_name;
-	bool legacy;
-	bool not_connectable;
-	bool name_resolve_failed;
 	char addr[18];
 
 	if (length < sizeof(*ev)) {
@@ -7127,22 +7382,15 @@ static void device_found_callback(uint16_t index, uint16_t length,
 	else
 		eir = ev->eir;
 
-	flags = btohl(ev->flags);
+	flags = le32_to_cpu(ev->flags);
 
 	ba2str(&ev->addr.bdaddr, addr);
 	DBG("hci%u addr %s, rssi %d flags 0x%04x eir_len %u",
 			index, addr, ev->rssi, flags, eir_len);
 
-	confirm_name = (flags & MGMT_DEV_FOUND_CONFIRM_NAME);
-	legacy = (flags & MGMT_DEV_FOUND_LEGACY_PAIRING);
-	not_connectable = (flags & MGMT_DEV_FOUND_NOT_CONNECTABLE);
-	name_resolve_failed = (flags & MGMT_DEV_FOUND_NAME_REQUEST_FAILED);
-
-	btd_adapter_update_found_device(adapter, &ev->addr.bdaddr,
-					ev->addr.type, ev->rssi, confirm_name,
-					legacy, not_connectable,
-					name_resolve_failed, eir, eir_len,
-					false);
+	btd_adapter_device_found(adapter, &ev->addr.bdaddr,
+					ev->addr.type, ev->rssi, flags,
+					eir, eir_len, false);
 }
 
 struct agent *adapter_get_agent(struct btd_adapter *adapter)
@@ -7154,6 +7402,8 @@ static void adapter_remove_connection(struct btd_adapter *adapter,
 						struct btd_device *device,
 						uint8_t bdaddr_type)
 {
+	bool remove_device = false;
+
 	DBG("");
 
 	if (!g_slist_find(adapter->connections, device)) {
@@ -7161,7 +7411,7 @@ static void adapter_remove_connection(struct btd_adapter *adapter,
 		return;
 	}
 
-	device_remove_connection(device, bdaddr_type);
+	device_remove_connection(device, bdaddr_type, &remove_device);
 
 	if (device_is_authenticating(device))
 		device_cancel_authentication(device, TRUE);
@@ -7171,6 +7421,13 @@ static void adapter_remove_connection(struct btd_adapter *adapter,
 		return;
 
 	adapter->connections = g_slist_remove(adapter->connections, device);
+
+	if (remove_device) {
+		const char *path = device_get_path(device);
+
+		DBG("Removing temporary device %s", path);
+		btd_adapter_remove_device(adapter, device);
+	}
 }
 
 static void adapter_stop(struct btd_adapter *adapter)
@@ -7214,12 +7471,21 @@ static void adapter_stop(struct btd_adapter *adapter)
 
 	g_dbus_emit_property_changed(dbus_conn, adapter->path,
 						ADAPTER_INTERFACE, "Powered");
+	g_dbus_emit_property_changed(dbus_conn, adapter->path,
+						ADAPTER_INTERFACE,
+						"PowerState");
 
 	DBG("adapter %s has been disabled", adapter->path);
 }
 
 int btd_register_adapter_driver(struct btd_adapter_driver *driver)
 {
+	if (driver->experimental && !(g_dbus_get_flags() &
+					G_DBUS_FLAG_ENABLE_EXPERIMENTAL)) {
+		DBG("D-Bus experimental not enabled");
+		return -ENOTSUP;
+	}
+
 	adapter_drivers = g_slist_append(adapter_drivers, driver);
 
 	if (driver->probe == NULL)
@@ -7301,7 +7567,7 @@ static gboolean process_auth_queue(gpointer user_data)
 			goto next;
 		}
 
-		if (device_is_trusted(device) == TRUE) {
+		if (btd_device_is_trusted(device) == TRUE) {
 			auth->cb(NULL, auth->user_data);
 			goto next;
 		}
@@ -7490,11 +7756,28 @@ int btd_cancel_authorization(guint id)
 
 int btd_adapter_restore_powered(struct btd_adapter *adapter)
 {
-	if (btd_adapter_get_powered(adapter))
+	bool powered;
+
+	powered = btd_adapter_get_powered(adapter);
+	if (adapter->power_state == ADAPTER_POWER_STATE_OFF_BLOCKED &&
+	    rfkill_get_blocked(adapter->dev_id) == 0) {
+		adapter_set_power_state(adapter,
+					powered ?
+					ADAPTER_POWER_STATE_ON :
+					ADAPTER_POWER_STATE_OFF);
+	}
+
+	if (powered)
 		return 0;
 
 	set_mode(adapter, MGMT_OP_SET_POWERED, 0x01);
 
+	return 0;
+}
+
+int btd_adapter_set_blocked(struct btd_adapter *adapter)
+{
+	adapter_set_power_state(adapter, ADAPTER_POWER_STATE_OFF_BLOCKED);
 	return 0;
 }
 
@@ -8212,7 +8495,7 @@ static void store_link_key(struct btd_adapter *adapter,
 
 	ba2str(device_get_address(device), device_addr);
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/%s/info",
+	create_filename(filename, PATH_MAX, "/%s/%s/info",
 			btd_adapter_get_storage_dir(adapter), device_addr);
 	create_file(filename, 0600);
 
@@ -8307,7 +8590,7 @@ static void store_ltk_group(struct btd_adapter *adapter, const bdaddr_t *peer,
 
 	ba2str(peer, device_addr);
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/%s/info",
+	create_filename(filename, PATH_MAX, "/%s/%s/info",
 			btd_adapter_get_storage_dir(adapter), device_addr);
 	key_file = g_key_file_new();
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
@@ -8428,7 +8711,7 @@ static void new_long_term_key_callback(uint16_t index, uint16_t length,
 		device_set_bonded(device, addr->type);
 	}
 
-	device_set_ltk_enc_size(device, ev->key.enc_size);
+	device_set_ltk(device, ev->key.val, ev->key.central, ev->key.enc_size);
 
 	bonding_complete(adapter, &addr->bdaddr, addr->type, 0);
 }
@@ -8472,7 +8755,7 @@ static void store_csrk(struct btd_adapter *adapter, const bdaddr_t *peer,
 
 	ba2str(peer, device_addr);
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/%s/info",
+	create_filename(filename, PATH_MAX, "/%s/%s/info",
 			btd_adapter_get_storage_dir(adapter), device_addr);
 
 	key_file = g_key_file_new();
@@ -8552,7 +8835,7 @@ static void store_irk(struct btd_adapter *adapter, const bdaddr_t *peer,
 
 	ba2str(peer, device_addr);
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/%s/info",
+	create_filename(filename, PATH_MAX, "/%s/%s/info",
 			btd_adapter_get_storage_dir(adapter), device_addr);
 	create_file(filename, 0600);
 
@@ -8651,7 +8934,7 @@ static void store_conn_param(struct btd_adapter *adapter, const bdaddr_t *peer,
 
 	DBG("");
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/%s/info",
+	create_filename(filename, PATH_MAX, "/%s/%s/info",
 			btd_adapter_get_storage_dir(adapter), device_addr);
 	key_file = g_key_file_new();
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
@@ -9310,8 +9593,9 @@ static void remove_keys(struct btd_adapter *adapter,
 
 	ba2str(device_get_address(device), device_addr);
 
-	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/%s/info",
+	create_filename(filename, PATH_MAX, "/%s/%s/info",
 			btd_adapter_get_storage_dir(adapter), device_addr);
+
 	key_file = g_key_file_new();
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
 		error("Unable to load key file from %s: (%s)", filename,
@@ -9405,6 +9689,7 @@ static bool get_static_addr(struct btd_adapter *adapter)
 	struct bt_crypto *crypto;
 	GKeyFile *file;
 	GError *gerr = NULL;
+	char filename[PATH_MAX];
 	char **addrs;
 	char mfg[7];
 	char *str;
@@ -9413,11 +9698,12 @@ static bool get_static_addr(struct btd_adapter *adapter)
 
 	snprintf(mfg, sizeof(mfg), "0x%04x", adapter->manufacturer);
 
+	create_filename(filename, PATH_MAX, "/addresses");
+
 	file = g_key_file_new();
-	if (!g_key_file_load_from_file(file, STORAGEDIR "/addresses", 0,
-								&gerr)) {
+	if (!g_key_file_load_from_file(file, filename, 0, &gerr)) {
 		error("Unable to load key file from %s: (%s)",
-					STORAGEDIR "/addresses", gerr->message);
+					filename, gerr->message);
 		g_clear_error(&gerr);
 	}
 	addrs = g_key_file_get_string_list(file, "Static", mfg, &len, NULL);
@@ -9473,9 +9759,9 @@ static bool get_static_addr(struct btd_adapter *adapter)
 						(const char **)addrs, len);
 
 	str = g_key_file_to_data(file, &len, NULL);
-	if (!g_file_set_contents(STORAGEDIR "/addresses", str, len, &gerr)) {
+	if (!g_file_set_contents(filename, str, len, &gerr)) {
 		error("Unable set contents for %s: (%s)",
-					STORAGEDIR "/addresses", gerr->message);
+					filename, gerr->message);
 		g_error_free(gerr);
 	}
 	g_free(str);
@@ -9552,17 +9838,46 @@ static bool set_blocked_keys(struct btd_adapter *adapter)
 						adapter, NULL);
 }
 
-#define EXP_FEAT(_uuid, _func) \
+#define EXP_FEAT(_flag, _uuid, _func) \
 { \
+	.flag = _flag, \
 	.uuid = _uuid, \
 	.func = _func, \
+}
+
+static void exp_complete(void *user_data);
+
+static bool exp_mgmt_send(struct btd_adapter *adapter, uint16_t opcode,
+			uint16_t index, uint16_t length, const void *param,
+			mgmt_request_func_t callback)
+{
+	struct exp_pending *pending;
+
+	pending = g_new0(struct exp_pending, 1);
+	pending->adapter = adapter;
+
+	if (!queue_push_tail(adapter->exp_pending, pending)) {
+		g_free(pending);
+		return false;
+	}
+
+	pending->id = mgmt_send(adapter->mgmt, opcode, index, length, param,
+					callback, pending, exp_complete);
+	if (!pending->id) {
+		queue_remove(adapter->exp_pending, pending);
+		g_free(pending);
+		return false;
+	}
+
+	return true;
 }
 
 static void set_exp_debug_complete(uint8_t status, uint16_t len,
 					const void *param, void *user_data)
 {
-	struct btd_adapter *adapter = user_data;
-	uint8_t action = btd_opts.experimental ? 0x01 : 0x00;
+	struct exp_pending *pending = user_data;
+	struct btd_adapter *adapter = pending->adapter;
+	uint8_t action;
 
 	if (status != 0) {
 		error("Set Experimental Debug failed with status 0x%02x (%s)",
@@ -9570,7 +9885,9 @@ static void set_exp_debug_complete(uint8_t status, uint16_t len,
 		return;
 	}
 
-	DBG("Experimental Debug successfully set");
+	action = btd_kernel_experimental_enabled(debug_uuid.str);
+
+	DBG("Experimental Debug successfully %s", action ? "set" : "reset");
 
 	if (action)
 		queue_push_tail(adapter->exps, (void *)debug_uuid.val);
@@ -9584,9 +9901,9 @@ static void exp_debug_func(struct btd_adapter *adapter, uint8_t action)
 	memcpy(cp.uuid, debug_uuid.val, 16);
 	cp.action = action;
 
-	if (mgmt_send(adapter->mgmt, MGMT_OP_SET_EXP_FEATURE,
+	if (exp_mgmt_send(adapter, MGMT_OP_SET_EXP_FEATURE,
 			adapter->dev_id, sizeof(cp), &cp,
-			set_exp_debug_complete, adapter, NULL) > 0)
+			set_exp_debug_complete))
 		return;
 
 	btd_error(adapter->dev_id, "Failed to set exp debug");
@@ -9609,8 +9926,9 @@ static void quality_report_func(struct btd_adapter *adapter, uint8_t action)
 static void set_rpa_resolution_complete(uint8_t status, uint16_t len,
 					const void *param, void *user_data)
 {
-	struct btd_adapter *adapter = user_data;
-	uint8_t action = btd_opts.experimental ? 0x01 : 0x00;
+	struct exp_pending *pending = user_data;
+	struct btd_adapter *adapter = pending->adapter;
+	uint8_t action;
 
 	if (status != 0) {
 		error("Set RPA Resolution failed with status 0x%02x (%s)",
@@ -9618,7 +9936,9 @@ static void set_rpa_resolution_complete(uint8_t status, uint16_t len,
 		return;
 	}
 
-	DBG("RPA Resolution successfully set");
+	action = btd_kernel_experimental_enabled(rpa_resolution_uuid.str);
+
+	DBG("RPA Resolution successfully %s", action ? "set" : "reset");
 
 	if (action)
 		queue_push_tail(adapter->exps, (void *)rpa_resolution_uuid.val);
@@ -9632,9 +9952,9 @@ static void rpa_resolution_func(struct btd_adapter *adapter, uint8_t action)
 	memcpy(cp.uuid, rpa_resolution_uuid.val, 16);
 	cp.action = action;
 
-	if (mgmt_send(adapter->mgmt, MGMT_OP_SET_EXP_FEATURE,
+	if (exp_mgmt_send(adapter, MGMT_OP_SET_EXP_FEATURE,
 			adapter->dev_id, sizeof(cp), &cp,
-			set_rpa_resolution_complete, adapter, NULL) > 0)
+			set_rpa_resolution_complete))
 		return;
 
 	btd_error(adapter->dev_id, "Failed to set RPA Resolution");
@@ -9643,8 +9963,9 @@ static void rpa_resolution_func(struct btd_adapter *adapter, uint8_t action)
 static void codec_offload_complete(uint8_t status, uint16_t len,
 					const void *param, void *user_data)
 {
-	struct btd_adapter *adapter = user_data;
-	uint8_t action = btd_opts.experimental ? 0x01 : 0x00;
+	struct exp_pending *pending = user_data;
+	struct btd_adapter *adapter = pending->adapter;
+	uint8_t action;
 
 	if (status != 0) {
 		error("Set Codec Offload failed with status 0x%02x (%s)",
@@ -9652,7 +9973,9 @@ static void codec_offload_complete(uint8_t status, uint16_t len,
 		return;
 	}
 
-	DBG("Codec Offload successfully set");
+	action = btd_kernel_experimental_enabled(codec_offload_uuid.str);
+
+	DBG("Codec Offload successfully %s", action ? "set" : "reset");
 
 	if (action)
 		queue_push_tail(adapter->exps, (void *)codec_offload_uuid.val);
@@ -9666,30 +9989,72 @@ static void codec_offload_func(struct btd_adapter *adapter, uint8_t action)
 	memcpy(cp.uuid, codec_offload_uuid.val, 16);
 	cp.action = action;
 
-	if (mgmt_send(adapter->mgmt, MGMT_OP_SET_EXP_FEATURE,
+	if (exp_mgmt_send(adapter, MGMT_OP_SET_EXP_FEATURE,
 			adapter->dev_id, sizeof(cp), &cp,
-			codec_offload_complete, adapter, NULL) > 0)
+			codec_offload_complete))
 		return;
 
 	btd_error(adapter->dev_id, "Failed to set Codec Offload");
 }
 
+static void iso_socket_complete(uint8_t status, uint16_t len,
+				const void *param, void *user_data)
+{
+	struct exp_pending *pending = user_data;
+	struct btd_adapter *adapter = pending->adapter;
+	uint8_t action;
+
+	if (status != 0) {
+		error("Set ISO Socket failed with status 0x%02x (%s)",
+						status, mgmt_errstr(status));
+		return;
+	}
+
+	action = btd_kernel_experimental_enabled(iso_socket_uuid.str);
+
+	DBG("ISO Socket successfully %s", action ? "set" : "reset");
+
+	if (action)
+		queue_push_tail(adapter->exps, (void *)iso_socket_uuid.val);
+}
+
+static void iso_socket_func(struct btd_adapter *adapter, uint8_t action)
+{
+	struct mgmt_cp_set_exp_feature cp;
+
+	memset(&cp, 0, sizeof(cp));
+	memcpy(cp.uuid, iso_socket_uuid.val, 16);
+	cp.action = action;
+
+	if (exp_mgmt_send(adapter, MGMT_OP_SET_EXP_FEATURE,
+			MGMT_INDEX_NONE, sizeof(cp), &cp,
+			iso_socket_complete))
+		return;
+
+	btd_error(adapter->dev_id, "Failed to set ISO Socket");
+}
+
 static const struct exp_feat {
+	uint32_t flag;
 	const struct mgmt_exp_uuid *uuid;
 	void (*func)(struct btd_adapter *adapter, uint8_t action);
 } exp_table[] = {
-	EXP_FEAT(&debug_uuid, exp_debug_func),
-	EXP_FEAT(&le_simult_central_peripheral_uuid,
+	EXP_FEAT(EXP_FEAT_DEBUG, &debug_uuid, exp_debug_func),
+	EXP_FEAT(EXP_FEAT_LE_SIMULT_ROLES, &le_simult_central_peripheral_uuid,
 		 le_simult_central_peripheral_func),
-	EXP_FEAT(&quality_report_uuid, quality_report_func),
-	EXP_FEAT(&rpa_resolution_uuid, rpa_resolution_func),
-	EXP_FEAT(&codec_offload_uuid, codec_offload_func),
+	EXP_FEAT(EXP_FEAT_BQR, &quality_report_uuid, quality_report_func),
+	EXP_FEAT(EXP_FEAT_RPA_RESOLUTION, &rpa_resolution_uuid,
+		rpa_resolution_func),
+	EXP_FEAT(EXP_FEAT_CODEC_OFFLOAD, &codec_offload_uuid,
+		codec_offload_func),
+	EXP_FEAT(EXP_FEAT_ISO_SOCKET, &iso_socket_uuid, iso_socket_func),
 };
 
 static void read_exp_features_complete(uint8_t status, uint16_t length,
 					const void *param, void *user_data)
 {
-	struct btd_adapter *adapter = user_data;
+	struct exp_pending *pending = user_data;
+	struct btd_adapter *adapter = pending->adapter;
 	const struct mgmt_rp_read_exp_features_info *rp = param;
 	size_t feature_count = 0;
 	size_t i = 0;
@@ -9720,20 +10085,22 @@ static void read_exp_features_complete(uint8_t status, uint16_t length,
 
 		for (j = 0; j < ARRAY_SIZE(exp_table); j++) {
 			const struct exp_feat *feat = &exp_table[j];
+			const char *str;
 			uint8_t action;
 
 			if (memcmp(rp->features[i].uuid, feat->uuid->val,
 					sizeof(rp->features[i].uuid)))
 				continue;
 
-			action = btd_experimental_enabled(feat->uuid->str);
+			str = feat->uuid->str;
+			action = btd_kernel_experimental_enabled(str);
 
-			DBG("%s flags %u action %u", feat->uuid->str,
-				rp->features[i].flags, action);
+			DBG("%s flags %u action %u", str,
+					rp->features[i].flags, action);
 
 			/* If already set don't attempt to set it again */
 			if (action == (rp->features[i].flags & BIT(0))) {
-				if (action)
+				if (action & BIT(0))
 					queue_push_tail(adapter->exps,
 						(void *)feat->uuid->val);
 				continue;
@@ -9747,9 +10114,8 @@ static void read_exp_features_complete(uint8_t status, uint16_t length,
 
 static void read_exp_features(struct btd_adapter *adapter)
 {
-	if (mgmt_send(adapter->mgmt, MGMT_OP_READ_EXP_FEATURES_INFO,
-			adapter->dev_id, 0, NULL, read_exp_features_complete,
-			adapter, NULL) > 0)
+	if (exp_mgmt_send(adapter, MGMT_OP_READ_EXP_FEATURES_INFO,
+			adapter->dev_id, 0, NULL, read_exp_features_complete))
 		return;
 
 	btd_error(adapter->dev_id, "Failed to read exp features info");
@@ -9865,7 +10231,8 @@ static void read_info_complete(uint8_t status, uint16_t length,
 	}
 
 	if (missing_settings & MGMT_SETTING_SECURE_CONN)
-		set_mode(adapter, MGMT_OP_SET_SECURE_CONN, 0x01);
+		set_mode(adapter, MGMT_OP_SET_SECURE_CONN,
+					btd_opts.secure_conn);
 
 	if (adapter->supported_settings & MGMT_SETTING_PRIVACY)
 		set_privacy(adapter, btd_opts.privacy);
@@ -10074,6 +10441,43 @@ static void reset_adv_monitors(uint16_t index)
 	error("Failed to reset Adv Monitors");
 }
 
+static void read_info(struct btd_adapter *adapter)
+{
+	DBG("sending read info command for index %u", adapter->dev_id);
+
+	if (mgmt_send(mgmt_primary, MGMT_OP_READ_INFO, adapter->dev_id, 0, NULL,
+					read_info_complete, adapter, NULL) > 0)
+		return;
+
+	btd_error(adapter->dev_id,
+			"Failed to read controller info for index %u",
+			adapter->dev_id);
+
+	adapter_list = g_list_remove(adapter_list, adapter);
+
+	btd_adapter_unref(adapter);
+}
+
+static void exp_complete(void *user_data)
+{
+	struct exp_pending *pending = user_data;
+	struct btd_adapter *adapter = pending->adapter;
+
+	if (!adapter)
+		return;  /* canceled */
+
+	queue_remove(adapter->exp_pending, pending);
+	g_free(pending);
+
+	if (queue_isempty(adapter->exp_pending)) {
+		read_info(adapter);
+		return;
+	}
+
+	DBG("index %u has %u pending MGMT EXP requests", adapter->dev_id,
+					queue_length(adapter->exp_pending));
+}
+
 static void index_added(uint16_t index, uint16_t length, const void *param,
 							void *user_data)
 {
@@ -10120,18 +10524,8 @@ static void index_added(uint16_t index, uint16_t length, const void *param,
 	 */
 	adapter_list = g_list_append(adapter_list, adapter);
 
-	DBG("sending read info command for index %u", index);
-
-	if (mgmt_send(mgmt_primary, MGMT_OP_READ_INFO, index, 0, NULL,
-					read_info_complete, adapter, NULL) > 0)
-		return;
-
-	btd_error(adapter->dev_id,
-			"Failed to read controller info for index %u", index);
-
-	adapter_list = g_list_remove(adapter_list, adapter);
-
-	btd_adapter_unref(adapter);
+	if (queue_isempty(adapter->exp_pending))
+		read_info(adapter);
 }
 
 static void index_removed(uint16_t index, uint16_t length, const void *param,
@@ -10327,9 +10721,7 @@ static void read_version_complete(uint8_t status, uint16_t length,
 
 static void mgmt_debug(const char *str, void *user_data)
 {
-	const char *prefix = user_data;
-
-	info("%s%s", prefix, str);
+	DBG_IDX(0xffff, "%s", str);
 }
 
 int adapter_init(void)
@@ -10342,8 +10734,7 @@ int adapter_init(void)
 		return -EIO;
 	}
 
-	if (getenv("MGMT_DEBUG"))
-		mgmt_set_debug(mgmt_primary, mgmt_debug, "mgmt: ", NULL);
+	mgmt_set_debug(mgmt_primary, mgmt_debug, NULL, NULL);
 
 	DBG("sending read version command");
 
@@ -10433,7 +10824,30 @@ bool btd_le_connect_before_pairing(void)
 	return false;
 }
 
+bool btd_adapter_has_settings(struct btd_adapter *adapter, uint32_t settings)
+{
+	if (!adapter)
+		return false;
+
+	return (adapter->current_settings & settings) ? true : false;
+}
+
 bool btd_has_kernel_features(uint32_t features)
 {
 	return (kernel_features & features) ? true : false;
+}
+
+bool btd_adapter_has_exp_feature(struct btd_adapter *adapter, uint32_t feature)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(exp_table); i++) {
+		const struct exp_feat *feat = &exp_table[i];
+
+		if ((feat->flag & feature) && queue_find(adapter->exps, NULL,
+							feat->uuid->val))
+			return true;
+	}
+
+	return false;
 }

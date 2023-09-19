@@ -1,6 +1,6 @@
-From 7b9990be13f483bb2daa03d1a350f95bf9aa819f Mon Sep 17 00:00:00 2001
+From b217d211de1e529659255f50e2388e1b2d95db3a Mon Sep 17 00:00:00 2001
 From: Nobuhiro Iwamatsu <iwamatsu@debian.org>
-Date: Tue, 14 Dec 2021 15:18:02 +0900
+Date: Mon, 28 Aug 2023 09:25:33 +0900
 Subject: [PATCH] Fix typo
 
 This commit fixes following typo:
@@ -32,14 +32,19 @@ This commit fixes following typo:
   Unexpexted -> Unexpected
   Supressing -> Suppressing
   wich -> which
+  Falg -> Flag
+  preffered -> preferred
 
 Signed-off-by: Nobuhiro Iwamatsu <iwamatsu@debian.org>
 ---
  android/tester-main.c      |  6 +++---
  attrib/att.c               |  2 +-
+ client/mgmt.c              |  4 ++--
  emulator/btdev.c           |  2 +-
  lib/bluetooth.c            |  2 +-
+ lib/hci.h                  | 10 +++++-----
  mesh/net.c                 |  2 +-
+ monitor/att.c              |  8 ++++----
  monitor/avctp.c            |  6 +++---
  monitor/ll.c               |  2 +-
  obexd/plugins/bluetooth.c  |  2 +-
@@ -52,24 +57,24 @@ Signed-off-by: Nobuhiro Iwamatsu <iwamatsu@debian.org>
  profiles/midi/midi.c       |  2 +-
  src/adapter.c              | 10 +++++-----
  src/profile.c              |  4 ++--
+ src/shared/bap.c           |  4 ++--
  src/shared/util.c          |  2 +-
  tools/btattach.rst         |  2 +-
- tools/btmgmt.c             |  4 ++--
  tools/btpclient.c          |  4 ++--
  tools/ciptool.c            |  2 +-
  tools/l2cap-tester.c       |  2 +-
  tools/l2test.c             |  6 +++---
- tools/mgmt-tester.c        |  4 ++--
+ tools/mgmt-tester.c        |  2 +-
  tools/parser/att.c         |  2 +-
  tools/parser/avrcp.c       | 10 +++++-----
  tools/parser/hci.c         |  6 +++---
  tools/parser/l2cap.c       |  4 ++--
  tools/parser/smp.c         |  4 ++--
  tools/rctest.c             |  6 +++---
- 31 files changed, 56 insertions(+), 56 deletions(-)
+ 34 files changed, 66 insertions(+), 66 deletions(-)
 
 diff --git a/android/tester-main.c b/android/tester-main.c
-index ff5ecdf83..8fe4e09c4 100644
+index 317c1de06..f9503a294 100644
 --- a/android/tester-main.c
 +++ b/android/tester-main.c
 @@ -497,20 +497,20 @@ static bool match_mas_inst(btmce_mas_instance_t *exp_inst,
@@ -109,11 +114,33 @@ index fa53c90aa..bf98fe2d8 100644
  	case ATT_ECODE_ABORTED:
  		return "The operation was aborted";
  	default:
+diff --git a/client/mgmt.c b/client/mgmt.c
+index c056d018a..96992baea 100644
+--- a/client/mgmt.c
++++ b/client/mgmt.c
+@@ -5876,7 +5876,7 @@ static const struct bt_shell_menu mgmt_menu = {
+ 	{ "ssp",		"<on/off>",
+ 		cmd_ssp,		"Toggle SSP mode"		},
+ 	{ "sc",			"<on/off/only>",
+-		cmd_sc,			"Toogle SC support"		},
++		cmd_sc,			"Toggle SC support"		},
+ 	{ "hs",			"<on/off>",
+ 		cmd_hs,			"Toggle HS support"		},
+ 	{ "le",			"<on/off>",
+@@ -5938,7 +5938,7 @@ static const struct bt_shell_menu mgmt_menu = {
+ 	{ "ext-config",		"<on/off>",
+ 		cmd_ext_config,		"External configuration"	},
+ 	{ "debug-keys",		"<on/off>",
+-		cmd_debug_keys,		"Toogle debug keys"		},
++		cmd_debug_keys,		"Toggle debug keys"		},
+ 	{ "conn-info",		"[-t type] <remote address>",
+ 		cmd_conn_info,		"Get connection information"	},
+ 	{ "io-cap",		"<cap>",
 diff --git a/emulator/btdev.c b/emulator/btdev.c
-index 148e32b7d..735c84ad7 100644
+index 58414bd74..fb2d4620d 100644
 --- a/emulator/btdev.c
 +++ b/emulator/btdev.c
-@@ -219,7 +219,7 @@ struct inquiry_data {
+@@ -249,7 +249,7 @@ struct inquiry_data {
  	int iter;
  };
  
@@ -135,21 +162,82 @@ index 84e40c819..ccfd0254c 100644
  	case 423:
  		return "ENERGOUS CORPORATION";
  	case 424:
+diff --git a/lib/hci.h b/lib/hci.h
+index 50f385c1e..30ac1e216 100644
+--- a/lib/hci.h
++++ b/lib/hci.h
+@@ -473,8 +473,8 @@ typedef struct {
+ #define OCF_SETUP_SYNC_CONN		0x0028
+ typedef struct {
+ 	uint16_t	handle;
+-	uint32_t	tx_bandwith;
+-	uint32_t	rx_bandwith;
++	uint32_t	tx_bandwidth;
++	uint32_t	rx_bandwidth;
+ 	uint16_t	max_latency;
+ 	uint16_t	voice_setting;
+ 	uint8_t		retrans_effort;
+@@ -485,8 +485,8 @@ typedef struct {
+ #define OCF_ACCEPT_SYNC_CONN_REQ	0x0029
+ typedef struct {
+ 	bdaddr_t	bdaddr;
+-	uint32_t	tx_bandwith;
+-	uint32_t	rx_bandwith;
++	uint32_t	tx_bandwidth;
++	uint32_t	rx_bandwidth;
+ 	uint16_t	max_latency;
+ 	uint16_t	voice_setting;
+ 	uint8_t		retrans_effort;
+@@ -1864,7 +1864,7 @@ typedef struct {
+ #define EVT_FLUSH_OCCURRED		0x11
+ typedef struct {
+ 	uint16_t	handle;
+-} __attribute__ ((packed)) evt_flush_occured;
++} __attribute__ ((packed)) evt_flush_occurred;
+ #define EVT_FLUSH_OCCURRED_SIZE 2
+ 
+ #define EVT_ROLE_CHANGE			0x12
 diff --git a/mesh/net.c b/mesh/net.c
-index aa220f762..9643d390d 100644
+index 05ca48326..be5bc1152 100644
 --- a/mesh/net.c
 +++ b/mesh/net.c
-@@ -1029,7 +1029,7 @@ static bool msg_in_cache(struct mesh_net *net, uint16_t src, uint32_t seq,
- 	msg = l_queue_remove_if(net->msg_cache, match_cache, &tst);
+@@ -1058,7 +1058,7 @@ static bool msg_in_cache(struct mesh_net *net, uint16_t src, uint32_t seq,
+ 	msg = l_queue_find(net->msg_cache, match_cache, &tst);
  
  	if (msg) {
 -		l_debug("Supressing duplicate %4.4x + %6.6x + %8.8x",
 +		l_debug("Suppressing duplicate %4.4x + %6.6x + %8.8x",
  							src, seq, mic);
- 		l_queue_push_head(net->msg_cache, msg);
  		return true;
+ 	}
+diff --git a/monitor/att.c b/monitor/att.c
+index 0e12ee352..80ba93cbc 100644
+--- a/monitor/att.c
++++ b/monitor/att.c
+@@ -1049,9 +1049,9 @@ static bool print_prefer_framing(const struct l2cap_frame *frame)
+ }
+ 
+ static const struct bitfield_data prefer_phy_table[] = {
+-	{  0, "LE 1M PHY preffered (0x01)"		},
+-	{  1, "LE 2M PHY preffered (0x02)"		},
+-	{  2, "LE Codec PHY preffered (0x04)"		},
++	{  0, "LE 1M PHY preferred (0x01)"		},
++	{  1, "LE 2M PHY preferred (0x02)"		},
++	{  2, "LE Codec PHY preferred (0x04)"		},
+ 	{ }
+ };
+ 
+@@ -2204,7 +2204,7 @@ static void print_vcs_flag(const struct l2cap_frame *frame)
+ 		print_text(COLOR_ERROR, "Volume Flag: invalid size");
+ 		goto done;
+ 	}
+-	print_field("    Volume Falg: %u", vol_flag);
++	print_field("    Volume Flag: %u", vol_flag);
+ 
+ done:
+ 	if (frame->size)
 diff --git a/monitor/avctp.c b/monitor/avctp.c
-index dc03195a8..73ef50c17 100644
+index fb2628282..7a8c124ab 100644
 --- a/monitor/avctp.c
 +++ b/monitor/avctp.c
 @@ -1314,13 +1314,13 @@ static bool avrcp_get_play_status(struct avctp_frame *avctp_frame,
@@ -178,7 +266,7 @@ index dc03195a8..73ef50c17 100644
  		break;
  	case AVRCP_EVENT_BATT_STATUS_CHANGED:
 diff --git a/monitor/ll.c b/monitor/ll.c
-index f588d5e99..db2354991 100644
+index feeb13e92..8352d0a74 100644
 --- a/monitor/ll.c
 +++ b/monitor/ll.c
 @@ -256,7 +256,7 @@ static void data_packet(const void *data, uint8_t size, bool padded)
@@ -204,10 +292,10 @@ index d232d3fd5..0db6db303 100644
  	for (l = profiles; l; l = l->next) {
  		struct bluetooth_profile *profile = l->data;
 diff --git a/obexd/plugins/pcsuite.c b/obexd/plugins/pcsuite.c
-index b2232ea09..fd69cae00 100644
+index f5a9d9ae8..f3707d104 100644
 --- a/obexd/plugins/pcsuite.c
 +++ b/obexd/plugins/pcsuite.c
-@@ -444,7 +444,7 @@ static ssize_t backup_write(void *object, const void *buf, size_t count)
+@@ -446,7 +446,7 @@ static ssize_t backup_write(void *object, const void *buf, size_t count)
  	if (obj->fd != -1) {
  		ret = write(obj->fd, buf, count);
  
@@ -217,12 +305,12 @@ index b2232ea09..fd69cae00 100644
  		if (ret < 0) {
  			error("backup: cmd = %s", obj->cmd);
 diff --git a/obexd/src/manager.c b/obexd/src/manager.c
-index 01741fe62..dae2d3ecb 100644
+index 73fd6b9af..458a74f96 100644
 --- a/obexd/src/manager.c
 +++ b/obexd/src/manager.c
-@@ -39,7 +39,7 @@
- #define SESSION_INTERFACE OBEXD_SERVICE ".Session1"
+@@ -40,7 +40,7 @@
  #define AGENT_INTERFACE OBEXD_SERVICE ".Agent1"
+ #define OBEX_ERROR_REJECT      "org.bluez.obex.Error.Rejected"
  
 -#define TIMEOUT 60*1000 /* Timeout for user response (miliseconds) */
 +#define TIMEOUT 60*1000 /* Timeout for user response (milliseconds) */
@@ -230,10 +318,10 @@ index 01741fe62..dae2d3ecb 100644
  struct agent {
  	char *bus_name;
 diff --git a/plugins/policy.c b/plugins/policy.c
-index 051db82e1..f790b7a77 100644
+index 0bbdbfc88..5daddaac2 100644
 --- a/plugins/policy.c
 +++ b/plugins/policy.c
-@@ -277,7 +277,7 @@ static void sink_cb(struct btd_service *service, btd_service_state_t old_state,
+@@ -278,7 +278,7 @@ static void sink_cb(struct btd_service *service, btd_service_state_t old_state,
  		}
  
  		/* Check if service initiate the connection then proceed
@@ -242,7 +330,7 @@ index 051db82e1..f790b7a77 100644
  		 */
  		if (btd_service_is_initiator(service))
  			policy_connect(data, controller);
-@@ -428,7 +428,7 @@ static void source_cb(struct btd_service *service,
+@@ -429,7 +429,7 @@ static void source_cb(struct btd_service *service,
  		}
  
  		/* Check if service initiate the connection then proceed
@@ -252,7 +340,7 @@ index 051db82e1..f790b7a77 100644
  		if (btd_service_is_initiator(service))
  			policy_connect(data, target);
 diff --git a/profiles/battery/battery.c b/profiles/battery/battery.c
-index 176d127f6..2efe9beb8 100644
+index 02d024d92..d236cdcb7 100644
 --- a/profiles/battery/battery.c
 +++ b/profiles/battery/battery.c
 @@ -151,7 +151,7 @@ static void read_initial_battery_level_cb(bool success,
@@ -265,7 +353,7 @@ index 176d127f6..2efe9beb8 100644
  		return;
  	}
 diff --git a/profiles/gap/gas.c b/profiles/gap/gas.c
-index ea3249be9..780f749aa 100644
+index 400818d67..9bb1a2247 100644
 --- a/profiles/gap/gas.c
 +++ b/profiles/gap/gas.c
 @@ -91,7 +91,7 @@ static void read_device_name_cb(bool success, uint8_t att_ecode,
@@ -278,10 +366,10 @@ index ea3249be9..780f749aa 100644
  		return;
  	}
 diff --git a/profiles/health/mcap.c b/profiles/health/mcap.c
-index 5161ef77c..1097ca70f 100644
+index 5d2bac3d9..1601b99d6 100644
 --- a/profiles/health/mcap.c
 +++ b/profiles/health/mcap.c
-@@ -2854,7 +2854,7 @@ static void proc_sync_set_req(struct mcap_mcl *mcl, uint8_t *cmd, uint32_t len)
+@@ -2867,7 +2867,7 @@ static void proc_sync_set_req(struct mcap_mcl *mcl, uint8_t *cmd, uint32_t len)
  			return;
  		}
  
@@ -291,10 +379,10 @@ index 5161ef77c..1097ca70f 100644
  
  		if (phase2_delay > 61*1000) {
 diff --git a/profiles/midi/midi.c b/profiles/midi/midi.c
-index 737d1b5f6..43203efbe 100644
+index bab309bca..0976842e8 100644
 --- a/profiles/midi/midi.c
 +++ b/profiles/midi/midi.c
-@@ -309,7 +309,7 @@ static int midi_accept(struct btd_service *service)
+@@ -319,7 +319,7 @@ static int midi_accept(struct btd_service *service)
  
  	err = snd_seq_client_id(midi->seq_handle);
  	if (err < 0) {
@@ -304,10 +392,10 @@ index 737d1b5f6..43203efbe 100644
  	}
  	midi->seq_client_id = err;
 diff --git a/src/adapter.c b/src/adapter.c
-index 5846f0396..4601e02c8 100644
+index 5ebfc4752..0d0b17135 100644
 --- a/src/adapter.c
 +++ b/src/adapter.c
-@@ -4012,7 +4012,7 @@ static void set_privacy_complete(uint8_t status, uint16_t length,
+@@ -4215,7 +4215,7 @@ static void set_privacy_complete(uint8_t status, uint16_t length,
  		return;
  	}
  
@@ -316,7 +404,7 @@ index 5846f0396..4601e02c8 100644
  }
  
  static int set_privacy(struct btd_adapter *adapter, uint8_t privacy)
-@@ -5346,7 +5346,7 @@ void adapter_auto_connect_add(struct btd_adapter *adapter,
+@@ -5557,7 +5557,7 @@ void adapter_auto_connect_add(struct btd_adapter *adapter,
  	bdaddr_type = btd_device_get_bdaddr_type(device);
  
  	if (bdaddr_type == BDADDR_BREDR) {
@@ -325,7 +413,7 @@ index 5846f0396..4601e02c8 100644
  		return;
  	}
  
-@@ -5494,7 +5494,7 @@ void adapter_auto_connect_remove(struct btd_adapter *adapter,
+@@ -5670,7 +5670,7 @@ void adapter_auto_connect_remove(struct btd_adapter *adapter,
  	bdaddr_type = btd_device_get_bdaddr_type(device);
  
  	if (bdaddr_type == BDADDR_BREDR) {
@@ -334,7 +422,7 @@ index 5846f0396..4601e02c8 100644
  		return;
  	}
  
-@@ -9760,7 +9760,7 @@ static void read_info_complete(uint8_t status, uint16_t length,
+@@ -10205,7 +10205,7 @@ static void read_info_complete(uint8_t status, uint16_t length,
  	case BT_MODE_BREDR:
  		if (!(adapter->supported_settings & MGMT_SETTING_BREDR)) {
  			btd_error(adapter->dev_id,
@@ -343,7 +431,7 @@ index 5846f0396..4601e02c8 100644
  			goto failed;
  		}
  
-@@ -9774,7 +9774,7 @@ static void read_info_complete(uint8_t status, uint16_t length,
+@@ -10219,7 +10219,7 @@ static void read_info_complete(uint8_t status, uint16_t length,
  	case BT_MODE_LE:
  		if (!(adapter->supported_settings & MGMT_SETTING_LE)) {
  			btd_error(adapter->dev_id,
@@ -353,10 +441,10 @@ index 5846f0396..4601e02c8 100644
  		}
  
 diff --git a/src/profile.c b/src/profile.c
-index e1bebf1ee..5b651ce7b 100644
+index ea188f36b..d1c3e4e81 100644
 --- a/src/profile.c
 +++ b/src/profile.c
-@@ -1250,7 +1250,7 @@ static void ext_confirm(GIOChannel *io, gpointer user_data)
+@@ -1256,7 +1256,7 @@ static void ext_confirm(GIOChannel *io, gpointer user_data)
  	DBG("incoming connect from %s", addr);
  
  	if (!btd_adapter_is_uuid_allowed(adapter_find(&src), uuid)) {
@@ -365,7 +453,7 @@ index e1bebf1ee..5b651ce7b 100644
  		return;
  	}
  
-@@ -1292,7 +1292,7 @@ static void ext_direct_connect(GIOChannel *io, GError *err, gpointer user_data)
+@@ -1298,7 +1298,7 @@ static void ext_direct_connect(GIOChannel *io, GError *err, gpointer user_data)
  	}
  
  	if (!btd_adapter_is_uuid_allowed(adapter_find(&src), uuid)) {
@@ -374,11 +462,33 @@ index e1bebf1ee..5b651ce7b 100644
  		return;
  	}
  
+diff --git a/src/shared/bap.c b/src/shared/bap.c
+index 1c43680c2..139e589c0 100644
+--- a/src/shared/bap.c
++++ b/src/shared/bap.c
+@@ -858,7 +858,7 @@ static void stream_notify_config(struct bt_bap_stream *stream)
+ 	status->id = ep->id;
+ 	status->state = ep->state;
+ 
+-	/* Initialize preffered settings if not set */
++	/* Initialize preferred settings if not set */
+ 	if (!lpac->qos.phy)
+ 		lpac->qos.phy = 0x02;
+ 
+@@ -880,7 +880,7 @@ static void stream_notify_config(struct bt_bap_stream *stream)
+ 	if (!lpac->qos.ppd_max)
+ 		lpac->qos.ppd_max = lpac->qos.pd_max;
+ 
+-	/* TODO:Add support for setting preffered settings on bt_bap_pac */
++	/* TODO:Add support for setting preferred settings on bt_bap_pac */
+ 	config = (void *)status->params;
+ 	config->framing = lpac->qos.framing;
+ 	config->phy = lpac->qos.phy;
 diff --git a/src/shared/util.c b/src/shared/util.c
-index 81b20d86f..205d3f35d 100644
+index e9c1c18f5..e8931a3d8 100644
 --- a/src/shared/util.c
 +++ b/src/shared/util.c
-@@ -205,7 +205,7 @@ static const struct {
+@@ -583,7 +583,7 @@ static const struct {
  	{ 0x111d, "Imaging Referenced Objects"			},
  	{ 0x111e, "Handsfree"					},
  	{ 0x111f, "Handsfree Audio Gateway"			},
@@ -400,28 +510,6 @@ index 787d5c49e..d4f3f7f0c 100644
  
  -N, --noflowctl            Disable flow control
  
-diff --git a/tools/btmgmt.c b/tools/btmgmt.c
-index 42ef9acef..3f84659bb 100644
---- a/tools/btmgmt.c
-+++ b/tools/btmgmt.c
-@@ -5527,7 +5527,7 @@ static const struct bt_shell_menu main_menu = {
- 	{ "ssp",		"<on/off>",
- 		cmd_ssp,		"Toggle SSP mode"		},
- 	{ "sc",			"<on/off/only>",
--		cmd_sc,			"Toogle SC support"		},
-+		cmd_sc,			"Toggle SC support"		},
- 	{ "hs",			"<on/off>",
- 		cmd_hs,			"Toggle HS support"		},
- 	{ "le",			"<on/off>",
-@@ -5589,7 +5589,7 @@ static const struct bt_shell_menu main_menu = {
- 	{ "ext-config",		"<on/off>",
- 		cmd_ext_config,		"External configuration"	},
- 	{ "debug-keys",		"<on/off>",
--		cmd_debug_keys,		"Toogle debug keys"		},
-+		cmd_debug_keys,		"Toggle debug keys"		},
- 	{ "conn-info",		"[-t type] <remote address>",
- 		cmd_conn_info,		"Get connection information"	},
- 	{ "io-cap",		"<cap>",
 diff --git a/tools/btpclient.c b/tools/btpclient.c
 index bdfff5df8..f4eea093a 100644
 --- a/tools/btpclient.c
@@ -458,10 +546,10 @@ index 0d6272da9..4ba33f87e 100644
  		}
  
 diff --git a/tools/l2cap-tester.c b/tools/l2cap-tester.c
-index d78b1e29c..3200ed074 100644
+index 141dd570c..ab70da478 100644
 --- a/tools/l2cap-tester.c
 +++ b/tools/l2cap-tester.c
-@@ -1908,7 +1908,7 @@ static void test_getpeername_not_connected(const void *test_data)
+@@ -2096,7 +2096,7 @@ static void test_getpeername_not_connected(const void *test_data)
  	}
  
  	if (errno != ENOTCONN) {
@@ -471,10 +559,10 @@ index d78b1e29c..3200ed074 100644
  		tester_test_failed();
  		goto done;
 diff --git a/tools/l2test.c b/tools/l2test.c
-index fbaca747e..fb208c0c3 100644
+index 011a68c37..50340cdfb 100644
 --- a/tools/l2test.c
 +++ b/tools/l2test.c
-@@ -901,7 +901,7 @@ static void recv_mode(int sk)
+@@ -922,7 +922,7 @@ static void recv_mode(int sk)
  			/* Check sequence */
  			sq = get_le32(buf);
  			if (seq != sq) {
@@ -483,7 +571,7 @@ index fbaca747e..fb208c0c3 100644
  				seq = sq;
  			}
  			seq++;
-@@ -909,14 +909,14 @@ static void recv_mode(int sk)
+@@ -930,14 +930,14 @@ static void recv_mode(int sk)
  			/* Check length */
  			l = get_le16(buf + 4);
  			if (len != l) {
@@ -501,19 +589,15 @@ index fbaca747e..fb208c0c3 100644
  
  			total += len;
 diff --git a/tools/mgmt-tester.c b/tools/mgmt-tester.c
-index 8bddf6b03..38f670324 100644
+index 7dfd1b0c7..343fe4055 100644
 --- a/tools/mgmt-tester.c
 +++ b/tools/mgmt-tester.c
-@@ -12343,10 +12343,10 @@ int main(int argc, char *argv[])
+@@ -14268,7 +14268,7 @@ int main(int argc, char *argv[])
  	test_bredrle50("Set PHY 2m Success", &set_phy_2m_success,
  					NULL, test_command_generic);
  
 -	test_bredrle50("Set PHY coded Succcess", &set_phy_coded_success,
 +	test_bredrle50("Set PHY coded Success", &set_phy_coded_success,
- 					NULL, test_command_generic);
- 
--	test_bredrle50("Set PHY 1m 2m coded Succcess", &set_phy_all_success,
-+	test_bredrle50("Set PHY 1m 2m coded Success", &set_phy_all_success,
  					NULL, test_command_generic);
  
  	test_bredrle50("Set PHY 2m tx success", &set_phy_2m_tx_success,
@@ -580,7 +664,7 @@ index e73a6317e..1480e4eef 100644
  	raw_dump(level, frm);
  }
 diff --git a/tools/parser/hci.c b/tools/parser/hci.c
-index db7d32c01..a0b62f915 100644
+index db7d32c01..2dac62ce9 100644
 --- a/tools/parser/hci.c
 +++ b/tools/parser/hci.c
 @@ -1175,7 +1175,7 @@ static inline void qos_setup_dump(int level, struct frame *frm)
@@ -588,7 +672,7 @@ index db7d32c01..a0b62f915 100644
  	printf("Token rate: %d\n", btohl(cp->qos.token_rate));
  	p_indent(level, frm);
 -	printf("Peak bandwith: %d\n", btohl(cp->qos.peak_bandwidth));
-+	printf("Peak bandwidth/: %d\n", btohl(cp->qos.peak_bandwidth));
++	printf("Peak bandwidth: %d\n", btohl(cp->qos.peak_bandwidth));
  	p_indent(level, frm);
  	printf("Latency: %d\n", btohl(cp->qos.latency));
  	p_indent(level, frm);
@@ -597,7 +681,7 @@ index db7d32c01..a0b62f915 100644
  		printf("Token rate: %d\n", btohl(evt->qos.token_rate));
  		p_indent(level, frm);
 -		printf("Peak bandwith: %d\n", btohl(evt->qos.peak_bandwidth));
-+		printf("Peak bandwidth/: %d\n", btohl(evt->qos.peak_bandwidth));
++		printf("Peak bandwidth: %d\n", btohl(evt->qos.peak_bandwidth));
  		p_indent(level, frm);
  		printf("Latency: %d\n", btohl(evt->qos.latency));
  		p_indent(level, frm);
@@ -606,7 +690,7 @@ index db7d32c01..a0b62f915 100644
  		printf("Token rate: %d\n", btohl(evt->qos.token_rate));
  		p_indent(level, frm);
 -		printf("Peak bandwith: %d\n", btohl(evt->qos.peak_bandwidth));
-+		printf("Peak bandwidth/: %d\n", btohl(evt->qos.peak_bandwidth));
++		printf("Peak bandwidth: %d\n", btohl(evt->qos.peak_bandwidth));
  		p_indent(level, frm);
  		printf("Latency: %d\n", btohl(evt->qos.latency));
  		p_indent(level, frm);
@@ -655,10 +739,10 @@ index 733795ac6..10d51de4d 100644
  }
  
 diff --git a/tools/rctest.c b/tools/rctest.c
-index 9eb8210d6..56e9c4f05 100644
+index d31180880..1eb781218 100644
 --- a/tools/rctest.c
 +++ b/tools/rctest.c
-@@ -509,7 +509,7 @@ static void recv_mode(int sk)
+@@ -510,7 +510,7 @@ static void recv_mode(int sk)
  			/* Check sequence */
  			sq = btohl(*(uint32_t *) buf);
  			if (seq != sq) {
@@ -667,7 +751,7 @@ index 9eb8210d6..56e9c4f05 100644
  				seq = sq;
  			}
  			seq++;
-@@ -517,14 +517,14 @@ static void recv_mode(int sk)
+@@ -518,14 +518,14 @@ static void recv_mode(int sk)
  			/* Check length */
  			l = btohs(*(uint16_t *) (buf + 4));
  			if (r != l) {
@@ -685,5 +769,5 @@ index 9eb8210d6..56e9c4f05 100644
  #endif
  			total += r;
 -- 
-2.33.1
+2.40.1
 
