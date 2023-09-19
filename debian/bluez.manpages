@@ -9,6 +9,9 @@ debian/tmp/usr/share/man/man1/l2ping.1
 debian/tmp/usr/share/man/man1/rctest.1
 debian/tmp/usr/share/man/man1/rfcomm.1
 debian/tmp/usr/share/man/man1/sdptool.1
+debian/tmp/usr/share/man/man1/bluetoothctl-mgmt.1
+debian/tmp/usr/share/man/man1/bluetoothctl-monitor.1
+debian/tmp/usr/share/man/man1/btmgmt.1
 debian/tmp/usr/share/man/man8/bluetoothd.8
 debian/tmp/usr/share/man/man8/bluetooth-meshd.8
 debian/manpages/l2test.1

@@ -1,4 +1,4 @@
-etc/dbus-1/system.d/bluetooth-mesh.conf
+usr/share/dbus-1/system.d/bluetooth-mesh.conf
 lib/systemd/system/bluetooth-mesh.service
 usr/bin/mesh-cfgclient
 usr/bin/mesh-cfgtest

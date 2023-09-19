@@ -43,6 +43,7 @@
 #include "shared/mainloop.h"
 #include "shared/timeout.h"
 #include "shared/queue.h"
+#include "shared/crypto.h"
 #include "lib/uuid.h"
 #include "shared/util.h"
 #include "btd.h"
@@ -64,7 +65,7 @@
 
 struct btd_opts btd_opts;
 static GKeyFile *main_conf;
-static char *main_conf_file_path;
+static char main_conf_file_path[PATH_MAX];
 
 static const char *supported_options[] = {
 	"Name",
@@ -77,13 +78,15 @@ static const char *supported_options[] = {
 	"NameResolving",
 	"DebugKeys",
 	"ControllerMode",
-	"MaxControllers"
+	"MaxControllers",
 	"MultiProfile",
 	"FastConnectable",
+	"SecureConnections",
 	"Privacy",
 	"JustWorksRepairing",
 	"TemporaryTimeout",
 	"Experimental",
+	"KernelExperimental",
 	"RemoteNameRequestRetryDelay",
 	NULL
 };
@@ -144,6 +147,13 @@ static const char *gatt_options[] = {
 	NULL
 };
 
+static const char *csip_options[] = {
+	"SIRK",
+	"Size",
+	"Rank",
+	NULL
+};
+
 static const char *avdtp_options[] = {
 	"SessionMode",
 	"StreamMode",
@@ -164,29 +174,96 @@ static const struct group_table {
 	{ "LE",		le_options },
 	{ "Policy",	policy_options },
 	{ "GATT",	gatt_options },
+	{ "CSIS",	csip_options },
 	{ "AVDTP",	avdtp_options },
 	{ "AdvMon",	advmon_options },
 	{ }
 };
 
+#ifndef MIN
+#define MIN(x, y) ((x) < (y) ? (x) : (y))
+#endif
+
+static int8_t check_sirk_alpha_numeric(char *str)
+{
+	int8_t val = 0;
+	char *s = str;
+
+	if (strlen(s) != 32) /* 32 Bytes of Alpha numeric string */
+		return 0;
+
+	for ( ; *s; s++) {
+		if (((*s >= '0') & (*s <= '9'))
+			|| ((*s >= 'a') && (*s <= 'z'))
+			|| ((*s >= 'A') && (*s <= 'Z'))) {
+			val = 1;
+		} else {
+			val = 0;
+			break;
+		}
+	}
+
+	return val;
+}
+
+static size_t hex2bin(const char *hexstr, uint8_t *buf, size_t buflen)
+{
+	size_t i, len;
+
+	if (!hexstr)
+		return 0;
+
+	len = MIN((strlen(hexstr) / 2), buflen);
+	memset(buf, 0, len);
+
+	for (i = 0; i < len; i++) {
+		if (sscanf(hexstr + (i * 2), "%02hhX", &buf[i]) != 1)
+			continue;
+	}
+
+	return len;
+}
 
 GKeyFile *btd_get_main_conf(void)
 {
 	return main_conf;
 }
 
-static GKeyFile *load_config(const char *file)
+static GKeyFile *load_config(const char *name)
 {
 	GError *err = NULL;
 	GKeyFile *keyfile;
+	int len;
+
+	if (name)
+		snprintf(main_conf_file_path, PATH_MAX, "%s", name);
+	else {
+		const char *configdir = getenv("CONFIGURATION_DIRECTORY");
+
+		/* Check if running as service */
+		if (configdir) {
+			/* Check if there multiple paths given */
+			if (strstr(configdir, ":"))
+				len = strstr(configdir, ":") - configdir;
+			else
+				len = strlen(configdir);
+		} else {
+			configdir = CONFIGDIR;
+			len = strlen(configdir);
+		}
+
+		snprintf(main_conf_file_path, PATH_MAX, "%*s/main.conf", len,
+						 configdir);
+	}
 
 	keyfile = g_key_file_new();
 
 	g_key_file_set_list_separator(keyfile, ',');
 
-	if (!g_key_file_load_from_file(keyfile, file, 0, &err)) {
+	if (!g_key_file_load_from_file(keyfile, main_conf_file_path, 0, &err)) {
 		if (!g_error_matches(err, G_FILE_ERROR, G_FILE_ERROR_NOENT))
-			error("Parsing %s failed: %s", file, err->message);
+			error("Parsing %s failed: %s", main_conf_file_path,
+				err->message);
 		g_error_free(err);
 		g_key_file_free(keyfile);
 		return NULL;
@@ -233,7 +310,7 @@ done:
 	btd_opts.did_version = version;
 }
 
-static bt_gatt_cache_t parse_gatt_cache(const char *cache)
+static bt_gatt_cache_t parse_gatt_cache_str(const char *cache)
 {
 	if (!strcmp(cache, "always")) {
 		return BT_GATT_CACHE_ALWAYS;
@@ -335,6 +412,63 @@ static int get_mode(const char *str)
 	return BT_MODE_DUAL;
 }
 
+static bool parse_config_string(GKeyFile *config, const char *group,
+					const char *key, char **val)
+{
+	GError *err = NULL;
+	char *tmp;
+
+	tmp = g_key_file_get_string(config, group, key, &err);
+	if (err) {
+		if (err->code != G_KEY_FILE_ERROR_KEY_NOT_FOUND)
+			DBG("%s", err->message);
+		g_error_free(err);
+		return false;
+	}
+
+	DBG("%s.%s = %s", group, key, tmp);
+
+	if (val) {
+		g_free(*val);
+		*val = tmp;
+	}
+
+	return true;
+}
+
+static bool parse_config_int(GKeyFile *config, const char *group,
+					const char *key, int *val,
+					int min, int max)
+{
+	int tmp;
+	char *str = NULL;
+	char *endptr = NULL;
+
+	if (!parse_config_string(config, group, key, &str))
+		return false;
+
+	tmp = strtol(str, &endptr, 0);
+	if (!endptr || *endptr != '\0') {
+		error("%s.%s = %s is not integer", group, key, str);
+		return false;
+	}
+
+	if (tmp < min) {
+		warn("%s.%s = %d is out of range (< %d)", group, key, tmp, min);
+		return false;
+	}
+
+	if (tmp > max) {
+		warn("%s.%s = %d is out of range (> %d)", group, key, tmp, max);
+		return false;
+	}
+
+	if (val)
+		*val = tmp;
+
+	return true;
+}
+
 struct config_param {
 	const char * const val_name;
 	void * const val;
@@ -353,31 +487,15 @@ static void parse_mode_config(GKeyFile *config, const char *group,
 		return;
 
 	for (i = 0; i < params_len; ++i) {
-		GError *err = NULL;
-		char *str;
+		int val;
 
-		str = g_key_file_get_string(config, group, params[i].val_name,
-									&err);
-		if (err) {
-			DBG("%s", err->message);
-			g_clear_error(&err);
-		} else {
-			char *endptr = NULL;
-			int val;
-
-			val = strtol(str, &endptr, 0);
-			if (!endptr || *endptr != '\0')
-				continue;
-
-			info("%s=%s(%d)", params[i].val_name, str, val);
-
-			val = MAX(val, params[i].min);
-			val = MIN(val, params[i].max);
-
+		if (parse_config_int(config, group, params[i].val_name,
+					&val, params[i].min, params[i].max)) {
 			val = htobl(val);
 			memcpy(params[i].val, &val, params[i].size);
-			++btd_opts.defaults.num_entries;
 		}
+
+		++btd_opts.defaults.num_entries;
 	}
 }
 
@@ -569,12 +687,12 @@ static bool match_experimental(const void *data, const void *match_data)
 	return !strcasecmp(value, uuid);
 }
 
-bool btd_experimental_enabled(const char *uuid)
+bool btd_kernel_experimental_enabled(const char *uuid)
 {
-	if (!btd_opts.experimental)
+	if (!btd_opts.kernel)
 		false;
 
-	return queue_find(btd_opts.experimental, match_experimental, uuid);
+	return queue_find(btd_opts.kernel, match_experimental, uuid);
 }
 
 static const char *valid_uuids[] = {
@@ -583,27 +701,28 @@ static const char *valid_uuids[] = {
 	"15c0a148-c273-11ea-b3de-0242ac130004",
 	"330859bc-7506-492d-9370-9a6f0614037f",
 	"a6695ace-ee7f-4fb9-881a-5fac66c629af",
+	"6fbaf188-05e0-496a-9885-d6ddfdb4e03e",
 	"*"
 };
 
-static void btd_parse_experimental(char **list)
+static void btd_parse_kernel_experimental(char **list)
 {
 	int i;
 
-	if (btd_opts.experimental) {
-		warn("Unable to parse Experimental: list already set");
+	if (btd_opts.kernel) {
+		warn("Unable to parse KernelExperimental: list already set");
 		return;
 	}
 
-	btd_opts.experimental = queue_new();
+	btd_opts.kernel = queue_new();
 
 	for (i = 0; list[i]; i++) {
 		size_t j;
 		const char *uuid = list[i];
 
 		if (!strcasecmp("false", uuid) || !strcasecmp("off", uuid)) {
-			queue_destroy(btd_opts.experimental, free);
-			btd_opts.experimental = NULL;
+			queue_destroy(btd_opts.kernel, free);
+			btd_opts.kernel = NULL;
 		}
 
 		if (!strcasecmp("true", uuid) || !strcasecmp("on", uuid))
@@ -616,23 +735,406 @@ static void btd_parse_experimental(char **list)
 
 		/* Ignored if UUID is considered invalid */
 		if (j == ARRAY_SIZE(valid_uuids)) {
-			warn("Invalid Experimental UUID: %s", uuid);
+			warn("Invalid KernelExperimental UUID: %s", uuid);
 			continue;
 		}
 
 		DBG("%s", uuid);
 
-		queue_push_tail(btd_opts.experimental, strdup(uuid));
+		queue_push_tail(btd_opts.kernel, strdup(uuid));
 	}
+}
+
+static bool gen_sirk(const char *str)
+{
+	struct bt_crypto *crypto;
+	int ret;
+
+	crypto = bt_crypto_new();
+	if (!crypto) {
+		error("Failed to open crypto");
+		return false;
+	}
+
+	ret = bt_crypto_sirk(crypto, str, btd_opts.did_vendor,
+			   btd_opts.did_product, btd_opts.did_version,
+			   btd_opts.did_source, btd_opts.csis.sirk);
+	if (!ret)
+		error("Failed to generate SIRK");
+
+	bt_crypto_unref(crypto);
+	return ret;
+}
+
+static bool parse_config_u32(GKeyFile *config, const char *group,
+					const char *key, uint32_t *val,
+					uint32_t min, uint32_t max)
+{
+	int tmp;
+
+	if (!parse_config_int(config, group, key, &tmp, 0, UINT32_MAX))
+		return false;
+
+	if (val)
+		*val = tmp;
+
+	return true;
+}
+
+static bool parse_config_u16(GKeyFile *config, const char *group,
+					const char *key, uint16_t *val,
+					uint16_t min, uint16_t max)
+{
+	int tmp;
+
+	if (!parse_config_int(config, group, key, &tmp, min, max))
+		return false;
+
+	if (val)
+		*val = tmp;
+
+	return true;
+}
+
+static bool parse_config_u8(GKeyFile *config, const char *group,
+					const char *key, uint8_t *val,
+					uint8_t min, uint8_t max)
+{
+	int tmp;
+
+	if (!parse_config_int(config, group, key, &tmp, min, max))
+		return false;
+
+	if (val)
+		*val = tmp;
+
+	return true;
+}
+
+static bool parse_config_bool(GKeyFile *config, const char *group,
+					const char *key, bool *val)
+{
+	GError *err = NULL;
+	gboolean tmp;
+
+	tmp = g_key_file_get_boolean(config, group, key, &err);
+	if (err) {
+		if (err->code != G_KEY_FILE_ERROR_KEY_NOT_FOUND)
+			DBG("%s", err->message);
+		g_error_free(err);
+		return false;
+	}
+
+	DBG("%s.%s = %s", group, key, tmp ? "true" : "false");
+
+	if (val)
+		*val = tmp;
+
+	return true;
+}
+
+static void parse_privacy(GKeyFile *config)
+{
+	char *str = NULL;
+
+	if (!parse_config_string(config, "General", "Privacy", &str)) {
+		btd_opts.privacy = 0x00;
+		btd_opts.device_privacy = true;
+		return;
+	}
+
+	if (!strcmp(str, "network") || !strcmp(str, "on")) {
+		btd_opts.privacy = 0x01;
+	} else if (!strcmp(str, "device")) {
+		btd_opts.privacy = 0x01;
+		btd_opts.device_privacy = true;
+	} else if (!strcmp(str, "limited-network")) {
+		if (btd_opts.mode != BT_MODE_DUAL) {
+			DBG("Invalid privacy option: %s", str);
+			btd_opts.privacy = 0x00;
+		}
+		btd_opts.privacy = 0x01;
+	} else if (!strcmp(str, "limited-device")) {
+		if (btd_opts.mode != BT_MODE_DUAL) {
+			DBG("Invalid privacy option: %s", str);
+			btd_opts.privacy = 0x00;
+		}
+		btd_opts.privacy = 0x02;
+		btd_opts.device_privacy = true;
+	} else if (!strcmp(str, "off")) {
+		btd_opts.privacy = 0x00;
+		btd_opts.device_privacy = true;
+	} else {
+		DBG("Invalid privacy option: %s", str);
+		btd_opts.privacy = 0x00;
+	}
+
+	g_free(str);
+}
+
+static void parse_repairing(GKeyFile *config)
+{
+	char *str = NULL;
+
+	if (!parse_config_string(config, "General", "JustWorksRepairing",
+						&str)) {
+		btd_opts.jw_repairing = JW_REPAIRING_NEVER;
+		return;
+	}
+
+	btd_opts.jw_repairing = parse_jw_repairing(str);
+	g_free(str);
+}
+
+static bool parse_config_hex(GKeyFile *config, char *group,
+					const char *key, uint32_t *val)
+{
+	char *str = NULL;
+
+	if (!parse_config_string(config, group, key, &str))
+		return false;
+
+	if (val)
+		*val = strtol(str, NULL, 16);
+
+	g_free(str);
+	return true;
+}
+
+static void parse_device_id(GKeyFile *config)
+{
+	char *str = NULL;
+
+	parse_config_string(config, "General", "DeviceID", &str);
+	if (!str)
+		return;
+
+	parse_did(str);
+	g_free(str);
+}
+
+static void parse_ctrl_mode(GKeyFile *config)
+{
+	char *str = NULL;
+
+	parse_config_string(config, "General", "ControllerMode", &str);
+	if (!str)
+		return;
+
+	btd_opts.mode = get_mode(str);
+	g_free(str);
+}
+
+static void parse_multi_profile(GKeyFile *config)
+{
+	char *str = NULL;
+
+	parse_config_string(config, "General", "MultiProfile", &str);
+	if (!str)
+		return;
+
+	if (!strcmp(str, "single"))
+		btd_opts.mps = MPS_SINGLE;
+	else if (!strcmp(str, "multiple"))
+		btd_opts.mps = MPS_MULTIPLE;
+	else
+		btd_opts.mps = MPS_OFF;
+
+	g_free(str);
+}
+
+static gboolean parse_kernel_experimental(const char *key, const char *value,
+					gpointer user_data, GError **error)
+{
+	char **strlist;
+
+	if (value && value[0] != '*') {
+		strlist = g_strsplit(value, ",", -1);
+		btd_parse_kernel_experimental(strlist);
+		g_strfreev(strlist);
+	} else {
+		if (!btd_opts.kernel)
+			btd_opts.kernel = queue_new();
+		queue_push_head(btd_opts.kernel, strdup("*"));
+	}
+
+	return TRUE;
+}
+
+static void parse_kernel_exp(GKeyFile *config)
+{
+	char *str = NULL;
+
+	if (!parse_config_string(config, "General", "KernelExperimental",
+						&str))
+		return;
+
+	parse_kernel_experimental(NULL, str, NULL, NULL);
+
+	g_free(str);
+}
+
+static void parse_secure_conns(GKeyFile *config)
+{
+	char *str = NULL;
+
+	if (!parse_config_string(config, "General", "SecureConnections",
+								&str))
+		return;
+
+	if (!strcmp(str, "off"))
+		btd_opts.secure_conn = SC_OFF;
+	else if (!strcmp(str, "on"))
+		btd_opts.secure_conn = SC_ON;
+	else if (!strcmp(str, "only"))
+		btd_opts.secure_conn = SC_ONLY;
+
+	g_free(str);
+}
+
+static void parse_general(GKeyFile *config)
+{
+	parse_config_string(config, "General", "Name", &btd_opts.name);
+	parse_config_hex(config, "General", "Class", &btd_opts.class);
+	parse_config_u32(config, "General", "DiscoverableTimeout",
+						&btd_opts.discovto,
+						0, UINT32_MAX);
+	parse_config_bool(config, "General", "AlwaysPairable",
+						&btd_opts.pairable);
+	parse_config_u32(config, "General", "PairableTimeout",
+						&btd_opts.pairto,
+						0, UINT32_MAX);
+	parse_device_id(config);
+	parse_config_bool(config, "General", "ReverseServiceDiscovery",
+						&btd_opts.reverse_discovery);
+	parse_config_bool(config, "General", "NameResolving",
+						&btd_opts.name_resolv);
+	parse_config_bool(config, "General", "DebugKeys",
+						&btd_opts.debug_keys);
+	parse_ctrl_mode(config);
+	parse_config_u16(config, "General", "MaxControllers",
+						&btd_opts.max_adapters,
+						0, UINT16_MAX);
+	parse_multi_profile(config);
+	parse_config_bool(config, "General", "FastConnectable",
+						&btd_opts.fast_conn);
+	parse_privacy(config);
+	parse_repairing(config);
+	parse_config_u32(config, "General", "TemporaryTimeout",
+						&btd_opts.tmpto,
+						0, UINT32_MAX);
+	parse_config_bool(config, "General", "RefreshDiscovery",
+						&btd_opts.refresh_discovery);
+	parse_secure_conns(config);
+	parse_config_bool(config, "General", "Experimental",
+						&btd_opts.experimental);
+	parse_kernel_exp(config);
+	parse_config_u32(config, "General", "RemoteNameRequestRetryDelay",
+					&btd_opts.name_request_retry_delay,
+					0, UINT32_MAX);
+}
+
+static void parse_gatt_cache(GKeyFile *config)
+{
+	char *str = NULL;
+
+	parse_config_string(config, "GATT", "Cache", &str);
+	if (!str)
+		return;
+
+	btd_opts.gatt_cache = parse_gatt_cache_str(str);
+	g_free(str);
+}
+
+static void parse_gatt(GKeyFile *config)
+{
+	parse_gatt_cache(config);
+	parse_config_u8(config, "GATT", "KeySize", &btd_opts.key_size, 7, 16);
+	parse_config_u16(config, "GATT", "ExchangeMTU", &btd_opts.gatt_mtu,
+				BT_ATT_DEFAULT_LE_MTU, BT_ATT_MAX_LE_MTU);
+	parse_config_u8(config, "GATT", "Channels", &btd_opts.gatt_channels,
+				1, 5);
+}
+
+static void parse_csis_sirk(GKeyFile *config)
+{
+	char *str = NULL;
+
+	if (!parse_config_string(config, "CSIS", "SIRK", &str))
+		return;
+
+	if (strlen(str) == 32 && check_sirk_alpha_numeric(str))
+		hex2bin(str, btd_opts.csis.sirk, sizeof(btd_opts.csis.sirk));
+	else if (!gen_sirk(str))
+		DBG("Unable to generate SIRK from string");
+
+	g_free(str);
+}
+
+static void parse_csis(GKeyFile *config)
+{
+	parse_csis_sirk(config);
+	parse_config_bool(config, "CSIS", "Encryption",
+					&btd_opts.csis.encrypt);
+	parse_config_u8(config, "CSIS", "Size", &btd_opts.csis.size,
+					0, UINT8_MAX);
+	parse_config_u8(config, "CSIS", "Rank", &btd_opts.csis.size,
+					0, UINT8_MAX);
+}
+
+static void parse_avdtp_session_mode(GKeyFile *config)
+{
+	char *str = NULL;
+
+	if (!parse_config_string(config, "AVDTP", "SessionMode", &str))
+		return;
+
+	if (!strcmp(str, "basic"))
+		btd_opts.avdtp.session_mode = BT_IO_MODE_BASIC;
+	else if (!strcmp(str, "ertm"))
+		btd_opts.avdtp.session_mode = BT_IO_MODE_ERTM;
+	else {
+		DBG("Invalid mode option: %s", str);
+		btd_opts.avdtp.session_mode = BT_IO_MODE_BASIC;
+	}
+
+	g_free(str);
+}
+
+static void parse_avdtp_stream_mode(GKeyFile *config)
+{
+	char *str = NULL;
+
+	if (!parse_config_string(config, "AVDTP", "StreamMode", &str))
+		return;
+
+	if (!strcmp(str, "basic"))
+		btd_opts.avdtp.stream_mode = BT_IO_MODE_BASIC;
+	else if (!strcmp(str, "streaming"))
+		btd_opts.avdtp.stream_mode = BT_IO_MODE_STREAMING;
+	else {
+		DBG("Invalid mode option: %s", str);
+		btd_opts.avdtp.stream_mode = BT_IO_MODE_BASIC;
+	}
+
+	g_free(str);
+}
+
+static void parse_avdtp(GKeyFile *config)
+{
+	parse_avdtp_session_mode(config);
+	parse_avdtp_stream_mode(config);
+}
+
+static void parse_advmon(GKeyFile *config)
+{
+	parse_config_u8(config, "AdvMon", "RSSISamplingPeriod",
+				&btd_opts.advmon.rssi_sampling_period,
+				0, UINT8_MAX);
 }
 
 static void parse_config(GKeyFile *config)
 {
-	GError *err = NULL;
-	char *str, **strlist;
-	int val;
-	gboolean boolean;
-
 	if (!config)
 		return;
 
@@ -640,306 +1142,14 @@ static void parse_config(GKeyFile *config)
 
 	DBG("parsing %s", main_conf_file_path);
 
-	val = g_key_file_get_integer(config, "General",
-						"DiscoverableTimeout", &err);
-	if (err) {
-		DBG("%s", err->message);
-		g_clear_error(&err);
-	} else {
-		DBG("discovto=%d", val);
-		btd_opts.discovto = val;
-	}
-
-	boolean = g_key_file_get_boolean(config, "General",
-						"AlwaysPairable", &err);
-	if (err) {
-		DBG("%s", err->message);
-		g_clear_error(&err);
-	} else {
-		DBG("pairable=%s", boolean ? "true" : "false");
-		btd_opts.pairable = boolean;
-	}
-
-	val = g_key_file_get_integer(config, "General",
-						"PairableTimeout", &err);
-	if (err) {
-		DBG("%s", err->message);
-		g_clear_error(&err);
-	} else {
-		DBG("pairto=%d", val);
-		btd_opts.pairto = val;
-	}
-
-	str = g_key_file_get_string(config, "General", "Privacy", &err);
-	if (err) {
-		DBG("%s", err->message);
-		g_clear_error(&err);
-		btd_opts.privacy = 0x00;
-	} else {
-		DBG("privacy=%s", str);
-
-		if (!strcmp(str, "network") || !strcmp(str, "on")) {
-			btd_opts.privacy = 0x01;
-		} else if (!strcmp(str, "device")) {
-			btd_opts.privacy = 0x01;
-			btd_opts.device_privacy = true;
-		} else if (!strcmp(str, "limited-network")) {
-			if (btd_opts.mode != BT_MODE_DUAL) {
-				DBG("Invalid privacy option: %s", str);
-				btd_opts.privacy = 0x00;
-			}
-			btd_opts.privacy = 0x01;
-		} else if (!strcmp(str, "limited-device")) {
-			if (btd_opts.mode != BT_MODE_DUAL) {
-				DBG("Invalid privacy option: %s", str);
-				btd_opts.privacy = 0x00;
-			}
-			btd_opts.privacy = 0x02;
-			btd_opts.device_privacy = true;
-		} else if (!strcmp(str, "off")) {
-			btd_opts.privacy = 0x00;
-		} else {
-			DBG("Invalid privacy option: %s", str);
-			btd_opts.privacy = 0x00;
-		}
-
-		g_free(str);
-	}
-
-	str = g_key_file_get_string(config, "General",
-						"JustWorksRepairing", &err);
-	if (err) {
-		DBG("%s", err->message);
-		g_clear_error(&err);
-		btd_opts.jw_repairing = JW_REPAIRING_NEVER;
-	} else {
-		DBG("just_works_repairing=%s", str);
-		btd_opts.jw_repairing = parse_jw_repairing(str);
-		g_free(str);
-	}
-
-	val = g_key_file_get_integer(config, "General",
-						"TemporaryTimeout", &err);
-	if (err) {
-		DBG("%s", err->message);
-		g_clear_error(&err);
-	} else {
-		DBG("tmpto=%d", val);
-		btd_opts.tmpto = val;
-	}
-
-	str = g_key_file_get_string(config, "General", "Name", &err);
-	if (err) {
-		DBG("%s", err->message);
-		g_clear_error(&err);
-	} else {
-		DBG("name=%s", str);
-		g_free(btd_opts.name);
-		btd_opts.name = str;
-	}
-
-	str = g_key_file_get_string(config, "General", "Class", &err);
-	if (err) {
-		DBG("%s", err->message);
-		g_clear_error(&err);
-	} else {
-		DBG("class=%s", str);
-		btd_opts.class = strtol(str, NULL, 16);
-		g_free(str);
-	}
-
-	str = g_key_file_get_string(config, "General", "DeviceID", &err);
-	if (err) {
-		DBG("%s", err->message);
-		g_clear_error(&err);
-	} else {
-		DBG("deviceid=%s", str);
-		parse_did(str);
-		g_free(str);
-	}
-
-	boolean = g_key_file_get_boolean(config, "General",
-						"ReverseServiceDiscovery", &err);
-	if (err) {
-		DBG("%s", err->message);
-		g_clear_error(&err);
-	} else
-		btd_opts.reverse_discovery = boolean;
-
-	boolean = g_key_file_get_boolean(config, "General",
-						"NameResolving", &err);
-	if (err)
-		g_clear_error(&err);
-	else
-		btd_opts.name_resolv = boolean;
-
-	boolean = g_key_file_get_boolean(config, "General",
-						"DebugKeys", &err);
-	if (err)
-		g_clear_error(&err);
-	else
-		btd_opts.debug_keys = boolean;
-
-	str = g_key_file_get_string(config, "General", "ControllerMode", &err);
-	if (err) {
-		g_clear_error(&err);
-	} else {
-		DBG("ControllerMode=%s", str);
-		btd_opts.mode = get_mode(str);
-		g_free(str);
-	}
-
-	val = g_key_file_get_integer(config, "General", "MaxControllers", &err);
-	if (err) {
-		g_clear_error(&err);
-	} else {
-		DBG("MaxControllers=%d", val);
-		btd_opts.max_adapters = val;
-	}
-
-	str = g_key_file_get_string(config, "General", "MultiProfile", &err);
-	if (err) {
-		g_clear_error(&err);
-	} else {
-		DBG("MultiProfile=%s", str);
-
-		if (!strcmp(str, "single"))
-			btd_opts.mps = MPS_SINGLE;
-		else if (!strcmp(str, "multiple"))
-			btd_opts.mps = MPS_MULTIPLE;
-		else
-			btd_opts.mps = MPS_OFF;
-
-		g_free(str);
-	}
-
-	boolean = g_key_file_get_boolean(config, "General",
-						"FastConnectable", &err);
-	if (err)
-		g_clear_error(&err);
-	else
-		btd_opts.fast_conn = boolean;
-
-	boolean = g_key_file_get_boolean(config, "General",
-						"RefreshDiscovery", &err);
-	if (err)
-		g_clear_error(&err);
-	else
-		btd_opts.refresh_discovery = boolean;
-
-	strlist = g_key_file_get_string_list(config, "General", "Experimental",
-						NULL, &err);
-	if (err)
-		g_clear_error(&err);
-	else {
-		btd_parse_experimental(strlist);
-		g_strfreev(strlist);
-	}
-
-	val = g_key_file_get_integer(config, "General",
-					"RemoteNameRequestRetryDelay", &err);
-	if (err) {
-		DBG("%s", err->message);
-		g_clear_error(&err);
-	} else {
-		DBG("RemoteNameRequestRetryDelay=%d", val);
-		btd_opts.name_request_retry_delay = val;
-	}
-
-	str = g_key_file_get_string(config, "GATT", "Cache", &err);
-	if (err) {
-		DBG("%s", err->message);
-		g_clear_error(&err);
-	} else {
-		btd_opts.gatt_cache = parse_gatt_cache(str);
-		g_free(str);
-	}
-
-	val = g_key_file_get_integer(config, "GATT", "KeySize", &err);
-	if (err) {
-		DBG("%s", err->message);
-		g_clear_error(&err);
-	} else {
-		DBG("KeySize=%d", val);
-
-		if (val >=7 && val <= 16)
-			btd_opts.key_size = val;
-	}
-
-	val = g_key_file_get_integer(config, "GATT", "ExchangeMTU", &err);
-	if (err) {
-		DBG("%s", err->message);
-		g_clear_error(&err);
-	} else {
-		/* Ensure the mtu is within a valid range. */
-		val = MIN(val, BT_ATT_MAX_LE_MTU);
-		val = MAX(val, BT_ATT_DEFAULT_LE_MTU);
-		DBG("ExchangeMTU=%d", val);
-		btd_opts.gatt_mtu = val;
-	}
-
-	val = g_key_file_get_integer(config, "GATT", "Channels", &err);
-	if (err) {
-		DBG("%s", err->message);
-		g_clear_error(&err);
-	} else {
-		DBG("Channels=%d", val);
-		/* Ensure the channels is within a valid range. */
-		val = MIN(val, 5);
-		val = MAX(val, 1);
-		btd_opts.gatt_channels = val;
-	}
-
-	str = g_key_file_get_string(config, "AVDTP", "SessionMode", &err);
-	if (err) {
-		DBG("%s", err->message);
-		g_clear_error(&err);
-	} else {
-		DBG("SessionMode=%s", str);
-
-		if (!strcmp(str, "basic"))
-			btd_opts.avdtp.session_mode = BT_IO_MODE_BASIC;
-		else if (!strcmp(str, "ertm"))
-			btd_opts.avdtp.session_mode = BT_IO_MODE_ERTM;
-		else {
-			DBG("Invalid mode option: %s", str);
-			btd_opts.avdtp.session_mode = BT_IO_MODE_BASIC;
-		}
-		g_free(str);
-	}
-
-	str = g_key_file_get_string(config, "AVDTP", "StreamMode", &err);
-	if (err) {
-		DBG("%s", err->message);
-		g_clear_error(&err);
-	} else {
-		DBG("StreamMode=%s", str);
-
-		if (!strcmp(str, "basic"))
-			btd_opts.avdtp.stream_mode = BT_IO_MODE_BASIC;
-		else if (!strcmp(str, "streaming"))
-			btd_opts.avdtp.stream_mode = BT_IO_MODE_STREAMING;
-		else {
-			DBG("Invalid mode option: %s", str);
-			btd_opts.avdtp.stream_mode = BT_IO_MODE_BASIC;
-		}
-		g_free(str);
-	}
-
-	val = g_key_file_get_integer(config, "AdvMon", "RSSISamplingPeriod",
-									&err);
-	if (err) {
-		DBG("%s", err->message);
-		g_clear_error(&err);
-	} else {
-		val = MIN(val, 0xFF);
-		val = MAX(val, 0);
-		DBG("RSSISamplingPeriod=%d", val);
-		btd_opts.advmon.rssi_sampling_period = val;
-	}
-
+	/* Parse Groups */
+	parse_general(config);
 	parse_br_config(config);
 	parse_le_config(config);
+	parse_gatt(config);
+	parse_csis(config);
+	parse_avdtp(config);
+	parse_advmon(config);
 }
 
 static void init_defaults(void)
@@ -958,6 +1168,7 @@ static void init_defaults(void)
 	btd_opts.debug_keys = FALSE;
 	btd_opts.refresh_discovery = TRUE;
 	btd_opts.name_request_retry_delay = DEFAULT_NAME_REQUEST_RETRY_DELAY;
+	btd_opts.secure_conn = SC_ON;
 
 	btd_opts.defaults.num_entries = 0;
 	btd_opts.defaults.br.page_scan_type = 0xFFFF;
@@ -974,7 +1185,7 @@ static void init_defaults(void)
 
 	btd_opts.gatt_cache = BT_GATT_CACHE_ALWAYS;
 	btd_opts.gatt_mtu = BT_ATT_MAX_LE_MTU;
-	btd_opts.gatt_channels = 3;
+	btd_opts.gatt_channels = 1;
 
 	btd_opts.avdtp.session_mode = BT_IO_MODE_BASIC;
 	btd_opts.avdtp.stream_mode = BT_IO_MODE_BASIC;
@@ -1110,24 +1321,6 @@ static gboolean parse_debug(const char *key, const char *value,
 	return TRUE;
 }
 
-static gboolean parse_experimental(const char *key, const char *value,
-					gpointer user_data, GError **error)
-{
-	char **strlist;
-
-	if (value) {
-		strlist = g_strsplit(value, ",", -1);
-		btd_parse_experimental(strlist);
-		g_strfreev(strlist);
-	} else {
-		if (!btd_opts.experimental)
-			btd_opts.experimental = queue_new();
-		queue_push_head(btd_opts.experimental, strdup("*"));
-	}
-
-	return TRUE;
-}
-
 static GOptionEntry options[] = {
 	{ "debug", 'd', G_OPTION_FLAG_OPTIONAL_ARG,
 				G_OPTION_ARG_CALLBACK, parse_debug,
@@ -1140,9 +1333,11 @@ static GOptionEntry options[] = {
 			"Specify an explicit path to the config file", "FILE"},
 	{ "compat", 'C', 0, G_OPTION_ARG_NONE, &option_compat,
 				"Provide deprecated command line interfaces" },
-	{ "experimental", 'E', G_OPTION_FLAG_OPTIONAL_ARG,
-				G_OPTION_ARG_CALLBACK, parse_experimental,
-				"Enable experimental features/interfaces" },
+	{ "experimental", 'E', 0, G_OPTION_ARG_NONE, &btd_opts.experimental,
+				"Enable experimental D-Bus interfaces" },
+	{ "kernel", 'K', G_OPTION_FLAG_OPTIONAL_ARG, G_OPTION_ARG_CALLBACK,
+				parse_kernel_experimental,
+				"Enable kernel experimental features" },
 	{ "nodetach", 'n', G_OPTION_FLAG_REVERSE,
 				G_OPTION_ARG_NONE, &option_detach,
 				"Run with logging in foreground" },
@@ -1194,12 +1389,7 @@ int main(int argc, char *argv[])
 
 	mainloop_sd_notify("STATUS=Starting up");
 
-	if (option_configfile)
-		main_conf_file_path = option_configfile;
-	else
-		main_conf_file_path = CONFIGDIR "/main.conf";
-
-	main_conf = load_config(main_conf_file_path);
+	main_conf = load_config(option_configfile);
 
 	parse_config(main_conf);
 
@@ -1271,8 +1461,8 @@ int main(int argc, char *argv[])
 	if (btd_opts.mode != BT_MODE_LE)
 		stop_sdp_server();
 
-	if (btd_opts.experimental)
-		queue_destroy(btd_opts.experimental, free);
+	if (btd_opts.kernel)
+		queue_destroy(btd_opts.kernel, free);
 
 	if (main_conf)
 		g_key_file_free(main_conf);

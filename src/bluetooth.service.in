@@ -15,12 +15,14 @@ LimitNPROC=1
 
 # Filesystem lockdown
 ProtectHome=true
-ProtectSystem=full
+ProtectSystem=strict
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
-ReadWritePaths=@statedir@
-ReadOnlyPaths=@confdir@
+StateDirectory=bluetooth
+StateDirectoryMode=0700
+ConfigurationDirectory=bluetooth
+ConfigurationDirectoryMode=0555
 
 # Execute Mappings
 MemoryDenyWriteExecute=true

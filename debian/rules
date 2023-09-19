@@ -2,12 +2,10 @@
 # Uncomment this to turn on verbose mode.
 #export DH_VERBOSE=1
 
-export DEB_BUILD_MAINT_OPTIONS = hardening=+all
-export DEB_CFLAGS_MAINT_APPEND = -pie -fPIC
-export DEB_CXXFLAGS_MAINT_APPEND = -pie -fPIC
-
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all optimize=+lto
 CONFIGURE_FLAGS := \
 	--disable-silent-rules \
+	--with-dbusconfdir=/usr/share \
 	--libdir=\$${prefix}/lib/$(DEB_HOST_MULTIARCH) \
 	--enable-static \
 	--enable-tools \
@@ -36,6 +34,9 @@ CONFIGURE_FLAGS := \
 	--enable-external-ell \
 	--enable-experimental
 
+DEB_CFLAGS_MAINT_APPEND += -DFIRMWARE_DIR=/lib/firmware
+export DEB_CFLAGS_MAINT_APPEND
+
 ifeq ($(shell dpkg-vendor --is Ubuntu && echo yes) $(DEB_HOST_ARCH), yes i386)
    skip_packages = -Nbluez-cups
 endif
@@ -47,7 +48,6 @@ override_dh_install:
 	# Remove test scripts, and these are taken directly into the package
 	# from the test directory
 	rm -rf debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/bluez
-	install -m 755 -D src/bluetoothd.sh debian/tmp/usr/libexec/bluetooth
 	dh_install
 
 override_dh_auto_configure:

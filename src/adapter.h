@@ -86,15 +86,14 @@ struct btd_device *btd_adapter_find_device(struct btd_adapter *adapter,
 							uint8_t dst_type);
 struct btd_device *btd_adapter_find_device_by_path(struct btd_adapter *adapter,
 						   const char *path);
+struct btd_device *btd_adapter_find_device_by_fd(int fd);
 
-void btd_adapter_update_found_device(struct btd_adapter *adapter,
+void btd_adapter_device_found(struct btd_adapter *adapter,
 					const bdaddr_t *bdaddr,
 					uint8_t bdaddr_type, int8_t rssi,
-					bool confirm, bool legacy,
-					bool not_connectable,
-					bool name_resolve_failed,
+					uint32_t flags,
 					const uint8_t *data, uint8_t data_len,
-					bool monitored);
+					bool monitoring);
 
 const char *adapter_get_path(struct btd_adapter *adapter);
 const bdaddr_t *btd_adapter_get_address(struct btd_adapter *adapter);
@@ -126,6 +125,11 @@ struct btd_adapter_driver {
 						struct btd_device *device);
 	void (*device_resolved)(struct btd_adapter *adapter,
 						struct btd_device *device);
+
+	/* Indicates the driver is experimental and shall only be registered
+	 * when experimental has been enabled (see: main.conf:Experimental).
+	 */
+	bool experimental;
 };
 
 void device_resolved_drivers(struct btd_adapter *adapter,
@@ -143,6 +147,7 @@ guint btd_request_authorization_cable_configured(const bdaddr_t *src, const bdad
 int btd_cancel_authorization(guint id);
 
 int btd_adapter_restore_powered(struct btd_adapter *adapter);
+int btd_adapter_set_blocked(struct btd_adapter *adapter);
 
 typedef ssize_t (*btd_adapter_pin_cb_t) (struct btd_adapter *adapter,
 			struct btd_device *dev, char *out, bool *display,
@@ -253,6 +258,19 @@ void btd_adapter_for_each_device(struct btd_adapter *adapter,
 			void *data);
 
 bool btd_le_connect_before_pairing(void);
+
+bool btd_adapter_has_settings(struct btd_adapter *adapter, uint32_t settings);
+
+enum experimental_features {
+	EXP_FEAT_DEBUG			= 1 << 0,
+	EXP_FEAT_LE_SIMULT_ROLES	= 1 << 1,
+	EXP_FEAT_BQR			= 1 << 2,
+	EXP_FEAT_RPA_RESOLUTION		= 1 << 3,
+	EXP_FEAT_CODEC_OFFLOAD		= 1 << 4,
+	EXP_FEAT_ISO_SOCKET		= 1 << 5,
+};
+
+bool btd_adapter_has_exp_feature(struct btd_adapter *adapter, uint32_t feature);
 
 enum kernel_features {
 	KERNEL_CONN_CONTROL		= 1 << 0,

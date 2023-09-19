@@ -29,11 +29,13 @@
 #include "error.h"
 #include "log.h"
 #include "eir.h"
+#include "btd.h"
 #include "src/shared/ad.h"
 #include "src/shared/mgmt.h"
 #include "src/shared/queue.h"
 #include "src/shared/timeout.h"
 #include "src/shared/util.h"
+#include "src/shared/crypto.h"
 #include "advertising.h"
 
 #define LE_ADVERTISING_MGR_IFACE "org.bluez.LEAdvertisingManager1"
@@ -459,13 +461,50 @@ fail:
 	return false;
 }
 
+static bool set_rsi(struct btd_adv_client *client)
+{
+	struct bt_crypto *crypto;
+	uint8_t zero[16] = {};
+	struct bt_ad_data rsi = { .type = BT_AD_CSIP_RSI };
+	uint8_t data[6];
+	bool ret;
+
+	/* Check if a valid SIRK has been set */
+	if (!memcmp(btd_opts.csis.sirk, zero, sizeof(zero)))
+		return false;
+
+	/* Check if RSI needs to be set or data already contains RSI data */
+	if (!client || bt_ad_has_data(client->data, &rsi))
+		return true;
+
+	crypto = bt_crypto_new();
+	if (!crypto)
+		return false;
+
+	ret = bt_crypto_random_bytes(crypto, data + 3, sizeof(data) - 3);
+	if (!ret)
+		goto done;
+
+	ret = bt_crypto_sih(crypto, btd_opts.csis.sirk, data + 3, data);
+	if (!ret)
+		goto done;
+
+	ret = bt_ad_add_data(client->data, BT_AD_CSIP_RSI, data, sizeof(data));
+
+done:
+	bt_crypto_unref(crypto);
+	return ret;
+}
+
 static struct adv_include {
 	uint8_t flag;
 	const char *name;
+	bool (*set)(struct btd_adv_client *client);
 } includes[] = {
 	{ MGMT_ADV_FLAG_TX_POWER, "tx-power" },
 	{ MGMT_ADV_FLAG_APPEARANCE, "appearance" },
 	{ MGMT_ADV_FLAG_LOCAL_NAME, "local-name" },
+	{ 0 , "rsi", set_rsi },
 	{ },
 };
 
@@ -496,6 +535,11 @@ static bool parse_includes(DBusMessageIter *iter,
 		for (inc = includes; inc && inc->name; inc++) {
 			if (strcmp(str, inc->name))
 				continue;
+
+			if (inc->set && inc->set(client)) {
+				DBG("Including Feature: %s", str);
+				continue;
+			}
 
 			if (!(client->manager->supported_flags & inc->flag))
 				continue;
@@ -533,7 +577,15 @@ static bool parse_local_name(DBusMessageIter *iter,
 	dbus_message_iter_get_basic(iter, &name);
 
 	free(client->name);
-	client->name = strdup(name);
+
+	/* Treat empty string the same as omitting since there is no point on
+	 * adding a empty name as AD data as it just take space that could be
+	 * used for something else.
+	 */
+	if (name[0] != '\0')
+		client->name = strdup(name);
+	else
+		client->name = NULL;
 
 	return true;
 }
@@ -675,11 +727,6 @@ fail:
 
 static bool set_flags(struct btd_adv_client *client, uint8_t flags)
 {
-	if (!flags) {
-		bt_ad_clear_flags(client->data);
-		return true;
-	}
-
 	/* Set BR/EDR Not Supported for LE only */
 	if (!btd_adapter_get_bredr(client->manager->adapter))
 		flags |= BT_AD_FLAG_NO_BREDR;
@@ -768,6 +815,18 @@ static uint8_t *generate_adv_data(struct btd_adv_client *client,
 		bt_ad_add_appearance(client->data, appearance);
 	}
 
+	/* Scan response shall not be used when connectable and setting a
+	 * secondary PHY since that would end up using EA types instead of
+	 * legacy which doesn't support being connectable and scannable
+	 * simultaneously.
+	 */
+	if ((*flags & MGMT_ADV_FLAG_CONNECTABLE) &&
+				(*flags & MGMT_ADV_FLAG_SEC_MASK) &&
+				client->name) {
+		*flags &= ~MGMT_ADV_FLAG_LOCAL_NAME;
+		bt_ad_add_name(client->data, client->name);
+	}
+
 	return bt_ad_generate(client->data, len);
 }
 
@@ -798,6 +857,15 @@ static bool adv_client_has_scan_response(struct btd_adv_client *client,
 			bt_ad_is_empty(client->scan)) {
 		return false;
 	}
+
+	/* Scan response shall not be used when connectable and setting a
+	 * secondary PHY since that would end up using EA types instead of
+	 * legacy which doesn't support being connectable and scannable
+	 * simultaneously.
+	 */
+	if (flags & MGMT_ADV_FLAG_CONNECTABLE &&
+				flags & MGMT_ADV_FLAG_SEC_MASK)
+		return false;
 
 	return true;
 }
@@ -866,7 +934,9 @@ static int refresh_legacy_adv(struct btd_adv_client *client,
 	cp->adv_data_len = adv_data_len;
 	cp->scan_rsp_len = scan_rsp_len;
 	memcpy(cp->data, adv_data, adv_data_len);
-	memcpy(cp->data + adv_data_len, scan_rsp, scan_rsp_len);
+
+	if (scan_rsp)
+		memcpy(cp->data + adv_data_len, scan_rsp, scan_rsp_len);
 
 	free(adv_data);
 	free(scan_rsp);
@@ -1018,15 +1088,21 @@ static bool parse_secondary(DBusMessageIter *iter,
 	const char *str;
 	struct adv_secondary *sec;
 
+	if (!iter) {
+		/* Reset secondary channels */
+		client->flags &= ~MGMT_ADV_FLAG_SEC_MASK;
+		return true;
+	}
+
 	if (dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_STRING)
 		return false;
 
 	/* Reset secondary channels before parsing */
-	client->flags &= 0xfe00;
+	client->flags &= ~MGMT_ADV_FLAG_SEC_MASK;
 
 	dbus_message_iter_get_basic(iter, &str);
 
-	for (sec = secondary; sec && sec->name; sec++) {
+	for (sec = secondary; sec->name; sec++) {
 		if (strcmp(str, sec->name))
 			continue;
 
@@ -1052,8 +1128,10 @@ static bool parse_min_interval(DBusMessageIter *iter,
 	if (!(g_dbus_get_flags() & G_DBUS_FLAG_ENABLE_EXPERIMENTAL))
 		return true;
 
-	if (!iter)
+	if (!iter) {
+		client->min_interval = 0;
 		return false;
+	}
 
 	if (dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_UINT32)
 		return false;
@@ -1083,8 +1161,10 @@ static bool parse_max_interval(DBusMessageIter *iter,
 	if (!(g_dbus_get_flags() & G_DBUS_FLAG_ENABLE_EXPERIMENTAL))
 		return true;
 
-	if (!iter)
+	if (!iter) {
+		client->max_interval = 0;
 		return false;
+	}
 
 	if (dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_UINT32)
 		return false;
@@ -1114,8 +1194,10 @@ static bool parse_tx_power(DBusMessageIter *iter,
 	if (!(g_dbus_get_flags() & G_DBUS_FLAG_ENABLE_EXPERIMENTAL))
 		return true;
 
-	if (!iter)
+	if (!iter) {
+		client->tx_power = ADV_TX_POWER_NO_PREFERENCE;
 		return false;
+	}
 
 	if (dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_INT16)
 		return false;
@@ -1242,7 +1324,7 @@ static void add_adv_params_callback(uint8_t status, uint16_t length,
 	uint8_t *adv_data = NULL;
 	size_t adv_data_len;
 	uint8_t *scan_rsp = NULL;
-	size_t scan_rsp_len = -1;
+	size_t scan_rsp_len = 0;
 	uint32_t flags = 0;
 	unsigned int mgmt_ret;
 	dbus_int16_t tx_power;
@@ -1273,11 +1355,13 @@ static void add_adv_params_callback(uint8_t status, uint16_t length,
 		goto fail;
 	}
 
-	scan_rsp = generate_scan_rsp(client, &flags, &scan_rsp_len);
-	if ((!scan_rsp && scan_rsp_len) ||
-			scan_rsp_len > rp->max_scan_rsp_len) {
-		error("Scan data couldn't be generated.");
-		goto fail;
+	if (adv_client_has_scan_response(client, flags)) {
+		scan_rsp = generate_scan_rsp(client, &flags, &scan_rsp_len);
+		if ((!scan_rsp && scan_rsp_len) ||
+				scan_rsp_len > rp->max_scan_rsp_len) {
+			error("Scan data couldn't be generated.");
+			goto fail;
+		}
 	}
 
 	param_len = sizeof(struct mgmt_cp_add_advertising) + adv_data_len +
@@ -1293,7 +1377,9 @@ static void add_adv_params_callback(uint8_t status, uint16_t length,
 	cp->adv_data_len = adv_data_len;
 	cp->scan_rsp_len = scan_rsp_len;
 	memcpy(cp->data, adv_data, adv_data_len);
-	memcpy(cp->data + adv_data_len, scan_rsp, scan_rsp_len);
+
+	if (scan_rsp)
+		memcpy(cp->data + adv_data_len, scan_rsp, scan_rsp_len);
 
 	free(adv_data);
 	free(scan_rsp);
@@ -1356,7 +1442,8 @@ static DBusMessage *parse_advertisement(struct btd_adv_client *client)
 		}
 	}
 
-	if (bt_ad_has_flags(client->data)) {
+	if (bt_ad_get_flags(client->data) &
+			(BT_AD_FLAG_GENERAL | BT_AD_FLAG_LIMITED)) {
 		/* BLUETOOTH SPECIFICATION Version 5.0 | Vol 3, Part C
 		 * page 2042:
 		 * A device in the broadcast mode shall not set the
@@ -1467,9 +1554,13 @@ static struct btd_adv_client *client_create(struct btd_adv_manager *manager,
 	if (!client->data)
 		goto fail;
 
+	bt_ad_set_max_len(client->data, manager->max_adv_len);
+
 	client->scan = bt_ad_new();
 	if (!client->scan)
 		goto fail;
+
+	bt_ad_set_max_len(client->scan, manager->max_scan_rsp_len);
 
 	client->manager = manager;
 	client->appearance = UINT16_MAX;
@@ -1599,7 +1690,8 @@ static void append_include(struct btd_adv_manager *manager,
 	struct adv_include *inc;
 
 	for (inc = includes; inc && inc->name; inc++) {
-		if (manager->supported_flags & inc->flag)
+		if ((inc->set && inc->set(NULL)) ||
+				(manager->supported_flags & inc->flag))
 			dbus_message_iter_append_basic(iter, DBUS_TYPE_STRING,
 								&inc->name);
 	}

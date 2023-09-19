@@ -5,6 +5,7 @@
  *
  *  Copyright (C) 2011-2014  Intel Corporation
  *  Copyright (C) 2002-2010  Marcel Holtmann <marcel@holtmann.org>
+ *  Copyright 2023 NXP
  *
  *
  */
@@ -33,18 +34,19 @@
 
 #include "src/shared/util.h"
 #include "src/shared/btsnoop.h"
+#include "src/shared/queue.h"
 #include "display.h"
 #include "bt.h"
 #include "ll.h"
 #include "hwdb.h"
 #include "keys.h"
+#include "packet.h"
 #include "l2cap.h"
 #include "control.h"
 #include "vendor.h"
 #include "msft.h"
 #include "intel.h"
 #include "broadcom.h"
-#include "packet.h"
 
 #define COLOR_CHANNEL_LABEL		COLOR_WHITE
 #define COLOR_FRAME_LABEL		COLOR_WHITE
@@ -65,6 +67,7 @@
 #define COLOR_HCI_EVENT_UNKNOWN		COLOR_WHITE_BG
 #define COLOR_HCI_ACLDATA		COLOR_CYAN
 #define COLOR_HCI_SCODATA		COLOR_YELLOW
+#define COLOR_HCI_ISODATA		COLOR_YELLOW
 
 #define COLOR_UNKNOWN_ERROR		COLOR_WHITE_BG
 #define COLOR_UNKNOWN_FEATURE_BIT	COLOR_WHITE_BG
@@ -169,21 +172,51 @@ static uint16_t get_format(uint32_t cookie)
 
 #define MAX_CONN 16
 
-struct conn_data {
-	uint16_t handle;
-	uint8_t  type;
-};
+static struct packet_conn_data conn_list[MAX_CONN];
 
-static struct conn_data conn_list[MAX_CONN];
+static struct packet_conn_data *lookup_parent(uint16_t handle)
+{
+	int i;
 
-static void assign_handle(uint16_t handle, uint8_t type)
+	for (i = 0; i < MAX_CONN; i++) {
+		if (conn_list[i].link == handle)
+			return &conn_list[i];
+	}
+
+	return NULL;
+}
+
+static void assign_handle(uint16_t index, uint16_t handle, uint8_t type,
+					uint8_t *dst, uint8_t dst_type)
 {
 	int i;
 
 	for (i = 0; i < MAX_CONN; i++) {
 		if (conn_list[i].handle == 0x0000) {
+			hci_devba(index, (bdaddr_t *)conn_list[i].src);
+
+			conn_list[i].index = index;
 			conn_list[i].handle = handle;
 			conn_list[i].type = type;
+
+			if (!dst) {
+				struct packet_conn_data *p;
+
+				/* If destination is not set attempt to use the
+				 * parent one if that exists.
+				 */
+				p = lookup_parent(handle);
+				if (p) {
+					memcpy(conn_list[i].dst, p->dst,
+						sizeof(conn_list[i].dst));
+					conn_list[i].dst_type = p->dst_type;
+				}
+
+				break;
+			}
+
+			memcpy(conn_list[i].dst, dst, sizeof(conn_list[i].dst));
+			conn_list[i].dst_type = dst_type;
 			break;
 		}
 	}
@@ -194,24 +227,41 @@ static void release_handle(uint16_t handle)
 	int i;
 
 	for (i = 0; i < MAX_CONN; i++) {
-		if (conn_list[i].handle == handle) {
-			conn_list[i].handle = 0x0000;
-			conn_list[i].type = 0x00;
+		struct packet_conn_data *conn = &conn_list[i];
+
+		if (conn->handle == handle) {
+			if (conn->destroy)
+				conn->destroy(conn->data);
+
+			queue_destroy(conn->tx_q, free);
+			queue_destroy(conn->chan_q, free);
+			memset(conn, 0, sizeof(*conn));
 			break;
 		}
 	}
 }
 
-static uint8_t get_type(uint16_t handle)
+struct packet_conn_data *packet_get_conn_data(uint16_t handle)
 {
 	int i;
 
 	for (i = 0; i < MAX_CONN; i++) {
 		if (conn_list[i].handle == handle)
-			return conn_list[i].type;
+			return &conn_list[i];
 	}
 
-	return 0xff;
+	return NULL;
+}
+
+static uint8_t get_type(uint16_t handle)
+{
+	struct packet_conn_data *conn;
+
+	conn = packet_get_conn_data(handle);
+	if (!conn)
+		return 0xff;
+
+	return conn->type;
 }
 
 bool packet_has_filter(unsigned long filter)
@@ -289,13 +339,33 @@ void packet_set_msft_evt_prefix(const uint8_t *prefix, uint8_t len)
 		memcpy(index_list[index_current].msft_evt_prefix, prefix, len);
 }
 
+static void cred_pid(struct ucred *cred, char *str, size_t len)
+{
+	char *path = alloca(24);
+	char line[128];
+	FILE *fp;
+
+	snprintf(path, 23, "/proc/%u/comm", cred->pid);
+
+	fp = fopen(path, "re");
+	if (fp) {
+		if (fgets(line, sizeof(line), fp)) {
+			line[strcspn(line, "\r\n")] = '\0';
+			snprintf(str, len, "%s[%u]", line, cred->pid);
+		} else
+			snprintf(str, len, "[%u]", cred->pid);
+		fclose(fp);
+	} else
+		snprintf(str, len, "[%u]", cred->pid);
+}
+
 static void print_packet(struct timeval *tv, struct ucred *cred, char ident,
 					uint16_t index, const char *channel,
 					const char *color, const char *label,
 					const char *text, const char *extra)
 {
 	int col = num_columns();
-	char line[256], ts_str[96];
+	char line[256], ts_str[96], pid_str[140];
 	int n, ts_len = 0, ts_pos = 0, len = 0, pos = 0;
 	static size_t last_frame;
 
@@ -365,8 +435,9 @@ static void print_packet(struct timeval *tv, struct ucred *cred, char ident,
 		}
 
 		if (filter_mask & PACKET_FILTER_SHOW_TIME) {
-			n = sprintf(ts_str + ts_pos, " %02d:%02d:%02d.%06lu",
-				tm.tm_hour, tm.tm_min, tm.tm_sec, tv->tv_usec);
+			n = sprintf(ts_str + ts_pos, " %02d:%02d:%02d.%06llu",
+				tm.tm_hour, tm.tm_min, tm.tm_sec,
+				(long long)tv->tv_usec);
 			if (n > 0) {
 				ts_pos += n;
 				ts_len += n;
@@ -374,8 +445,9 @@ static void print_packet(struct timeval *tv, struct ucred *cred, char ident,
 		}
 
 		if (filter_mask & PACKET_FILTER_SHOW_TIME_OFFSET) {
-			n = sprintf(ts_str + ts_pos, " %lu.%06lu",
-					tv->tv_sec - time_offset, tv->tv_usec);
+			n = sprintf(ts_str + ts_pos, " %llu.%06llu",
+				(long long)(tv->tv_sec - time_offset),
+				(long long)tv->tv_usec);
 			if (n > 0) {
 				ts_pos += n;
 				ts_len += n;
@@ -384,18 +456,19 @@ static void print_packet(struct timeval *tv, struct ucred *cred, char ident,
 	}
 
 	if (use_color()) {
-		n = sprintf(ts_str + ts_pos, "%s", COLOR_OFF);
-		if (n > 0)
-			ts_pos += n;
-	}
-
-	if (use_color()) {
+		sprintf(ts_str + ts_pos, "%s", COLOR_OFF);
 		n = sprintf(line + pos, "%s", color);
 		if (n > 0)
 			pos += n;
 	}
 
-	n = sprintf(line + pos, "%c %s", ident, label ? label : "");
+	if (cred && cred->pid) {
+		cred_pid(cred, pid_str, sizeof(pid_str));
+		n = sprintf(line + pos, "%s: %c %s", pid_str, ident,
+						label ? label : "");
+	} else
+		n = sprintf(line + pos, "%c %s", ident, label ? label : "");
+
 	if (n > 0) {
 		pos += n;
 		len += n;
@@ -430,10 +503,8 @@ static void print_packet(struct timeval *tv, struct ucred *cred, char ident,
 
 	if (extra) {
 		n = sprintf(line + pos, " %s", extra);
-		if (n > 0) {
-			pos += n;
+		if (n > 0)
 			len += n;
-		}
 	}
 
 	if (ts_len > 0) {
@@ -739,7 +810,17 @@ static void print_lt_addr(uint8_t lt_addr)
 
 static void print_handle_native(uint16_t handle)
 {
-	print_field("Handle: %d", handle);
+	struct packet_conn_data *conn;
+	char label[25];
+
+	conn = packet_get_conn_data(handle);
+	if (!conn) {
+		print_field("Handle: %d", handle);
+		return;
+	}
+
+	sprintf(label, "Handle: %d Address", handle);
+	print_addr(label, conn->dst, conn->dst_type);
 }
 
 static void print_handle(uint16_t handle)
@@ -1337,6 +1418,9 @@ static void print_codec_id(const char *label, uint8_t codec)
 	case 0x05:
 		str = "mSBC";
 		break;
+	case 0x06:
+		str = "LC3";
+		break;
 	case 0xff:
 		str = "Vendor specific";
 		break;
@@ -1346,6 +1430,11 @@ static void print_codec_id(const char *label, uint8_t codec)
 	}
 
 	print_field("%s: %s (0x%2.2x)", label, str, codec);
+}
+
+void packet_print_codec_id(const char *label, uint8_t codec)
+{
+	print_codec_id(label, codec);
 }
 
 static const struct bitfield_data codec_transport_table[] = {
@@ -1750,20 +1839,6 @@ static void print_key_type(uint8_t key_type)
 static void print_key_size(uint8_t key_size)
 {
 	print_field("Key size: %d", key_size);
-}
-
-static void print_hex_field(const char *label, const uint8_t *data,
-								uint8_t len)
-{
-	char str[len * 2 + 1];
-	uint8_t i;
-
-	str[0] = '\0';
-
-	for (i = 0; i < len; i++)
-		sprintf(str + (i * 2), "%2.2x", data[i]);
-
-	print_field("%s: %s", label, str);
 }
 
 static void print_key(const char *label, const uint8_t *link_key)
@@ -2367,6 +2442,12 @@ void packet_print_version(const char *label, uint8_t version,
 	case 0x0a:
 		str = "Bluetooth 5.1";
 		break;
+	case 0x0b:
+		str = "Bluetooth 5.2";
+		break;
+	case 0x0c:
+		str = "Bluetooth 5.3";
+		break;
 	default:
 		str = "Reserved";
 		break;
@@ -2640,6 +2721,13 @@ static const struct bitfield_data features_le[] = {
 	{ 30, "Isochronous Broadcaster"				},
 	{ 31, "Synchronized Receiver"				},
 	{ 32, "Isochronous Channels (Host Support)"		},
+	{ 33, "LE Power Control Request"			},
+	{ 34, "LE Power Control Request"			},
+	{ 35, "LE Path Loss Monitoring"				},
+	{ 36, "Periodic Advertising ADI support"		},
+	{ 37, "Connection Subrating"				},
+	{ 38, "Connection Subrating (Host Support)"		},
+	{ 39, "Channel Classification"				},
 	{ }
 };
 
@@ -2816,7 +2904,8 @@ static const struct {
 static void print_le_states(const uint8_t *states_array)
 {
 	uint64_t mask, states = 0;
-	int i, n;
+	int i = 0;
+	size_t n = 0;
 
 	for (i = 0; i < 8; i++)
 		states |= ((uint64_t) states_array[i]) << (i * 8);
@@ -2828,12 +2917,12 @@ static void print_le_states(const uint8_t *states_array)
 	for (i = 0; le_states_comb_table[i].states; i++) {
 		uint64_t val = (((uint64_t) 1) << le_states_comb_table[i].bit);
 		const char *str[3] = { NULL, };
-		int num = 0;
+		size_t num = 0;
 
 		if (!(states & val))
 			continue;
 
-		for (n = 0; n < 16; n++) {
+		for (n = 0; n < ARRAY_SIZE(le_states_desc_table); n++) {
 			if (le_states_comb_table[i].states & (1 << n))
 				str[num++] = le_states_desc_table[n].str;
 		}
@@ -3022,12 +3111,21 @@ static const struct bitfield_data events_le_table[] = {
 	{ 17, "LE Extended Advertising Set Terminated"	},
 	{ 18, "LE Scan Request Received"		},
 	{ 19, "LE Channel Selection Algorithm"		},
+	{ 20, "LE Connectionless IQ Report"		},
+	{ 21, "LE Connection IQ Report"			},
+	{ 22, "LE CTE Request Failed"			},
+	{ 23, "LE Periodic Advertising Sync Transfer Rvc"},
 	{ 24, "LE CIS Established"			},
 	{ 25, "LE CIS Request"				},
 	{ 26, "LE Create BIG Complete"			},
 	{ 27, "LE Terminate BIG Complete"		},
 	{ 28, "LE BIG Sync Estabilished Complete"	},
 	{ 29, "LE BIG Sync Lost"			},
+	{ 30, "LE Request Peer SCA Complete"},
+	{ 31, "LE Path Loss Threshold"		},
+	{ 32, "LE Transmit Power Reporting"	},
+	{ 33, "LE BIG Info Advertising Report"	},
+	{ 34, "LE Subrate Change"			},
 	{ }
 };
 
@@ -3091,6 +3189,7 @@ static void print_fec(uint8_t fec)
 #define BT_EIR_MESH_PROV		0x29
 #define BT_EIR_MESH_DATA		0x2a
 #define BT_EIR_MESH_BEACON		0x2b
+#define BT_EIR_CSIP_RSI			0x2e
 #define BT_EIR_3D_INFO_DATA		0x3d
 #define BT_EIR_MANUFACTURER_DATA	0xff
 
@@ -3298,6 +3397,223 @@ static void print_uuid128_list(const char *label, const void *data,
 
 		print_field("  %s", bt_uuid128_to_str(uuid));
 	}
+}
+
+static void *iov_pull(struct iovec *iov, size_t len)
+{
+	void *data;
+
+	if (iov->iov_len < len)
+		return NULL;
+
+	data = iov->iov_base;
+	iov->iov_base += len;
+	iov->iov_len -= len;
+
+	return data;
+}
+
+static struct packet_ltv_decoder*
+get_ltv_decoder(struct packet_ltv_decoder *decoder, size_t num, uint8_t type)
+{
+	size_t i;
+
+	if (!decoder || !num)
+		return NULL;
+
+	for (i = 0; i < num; i++) {
+		struct packet_ltv_decoder *dec = &decoder[i];
+
+		if (dec->type == type)
+			return dec;
+	}
+
+	return NULL;
+}
+
+static void print_ltv(const char *label, const uint8_t *data, uint8_t len,
+			struct packet_ltv_decoder *decoder, size_t num)
+{
+	struct iovec iov;
+	int i;
+
+	iov.iov_base = (void *) data;
+	iov.iov_len = len;
+
+	for (i = 0; iov.iov_len; i++) {
+		uint8_t l, t, *v;
+		struct packet_ltv_decoder *dec;
+
+		l = get_u8(iov_pull(&iov, sizeof(l)));
+		if (!l) {
+			print_field("%s #%d: len 0x%02x", label, i, l);
+			break;
+		}
+
+		v = iov_pull(&iov, sizeof(*v));
+		if (!v)
+			break;
+
+		t = get_u8(v);
+
+		print_field("%s #%d: len 0x%02x type 0x%02x", label, i, l, t);
+
+		l -= 1;
+
+		v = iov_pull(&iov, l);
+		if (!v)
+			break;
+
+		dec = get_ltv_decoder(decoder, num, t);
+		if (dec)
+			dec->func(v, l);
+		else
+			print_hex_field(label, v, l);
+	}
+
+	if (iov.iov_len)
+		print_hex_field(label, iov.iov_base, iov.iov_len);
+}
+
+void packet_print_ltv(const char *label, const uint8_t *data, uint8_t len,
+			struct packet_ltv_decoder *decoder, size_t decoder_len)
+{
+	print_ltv(label, data, len, decoder, decoder_len);
+}
+
+static void print_base_annoucement(const uint8_t *data, uint8_t data_len)
+{
+	struct iovec iov;
+	struct bt_hci_le_pa_base_data *base_data;
+	uint8_t i;
+
+	iov.iov_base = (void *) data;
+	iov.iov_len = data_len;
+
+	base_data = iov_pull(&iov, sizeof(*base_data));
+	if (!base_data)
+		goto done;
+
+	/* Level 1 - BASE */
+	print_field("  Presetation Delay: %u", get_le24(base_data->pd));
+	print_field("  Number of Subgroups: %u", base_data->num_subgroups);
+
+	/* Level 2 - Subgroups*/
+	for (i = 0; i < base_data->num_subgroups; i++) {
+		struct bt_hci_le_pa_base_subgroup *subgroup;
+		struct bt_hci_lv_data *codec_cfg;
+		struct bt_hci_lv_data *metadata;
+		uint8_t j;
+
+		print_field("    Subgroup #%u:", i);
+
+		subgroup = iov_pull(&iov, sizeof(*subgroup));
+		if (!subgroup)
+			goto done;
+
+		print_field("    Number of BIS(s): %u", subgroup->num_bis);
+		print_codec_id("    Codec", subgroup->codec.id);
+
+		if (subgroup->codec.id == 0xff) {
+			uint16_t id;
+
+			id = le16_to_cpu(subgroup->codec.vid);
+			print_field("    Codec Company ID: %s (0x%04x)",
+						bt_compidtostr(id), id);
+			print_field("    Codec Vendor ID: 0x%04x",
+						subgroup->codec.vid);
+		}
+
+		codec_cfg = iov_pull(&iov, sizeof(*codec_cfg));
+		if (!codec_cfg)
+			goto done;
+
+		if (!iov_pull(&iov, codec_cfg->len))
+			goto done;
+
+		print_ltv("    Codec Specific Configuration",
+					codec_cfg->data, codec_cfg->len,
+					NULL, 0);
+
+		metadata = iov_pull(&iov, sizeof(*metadata));
+		if (!metadata)
+			goto done;
+
+		if (!iov_pull(&iov, metadata->len))
+			goto done;
+
+		print_ltv("    Metadata", metadata->data, metadata->len,
+					NULL, 0);
+
+		/* Level 3 - BIS(s)*/
+		for (j = 0; j < subgroup->num_bis; j++) {
+			struct bt_hci_le_pa_base_bis *bis;
+
+			print_field("      BIS #%u:", j);
+
+			bis = iov_pull(&iov, sizeof(*bis));
+			if (!bis)
+				goto done;
+
+			print_field("      Index: %u", bis->index);
+
+			codec_cfg = iov_pull(&iov, sizeof(*codec_cfg));
+			if (!codec_cfg)
+				goto done;
+
+			if (!iov_pull(&iov, codec_cfg->len))
+				goto done;
+
+			print_hex_field("      Codec Specific Configuration",
+					codec_cfg->data, codec_cfg->len);
+		}
+	}
+
+done:
+	if (iov.iov_len)
+		print_hex_field("  Data", iov.iov_base, iov.iov_len);
+}
+
+static void print_broadcast_annoucement(const uint8_t *data, uint8_t data_len)
+{
+	uint32_t bid;
+
+	if (data_len < 3) {
+		print_hex_field("  Data", data, data_len);
+		return;
+	}
+
+	bid = get_le24(data);
+	print_field("Broadcast ID: %u (0x%06x)", bid, bid);
+}
+
+static const struct service_data_decoder {
+	uint16_t uuid;
+	void (*func)(const uint8_t *data, uint8_t data_len);
+} service_data_decoders[] = {
+	{ 0x1851, print_base_annoucement },
+	{ 0x1852, print_broadcast_annoucement }
+};
+
+static void print_service_data(const uint8_t *data, uint8_t data_len)
+{
+	uint16_t uuid = get_le16(&data[0]);
+	size_t i;
+
+	print_field("Service Data: %s (0x%4.4x)", bt_uuid16_to_str(uuid), uuid);
+
+	for (i = 0; i < ARRAY_SIZE(service_data_decoders); i++) {
+		const struct service_data_decoder *decoder;
+
+		decoder = &service_data_decoders[i];
+
+		if (decoder->uuid == uuid) {
+			decoder->func(&data[2], data_len - 2);
+			return;
+		}
+	}
+
+	print_hex_field("  Data", &data[2], data_len - 2);
 }
 
 static const struct bitfield_data eir_flags_table[] = {
@@ -3702,11 +4018,21 @@ static void print_eir(const uint8_t *eir, uint8_t eir_len, bool le)
 		case BT_EIR_SERVICE_DATA:
 			if (data_len < 2)
 				break;
-			sprintf(label, "Service Data (UUID 0x%4.4x)",
-							get_le16(&data[0]));
-			print_hex_field(label, &data[2], data_len - 2);
+			print_service_data(data, data_len);
 			break;
 
+		case BT_EIR_SERVICE_DATA128:
+			if (data_len <= 16)
+				break;
+
+			print_field("Service Data UUID 128: %s ",
+						bt_uuid128_to_str(&data[0]));
+
+			if (data_len > 16)
+				print_hex_field("  Data", &data[16],
+								data_len - 16);
+
+			break;
 		case BT_EIR_RANDOM_ADDRESS:
 			if (data_len < 6)
 				break;
@@ -3768,6 +4094,14 @@ static void print_eir(const uint8_t *eir, uint8_t eir_len, bool le)
 
 		case BT_EIR_MESH_BEACON:
 			print_mesh_beacon(data, data_len);
+			break;
+
+		case BT_EIR_CSIP_RSI:
+			if (data_len < 6)
+				break;
+			print_addr("Resolvable Set Identifier", data, 0xff);
+			print_field("  Hash: 0x%6x", get_le24(data));
+			print_field("  Random: 0x%6x", get_le24(data + 3));
 			break;
 
 		case BT_EIR_MANUFACTURER_DATA:
@@ -4094,18 +4428,18 @@ void packet_simulator(struct timeval *tv, uint16_t frequency,
 	ll_packet(frequency, data, size, false);
 }
 
-static void null_cmd(const void *data, uint8_t size)
+static void null_cmd(uint16_t index, const void *data, uint8_t size)
 {
 }
 
-static void status_rsp(const void *data, uint8_t size)
+static void status_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	uint8_t status = *((const uint8_t *) data);
 
 	print_status(status);
 }
 
-static void status_handle_rsp(const void *data, uint8_t size)
+static void status_handle_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	uint8_t status = *((const uint8_t *) data);
 
@@ -4113,7 +4447,7 @@ static void status_handle_rsp(const void *data, uint8_t size)
 	print_field("Connection handle: %d", get_u8(data + 1));
 }
 
-static void status_bdaddr_rsp(const void *data, uint8_t size)
+static void status_bdaddr_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	uint8_t status = *((const uint8_t *) data);
 
@@ -4121,7 +4455,7 @@ static void status_bdaddr_rsp(const void *data, uint8_t size)
 	print_bdaddr(data + 1);
 }
 
-static void inquiry_cmd(const void *data, uint8_t size)
+static void inquiry_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_inquiry *cmd = data;
 
@@ -4131,7 +4465,7 @@ static void inquiry_cmd(const void *data, uint8_t size)
 	print_num_resp(cmd->num_resp);
 }
 
-static void periodic_inquiry_cmd(const void *data, uint8_t size)
+static void periodic_inquiry_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_periodic_inquiry *cmd = data;
 
@@ -4145,7 +4479,7 @@ static void periodic_inquiry_cmd(const void *data, uint8_t size)
 	print_num_resp(cmd->num_resp);
 }
 
-static void create_conn_cmd(const void *data, uint8_t size)
+static void create_conn_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_create_conn *cmd = data;
 	const char *str;
@@ -4171,7 +4505,7 @@ static void create_conn_cmd(const void *data, uint8_t size)
 	print_field("Role switch: %s (0x%2.2x)", str, cmd->role_switch);
 }
 
-static void disconnect_cmd(const void *data, uint8_t size)
+static void disconnect_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_disconnect *cmd = data;
 
@@ -4179,7 +4513,7 @@ static void disconnect_cmd(const void *data, uint8_t size)
 	print_reason(cmd->reason);
 }
 
-static void add_sco_conn_cmd(const void *data, uint8_t size)
+static void add_sco_conn_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_add_sco_conn *cmd = data;
 
@@ -4187,14 +4521,16 @@ static void add_sco_conn_cmd(const void *data, uint8_t size)
 	print_pkt_type_sco(cmd->pkt_type);
 }
 
-static void create_conn_cancel_cmd(const void *data, uint8_t size)
+static void create_conn_cancel_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_create_conn_cancel *cmd = data;
 
 	print_bdaddr(cmd->bdaddr);
 }
 
-static void accept_conn_request_cmd(const void *data, uint8_t size)
+static void accept_conn_request_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_accept_conn_request *cmd = data;
 
@@ -4202,7 +4538,8 @@ static void accept_conn_request_cmd(const void *data, uint8_t size)
 	print_role(cmd->role);
 }
 
-static void reject_conn_request_cmd(const void *data, uint8_t size)
+static void reject_conn_request_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_reject_conn_request *cmd = data;
 
@@ -4210,7 +4547,8 @@ static void reject_conn_request_cmd(const void *data, uint8_t size)
 	print_reason(cmd->reason);
 }
 
-static void link_key_request_reply_cmd(const void *data, uint8_t size)
+static void link_key_request_reply_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_link_key_request_reply *cmd = data;
 
@@ -4218,14 +4556,16 @@ static void link_key_request_reply_cmd(const void *data, uint8_t size)
 	print_link_key(cmd->link_key);
 }
 
-static void link_key_request_neg_reply_cmd(const void *data, uint8_t size)
+static void link_key_request_neg_reply_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_link_key_request_neg_reply *cmd = data;
 
 	print_bdaddr(cmd->bdaddr);
 }
 
-static void pin_code_request_reply_cmd(const void *data, uint8_t size)
+static void pin_code_request_reply_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_pin_code_request_reply *cmd = data;
 
@@ -4234,14 +4574,16 @@ static void pin_code_request_reply_cmd(const void *data, uint8_t size)
 	print_pin_code(cmd->pin_code, cmd->pin_len);
 }
 
-static void pin_code_request_neg_reply_cmd(const void *data, uint8_t size)
+static void pin_code_request_neg_reply_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_pin_code_request_neg_reply *cmd = data;
 
 	print_bdaddr(cmd->bdaddr);
 }
 
-static void change_conn_pkt_type_cmd(const void *data, uint8_t size)
+static void change_conn_pkt_type_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_change_conn_pkt_type *cmd = data;
 
@@ -4249,14 +4591,14 @@ static void change_conn_pkt_type_cmd(const void *data, uint8_t size)
 	print_pkt_type(cmd->pkt_type);
 }
 
-static void auth_requested_cmd(const void *data, uint8_t size)
+static void auth_requested_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_auth_requested *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void set_conn_encrypt_cmd(const void *data, uint8_t size)
+static void set_conn_encrypt_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_set_conn_encrypt *cmd = data;
 
@@ -4264,21 +4606,24 @@ static void set_conn_encrypt_cmd(const void *data, uint8_t size)
 	print_enable("Encryption", cmd->encr_mode);
 }
 
-static void change_conn_link_key_cmd(const void *data, uint8_t size)
+static void change_conn_link_key_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_change_conn_link_key *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void link_key_selection_cmd(const void *data, uint8_t size)
+static void link_key_selection_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_link_key_selection *cmd = data;
 
 	print_key_flag(cmd->key_flag);
 }
 
-static void remote_name_request_cmd(const void *data, uint8_t size)
+static void remote_name_request_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_remote_name_request *cmd = data;
 
@@ -4288,21 +4633,24 @@ static void remote_name_request_cmd(const void *data, uint8_t size)
 	print_clock_offset(cmd->clock_offset);
 }
 
-static void remote_name_request_cancel_cmd(const void *data, uint8_t size)
+static void remote_name_request_cancel_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_remote_name_request_cancel *cmd = data;
 
 	print_bdaddr(cmd->bdaddr);
 }
 
-static void read_remote_features_cmd(const void *data, uint8_t size)
+static void read_remote_features_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_read_remote_features *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void read_remote_ext_features_cmd(const void *data, uint8_t size)
+static void read_remote_ext_features_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_read_remote_ext_features *cmd = data;
 
@@ -4310,28 +4658,30 @@ static void read_remote_ext_features_cmd(const void *data, uint8_t size)
 	print_field("Page: %d", cmd->page);
 }
 
-static void read_remote_version_cmd(const void *data, uint8_t size)
+static void read_remote_version_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_read_remote_version *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void read_clock_offset_cmd(const void *data, uint8_t size)
+static void read_clock_offset_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_read_clock_offset *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void read_lmp_handle_cmd(const void *data, uint8_t size)
+static void read_lmp_handle_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_read_lmp_handle *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void read_lmp_handle_rsp(const void *data, uint8_t size)
+static void read_lmp_handle_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_rsp_read_lmp_handle *rsp = data;
 
@@ -4341,7 +4691,7 @@ static void read_lmp_handle_rsp(const void *data, uint8_t size)
 	print_field("Reserved: %d", le32_to_cpu(rsp->reserved));
 }
 
-static void setup_sync_conn_cmd(const void *data, uint8_t size)
+static void setup_sync_conn_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_setup_sync_conn *cmd = data;
 
@@ -4354,7 +4704,8 @@ static void setup_sync_conn_cmd(const void *data, uint8_t size)
 	print_pkt_type_sco(cmd->pkt_type);
 }
 
-static void accept_sync_conn_request_cmd(const void *data, uint8_t size)
+static void accept_sync_conn_request_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_accept_sync_conn_request *cmd = data;
 
@@ -4367,7 +4718,8 @@ static void accept_sync_conn_request_cmd(const void *data, uint8_t size)
 	print_pkt_type_sco(cmd->pkt_type);
 }
 
-static void reject_sync_conn_request_cmd(const void *data, uint8_t size)
+static void reject_sync_conn_request_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_reject_sync_conn_request *cmd = data;
 
@@ -4375,7 +4727,8 @@ static void reject_sync_conn_request_cmd(const void *data, uint8_t size)
 	print_reason(cmd->reason);
 }
 
-static void io_capability_request_reply_cmd(const void *data, uint8_t size)
+static void io_capability_request_reply_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_io_capability_request_reply *cmd = data;
 
@@ -4385,21 +4738,24 @@ static void io_capability_request_reply_cmd(const void *data, uint8_t size)
 	print_authentication(cmd->authentication);
 }
 
-static void user_confirm_request_reply_cmd(const void *data, uint8_t size)
+static void user_confirm_request_reply_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_user_confirm_request_reply *cmd = data;
 
 	print_bdaddr(cmd->bdaddr);
 }
 
-static void user_confirm_request_neg_reply_cmd(const void *data, uint8_t size)
+static void user_confirm_request_neg_reply_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_user_confirm_request_neg_reply *cmd = data;
 
 	print_bdaddr(cmd->bdaddr);
 }
 
-static void user_passkey_request_reply_cmd(const void *data, uint8_t size)
+static void user_passkey_request_reply_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_user_passkey_request_reply *cmd = data;
 
@@ -4407,14 +4763,16 @@ static void user_passkey_request_reply_cmd(const void *data, uint8_t size)
 	print_passkey(cmd->passkey);
 }
 
-static void user_passkey_request_neg_reply_cmd(const void *data, uint8_t size)
+static void user_passkey_request_neg_reply_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_user_passkey_request_neg_reply *cmd = data;
 
 	print_bdaddr(cmd->bdaddr);
 }
 
-static void remote_oob_data_request_reply_cmd(const void *data, uint8_t size)
+static void remote_oob_data_request_reply_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_remote_oob_data_request_reply *cmd = data;
 
@@ -4423,14 +4781,16 @@ static void remote_oob_data_request_reply_cmd(const void *data, uint8_t size)
 	print_randomizer_p192(cmd->randomizer);
 }
 
-static void remote_oob_data_request_neg_reply_cmd(const void *data, uint8_t size)
+static void remote_oob_data_request_neg_reply_cmd(uint16_t index,
+						const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_remote_oob_data_request_neg_reply *cmd = data;
 
 	print_bdaddr(cmd->bdaddr);
 }
 
-static void io_capability_request_neg_reply_cmd(const void *data, uint8_t size)
+static void io_capability_request_neg_reply_cmd(uint16_t index,
+						const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_io_capability_request_neg_reply *cmd = data;
 
@@ -4438,7 +4798,7 @@ static void io_capability_request_neg_reply_cmd(const void *data, uint8_t size)
 	print_reason(cmd->reason);
 }
 
-static void create_phy_link_cmd(const void *data, uint8_t size)
+static void create_phy_link_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_create_phy_link *cmd = data;
 
@@ -4449,7 +4809,7 @@ static void create_phy_link_cmd(const void *data, uint8_t size)
 	packet_hexdump(data + 3, size - 3);
 }
 
-static void accept_phy_link_cmd(const void *data, uint8_t size)
+static void accept_phy_link_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_accept_phy_link *cmd = data;
 
@@ -4460,7 +4820,7 @@ static void accept_phy_link_cmd(const void *data, uint8_t size)
 	packet_hexdump(data + 3, size - 3);
 }
 
-static void disconn_phy_link_cmd(const void *data, uint8_t size)
+static void disconn_phy_link_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_disconn_phy_link *cmd = data;
 
@@ -4468,7 +4828,8 @@ static void disconn_phy_link_cmd(const void *data, uint8_t size)
 	print_reason(cmd->reason);
 }
 
-static void create_logic_link_cmd(const void *data, uint8_t size)
+static void create_logic_link_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_create_logic_link *cmd = data;
 
@@ -4477,7 +4838,8 @@ static void create_logic_link_cmd(const void *data, uint8_t size)
 	print_flow_spec("RX", cmd->rx_flow_spec);
 }
 
-static void accept_logic_link_cmd(const void *data, uint8_t size)
+static void accept_logic_link_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_accept_logic_link *cmd = data;
 
@@ -4486,14 +4848,16 @@ static void accept_logic_link_cmd(const void *data, uint8_t size)
 	print_flow_spec("RX", cmd->rx_flow_spec);
 }
 
-static void disconn_logic_link_cmd(const void *data, uint8_t size)
+static void disconn_logic_link_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_disconn_logic_link *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void logic_link_cancel_cmd(const void *data, uint8_t size)
+static void logic_link_cancel_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_logic_link_cancel *cmd = data;
 
@@ -4501,7 +4865,8 @@ static void logic_link_cancel_cmd(const void *data, uint8_t size)
 	print_field("TX flow spec: 0x%2.2x", cmd->flow_spec);
 }
 
-static void logic_link_cancel_rsp(const void *data, uint8_t size)
+static void logic_link_cancel_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_logic_link_cancel *rsp = data;
 
@@ -4510,7 +4875,7 @@ static void logic_link_cancel_rsp(const void *data, uint8_t size)
 	print_field("TX flow spec: 0x%2.2x", rsp->flow_spec);
 }
 
-static void flow_spec_modify_cmd(const void *data, uint8_t size)
+static void flow_spec_modify_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_flow_spec_modify *cmd = data;
 
@@ -4519,7 +4884,8 @@ static void flow_spec_modify_cmd(const void *data, uint8_t size)
 	print_flow_spec("RX", cmd->rx_flow_spec);
 }
 
-static void enhanced_setup_sync_conn_cmd(const void *data, uint8_t size)
+static void enhanced_setup_sync_conn_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_enhanced_setup_sync_conn *cmd = data;
 
@@ -4534,7 +4900,9 @@ static void enhanced_setup_sync_conn_cmd(const void *data, uint8_t size)
 	print_retransmission_effort(cmd->retrans_effort);
 }
 
-static void enhanced_accept_sync_conn_request_cmd(const void *data, uint8_t size)
+static void enhanced_accept_sync_conn_request_cmd(uint16_t index,
+						const void *data,
+						uint8_t size)
 {
 	const struct bt_hci_cmd_enhanced_accept_sync_conn_request *cmd = data;
 
@@ -4549,7 +4917,7 @@ static void enhanced_accept_sync_conn_request_cmd(const void *data, uint8_t size
 	print_retransmission_effort(cmd->retrans_effort);
 }
 
-static void truncated_page_cmd(const void *data, uint8_t size)
+static void truncated_page_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_truncated_page *cmd = data;
 
@@ -4558,14 +4926,16 @@ static void truncated_page_cmd(const void *data, uint8_t size)
 	print_clock_offset(cmd->clock_offset);
 }
 
-static void truncated_page_cancel_cmd(const void *data, uint8_t size)
+static void truncated_page_cancel_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_truncated_page_cancel *cmd = data;
 
 	print_bdaddr(cmd->bdaddr);
 }
 
-static void set_peripheral_broadcast_cmd(const void *data, uint8_t size)
+static void set_peripheral_broadcast_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_set_peripheral_broadcast *cmd = data;
 
@@ -4578,7 +4948,8 @@ static void set_peripheral_broadcast_cmd(const void *data, uint8_t size)
 	print_slot_625("Supervision timeout", cmd->timeout);
 }
 
-static void set_peripheral_broadcast_rsp(const void *data, uint8_t size)
+static void set_peripheral_broadcast_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_set_peripheral_broadcast *rsp = data;
 
@@ -4587,7 +4958,8 @@ static void set_peripheral_broadcast_rsp(const void *data, uint8_t size)
 	print_interval(rsp->interval);
 }
 
-static void set_peripheral_broadcast_receive_cmd(const void *data, uint8_t size)
+static void set_peripheral_broadcast_receive_cmd(uint16_t index,
+						const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_set_peripheral_broadcast_receive *cmd = data;
 
@@ -4605,7 +4977,8 @@ static void set_peripheral_broadcast_receive_cmd(const void *data, uint8_t size)
 	print_channel_map(cmd->map);
 }
 
-static void set_peripheral_broadcast_receive_rsp(const void *data, uint8_t size)
+static void set_peripheral_broadcast_receive_rsp(uint16_t index,
+						const void *data, uint8_t size)
 {
 	const struct bt_hci_rsp_set_peripheral_broadcast_receive *rsp = data;
 
@@ -4614,7 +4987,8 @@ static void set_peripheral_broadcast_receive_rsp(const void *data, uint8_t size)
 	print_lt_addr(rsp->lt_addr);
 }
 
-static void receive_sync_train_cmd(const void *data, uint8_t size)
+static void receive_sync_train_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_receive_sync_train *cmd = data;
 
@@ -4624,7 +4998,8 @@ static void receive_sync_train_cmd(const void *data, uint8_t size)
 	print_interval(cmd->interval);
 }
 
-static void remote_oob_ext_data_request_reply_cmd(const void *data, uint8_t size)
+static void remote_oob_ext_data_request_reply_cmd(uint16_t index,
+						const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_remote_oob_ext_data_request_reply *cmd = data;
 
@@ -4635,7 +5010,7 @@ static void remote_oob_ext_data_request_reply_cmd(const void *data, uint8_t size
 	print_randomizer_p256(cmd->randomizer256);
 }
 
-static void hold_mode_cmd(const void *data, uint8_t size)
+static void hold_mode_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_hold_mode *cmd = data;
 
@@ -4644,7 +5019,7 @@ static void hold_mode_cmd(const void *data, uint8_t size)
 	print_slot_625("Hold min interval", cmd->min_interval);
 }
 
-static void sniff_mode_cmd(const void *data, uint8_t size)
+static void sniff_mode_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_sniff_mode *cmd = data;
 
@@ -4655,14 +5030,14 @@ static void sniff_mode_cmd(const void *data, uint8_t size)
 	print_slot_125("Sniff timeout", cmd->timeout);
 }
 
-static void exit_sniff_mode_cmd(const void *data, uint8_t size)
+static void exit_sniff_mode_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_exit_sniff_mode *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void park_state_cmd(const void *data, uint8_t size)
+static void park_state_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_park_state *cmd = data;
 
@@ -4671,14 +5046,14 @@ static void park_state_cmd(const void *data, uint8_t size)
 	print_slot_625("Beacon min interval", cmd->min_interval);
 }
 
-static void exit_park_state_cmd(const void *data, uint8_t size)
+static void exit_park_state_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_exit_park_state *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void qos_setup_cmd(const void *data, uint8_t size)
+static void qos_setup_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_qos_setup *cmd = data;
 
@@ -4693,14 +5068,14 @@ static void qos_setup_cmd(const void *data, uint8_t size)
 	print_field("Delay variation: %d", le32_to_cpu(cmd->delay_variation));
 }
 
-static void role_discovery_cmd(const void *data, uint8_t size)
+static void role_discovery_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_role_discovery *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void role_discovery_rsp(const void *data, uint8_t size)
+static void role_discovery_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_rsp_role_discovery *rsp = data;
 
@@ -4709,7 +5084,7 @@ static void role_discovery_rsp(const void *data, uint8_t size)
 	print_role(rsp->role);
 }
 
-static void switch_role_cmd(const void *data, uint8_t size)
+static void switch_role_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_switch_role *cmd = data;
 
@@ -4717,14 +5092,14 @@ static void switch_role_cmd(const void *data, uint8_t size)
 	print_role(cmd->role);
 }
 
-static void read_link_policy_cmd(const void *data, uint8_t size)
+static void read_link_policy_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_read_link_policy *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void read_link_policy_rsp(const void *data, uint8_t size)
+static void read_link_policy_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_rsp_read_link_policy *rsp = data;
 
@@ -4733,7 +5108,8 @@ static void read_link_policy_rsp(const void *data, uint8_t size)
 	print_link_policy(rsp->policy);
 }
 
-static void write_link_policy_cmd(const void *data, uint8_t size)
+static void write_link_policy_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_link_policy *cmd = data;
 
@@ -4741,7 +5117,8 @@ static void write_link_policy_cmd(const void *data, uint8_t size)
 	print_link_policy(cmd->policy);
 }
 
-static void write_link_policy_rsp(const void *data, uint8_t size)
+static void write_link_policy_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_write_link_policy *rsp = data;
 
@@ -4749,7 +5126,8 @@ static void write_link_policy_rsp(const void *data, uint8_t size)
 	print_handle(rsp->handle);
 }
 
-static void read_default_link_policy_rsp(const void *data, uint8_t size)
+static void read_default_link_policy_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_default_link_policy *rsp = data;
 
@@ -4757,14 +5135,15 @@ static void read_default_link_policy_rsp(const void *data, uint8_t size)
 	print_link_policy(rsp->policy);
 }
 
-static void write_default_link_policy_cmd(const void *data, uint8_t size)
+static void write_default_link_policy_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_default_link_policy *cmd = data;
 
 	print_link_policy(cmd->policy);
 }
 
-static void flow_spec_cmd(const void *data, uint8_t size)
+static void flow_spec_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_flow_spec *cmd = data;
 
@@ -4781,7 +5160,7 @@ static void flow_spec_cmd(const void *data, uint8_t size)
 	print_field("Access latency: %d", le32_to_cpu(cmd->access_latency));
 }
 
-static void sniff_subrating_cmd(const void *data, uint8_t size)
+static void sniff_subrating_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_sniff_subrating *cmd = data;
 
@@ -4791,7 +5170,7 @@ static void sniff_subrating_cmd(const void *data, uint8_t size)
 	print_slot_625("Min local timeout", cmd->min_local_timeout);
 }
 
-static void sniff_subrating_rsp(const void *data, uint8_t size)
+static void sniff_subrating_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_rsp_sniff_subrating *rsp = data;
 
@@ -4799,14 +5178,14 @@ static void sniff_subrating_rsp(const void *data, uint8_t size)
 	print_handle(rsp->handle);
 }
 
-static void set_event_mask_cmd(const void *data, uint8_t size)
+static void set_event_mask_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_set_event_mask *cmd = data;
 
 	print_event_mask(cmd->mask, events_table);
 }
 
-static void set_event_filter_cmd(const void *data, uint8_t size)
+static void set_event_filter_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	uint8_t type = *((const uint8_t *) data);
 	uint8_t filter;
@@ -4904,14 +5283,14 @@ static void set_event_filter_cmd(const void *data, uint8_t size)
 	}
 }
 
-static void flush_cmd(const void *data, uint8_t size)
+static void flush_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_flush *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void flush_rsp(const void *data, uint8_t size)
+static void flush_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_rsp_flush *rsp = data;
 
@@ -4919,7 +5298,7 @@ static void flush_rsp(const void *data, uint8_t size)
 	print_handle(rsp->handle);
 }
 
-static void read_pin_type_rsp(const void *data, uint8_t size)
+static void read_pin_type_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_rsp_read_pin_type *rsp = data;
 
@@ -4927,14 +5306,15 @@ static void read_pin_type_rsp(const void *data, uint8_t size)
 	print_pin_type(rsp->pin_type);
 }
 
-static void write_pin_type_cmd(const void *data, uint8_t size)
+static void write_pin_type_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_write_pin_type *cmd = data;
 
 	print_pin_type(cmd->pin_type);
 }
 
-static void read_stored_link_key_cmd(const void *data, uint8_t size)
+static void read_stored_link_key_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_read_stored_link_key *cmd = data;
 
@@ -4942,7 +5322,8 @@ static void read_stored_link_key_cmd(const void *data, uint8_t size)
 	print_field("Read all: 0x%2.2x", cmd->read_all);
 }
 
-static void read_stored_link_key_rsp(const void *data, uint8_t size)
+static void read_stored_link_key_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_stored_link_key *rsp = data;
 
@@ -4951,7 +5332,8 @@ static void read_stored_link_key_rsp(const void *data, uint8_t size)
 	print_field("Num keys: %d", le16_to_cpu(rsp->num_keys));
 }
 
-static void write_stored_link_key_cmd(const void *data, uint8_t size)
+static void write_stored_link_key_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_stored_link_key *cmd = data;
 
@@ -4960,7 +5342,8 @@ static void write_stored_link_key_cmd(const void *data, uint8_t size)
 	packet_hexdump(data + 1, size - 1);
 }
 
-static void write_stored_link_key_rsp(const void *data, uint8_t size)
+static void write_stored_link_key_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_write_stored_link_key *rsp = data;
 
@@ -4968,7 +5351,8 @@ static void write_stored_link_key_rsp(const void *data, uint8_t size)
 	print_field("Num keys: %d", rsp->num_keys);
 }
 
-static void delete_stored_link_key_cmd(const void *data, uint8_t size)
+static void delete_stored_link_key_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_delete_stored_link_key *cmd = data;
 
@@ -4976,7 +5360,8 @@ static void delete_stored_link_key_cmd(const void *data, uint8_t size)
 	print_field("Delete all: 0x%2.2x", cmd->delete_all);
 }
 
-static void delete_stored_link_key_rsp(const void *data, uint8_t size)
+static void delete_stored_link_key_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_delete_stored_link_key *rsp = data;
 
@@ -4984,14 +5369,14 @@ static void delete_stored_link_key_rsp(const void *data, uint8_t size)
 	print_field("Num keys: %d", le16_to_cpu(rsp->num_keys));
 }
 
-static void write_local_name_cmd(const void *data, uint8_t size)
+static void write_local_name_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_write_local_name *cmd = data;
 
 	print_name(cmd->name);
 }
 
-static void read_local_name_rsp(const void *data, uint8_t size)
+static void read_local_name_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_rsp_read_local_name *rsp = data;
 
@@ -4999,7 +5384,8 @@ static void read_local_name_rsp(const void *data, uint8_t size)
 	print_name(rsp->name);
 }
 
-static void read_conn_accept_timeout_rsp(const void *data, uint8_t size)
+static void read_conn_accept_timeout_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_conn_accept_timeout *rsp = data;
 
@@ -5007,14 +5393,16 @@ static void read_conn_accept_timeout_rsp(const void *data, uint8_t size)
 	print_timeout(rsp->timeout);
 }
 
-static void write_conn_accept_timeout_cmd(const void *data, uint8_t size)
+static void write_conn_accept_timeout_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_conn_accept_timeout *cmd = data;
 
 	print_timeout(cmd->timeout);
 }
 
-static void read_page_timeout_rsp(const void *data, uint8_t size)
+static void read_page_timeout_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_page_timeout *rsp = data;
 
@@ -5022,14 +5410,15 @@ static void read_page_timeout_rsp(const void *data, uint8_t size)
 	print_timeout(rsp->timeout);
 }
 
-static void write_page_timeout_cmd(const void *data, uint8_t size)
+static void write_page_timeout_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_page_timeout *cmd = data;
 
 	print_timeout(cmd->timeout);
 }
 
-static void read_scan_enable_rsp(const void *data, uint8_t size)
+static void read_scan_enable_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_rsp_read_scan_enable *rsp = data;
 
@@ -5037,14 +5426,16 @@ static void read_scan_enable_rsp(const void *data, uint8_t size)
 	print_scan_enable(rsp->enable);
 }
 
-static void write_scan_enable_cmd(const void *data, uint8_t size)
+static void write_scan_enable_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_scan_enable *cmd = data;
 
 	print_scan_enable(cmd->enable);
 }
 
-static void read_page_scan_activity_rsp(const void *data, uint8_t size)
+static void read_page_scan_activity_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_page_scan_activity *rsp = data;
 
@@ -5053,7 +5444,8 @@ static void read_page_scan_activity_rsp(const void *data, uint8_t size)
 	print_window(rsp->window);
 }
 
-static void write_page_scan_activity_cmd(const void *data, uint8_t size)
+static void write_page_scan_activity_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_page_scan_activity *cmd = data;
 
@@ -5061,7 +5453,8 @@ static void write_page_scan_activity_cmd(const void *data, uint8_t size)
 	print_window(cmd->window);
 }
 
-static void read_inquiry_scan_activity_rsp(const void *data, uint8_t size)
+static void read_inquiry_scan_activity_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_inquiry_scan_activity *rsp = data;
 
@@ -5070,7 +5463,8 @@ static void read_inquiry_scan_activity_rsp(const void *data, uint8_t size)
 	print_window(rsp->window);
 }
 
-static void write_inquiry_scan_activity_cmd(const void *data, uint8_t size)
+static void write_inquiry_scan_activity_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_inquiry_scan_activity *cmd = data;
 
@@ -5078,7 +5472,7 @@ static void write_inquiry_scan_activity_cmd(const void *data, uint8_t size)
 	print_window(cmd->window);
 }
 
-static void read_auth_enable_rsp(const void *data, uint8_t size)
+static void read_auth_enable_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_rsp_read_auth_enable *rsp = data;
 
@@ -5086,14 +5480,16 @@ static void read_auth_enable_rsp(const void *data, uint8_t size)
 	print_auth_enable(rsp->enable);
 }
 
-static void write_auth_enable_cmd(const void *data, uint8_t size)
+static void write_auth_enable_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_auth_enable *cmd = data;
 
 	print_auth_enable(cmd->enable);
 }
 
-static void read_encrypt_mode_rsp(const void *data, uint8_t size)
+static void read_encrypt_mode_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_encrypt_mode *rsp = data;
 
@@ -5101,14 +5497,16 @@ static void read_encrypt_mode_rsp(const void *data, uint8_t size)
 	print_encrypt_mode(rsp->mode);
 }
 
-static void write_encrypt_mode_cmd(const void *data, uint8_t size)
+static void write_encrypt_mode_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_encrypt_mode *cmd = data;
 
 	print_encrypt_mode(cmd->mode);
 }
 
-static void read_class_of_dev_rsp(const void *data, uint8_t size)
+static void read_class_of_dev_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_class_of_dev *rsp = data;
 
@@ -5116,14 +5514,16 @@ static void read_class_of_dev_rsp(const void *data, uint8_t size)
 	print_dev_class(rsp->dev_class);
 }
 
-static void write_class_of_dev_cmd(const void *data, uint8_t size)
+static void write_class_of_dev_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_class_of_dev *cmd = data;
 
 	print_dev_class(cmd->dev_class);
 }
 
-static void read_voice_setting_rsp(const void *data, uint8_t size)
+static void read_voice_setting_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_voice_setting *rsp = data;
 
@@ -5131,21 +5531,24 @@ static void read_voice_setting_rsp(const void *data, uint8_t size)
 	print_voice_setting(rsp->setting);
 }
 
-static void write_voice_setting_cmd(const void *data, uint8_t size)
+static void write_voice_setting_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_voice_setting *cmd = data;
 
 	print_voice_setting(cmd->setting);
 }
 
-static void read_auto_flush_timeout_cmd(const void *data, uint8_t size)
+static void read_auto_flush_timeout_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_read_auto_flush_timeout *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void read_auto_flush_timeout_rsp(const void *data, uint8_t size)
+static void read_auto_flush_timeout_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_auto_flush_timeout *rsp = data;
 
@@ -5154,7 +5557,8 @@ static void read_auto_flush_timeout_rsp(const void *data, uint8_t size)
 	print_flush_timeout(rsp->timeout);
 }
 
-static void write_auto_flush_timeout_cmd(const void *data, uint8_t size)
+static void write_auto_flush_timeout_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_auto_flush_timeout *cmd = data;
 
@@ -5162,7 +5566,8 @@ static void write_auto_flush_timeout_cmd(const void *data, uint8_t size)
 	print_flush_timeout(cmd->timeout);
 }
 
-static void write_auto_flush_timeout_rsp(const void *data, uint8_t size)
+static void write_auto_flush_timeout_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_write_auto_flush_timeout *rsp = data;
 
@@ -5170,7 +5575,8 @@ static void write_auto_flush_timeout_rsp(const void *data, uint8_t size)
 	print_handle(rsp->handle);
 }
 
-static void read_num_broadcast_retrans_rsp(const void *data, uint8_t size)
+static void read_num_broadcast_retrans_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_num_broadcast_retrans *rsp = data;
 
@@ -5178,14 +5584,16 @@ static void read_num_broadcast_retrans_rsp(const void *data, uint8_t size)
 	print_num_broadcast_retrans(rsp->num_retrans);
 }
 
-static void write_num_broadcast_retrans_cmd(const void *data, uint8_t size)
+static void write_num_broadcast_retrans_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_num_broadcast_retrans *cmd = data;
 
 	print_num_broadcast_retrans(cmd->num_retrans);
 }
 
-static void read_hold_mode_activity_rsp(const void *data, uint8_t size)
+static void read_hold_mode_activity_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_hold_mode_activity *rsp = data;
 
@@ -5193,14 +5601,15 @@ static void read_hold_mode_activity_rsp(const void *data, uint8_t size)
 	print_hold_mode_activity(rsp->activity);
 }
 
-static void write_hold_mode_activity_cmd(const void *data, uint8_t size)
+static void write_hold_mode_activity_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_hold_mode_activity *cmd = data;
 
 	print_hold_mode_activity(cmd->activity);
 }
 
-static void read_tx_power_cmd(const void *data, uint8_t size)
+static void read_tx_power_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_read_tx_power *cmd = data;
 
@@ -5208,7 +5617,7 @@ static void read_tx_power_cmd(const void *data, uint8_t size)
 	print_power_type(cmd->type);
 }
 
-static void read_tx_power_rsp(const void *data, uint8_t size)
+static void read_tx_power_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_rsp_read_tx_power *rsp = data;
 
@@ -5217,7 +5626,8 @@ static void read_tx_power_rsp(const void *data, uint8_t size)
 	print_power_level(rsp->level, NULL);
 }
 
-static void read_sync_flow_control_rsp(const void *data, uint8_t size)
+static void read_sync_flow_control_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_sync_flow_control *rsp = data;
 
@@ -5225,21 +5635,23 @@ static void read_sync_flow_control_rsp(const void *data, uint8_t size)
 	print_enable("Flow control", rsp->enable);
 }
 
-static void write_sync_flow_control_cmd(const void *data, uint8_t size)
+static void write_sync_flow_control_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_sync_flow_control *cmd = data;
 
 	print_enable("Flow control", cmd->enable);
 }
 
-static void set_host_flow_control_cmd(const void *data, uint8_t size)
+static void set_host_flow_control_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_set_host_flow_control *cmd = data;
 
 	print_host_flow_control(cmd->enable);
 }
 
-static void host_buffer_size_cmd(const void *data, uint8_t size)
+static void host_buffer_size_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_host_buffer_size *cmd = data;
 
@@ -5251,7 +5663,8 @@ static void host_buffer_size_cmd(const void *data, uint8_t size)
 					le16_to_cpu(cmd->sco_max_pkt));
 }
 
-static void host_num_completed_packets_cmd(const void *data, uint8_t size)
+static void host_num_completed_packets_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_host_num_completed_packets *cmd = data;
 
@@ -5263,14 +5676,16 @@ static void host_num_completed_packets_cmd(const void *data, uint8_t size)
 		packet_hexdump(data + sizeof(*cmd), size - sizeof(*cmd));
 }
 
-static void read_link_supv_timeout_cmd(const void *data, uint8_t size)
+static void read_link_supv_timeout_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_read_link_supv_timeout *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void read_link_supv_timeout_rsp(const void *data, uint8_t size)
+static void read_link_supv_timeout_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_link_supv_timeout *rsp = data;
 
@@ -5279,7 +5694,8 @@ static void read_link_supv_timeout_rsp(const void *data, uint8_t size)
 	print_timeout(rsp->timeout);
 }
 
-static void write_link_supv_timeout_cmd(const void *data, uint8_t size)
+static void write_link_supv_timeout_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_link_supv_timeout *cmd = data;
 
@@ -5287,7 +5703,8 @@ static void write_link_supv_timeout_cmd(const void *data, uint8_t size)
 	print_timeout(cmd->timeout);
 }
 
-static void write_link_supv_timeout_rsp(const void *data, uint8_t size)
+static void write_link_supv_timeout_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_write_link_supv_timeout *rsp = data;
 
@@ -5295,7 +5712,8 @@ static void write_link_supv_timeout_rsp(const void *data, uint8_t size)
 	print_handle(rsp->handle);
 }
 
-static void read_num_supported_iac_rsp(const void *data, uint8_t size)
+static void read_num_supported_iac_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_num_supported_iac *rsp = data;
 
@@ -5303,7 +5721,8 @@ static void read_num_supported_iac_rsp(const void *data, uint8_t size)
 	print_field("Number of IAC: %d", rsp->num_iac);
 }
 
-static void read_current_iac_lap_rsp(const void *data, uint8_t size)
+static void read_current_iac_lap_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_current_iac_lap *rsp = data;
 	uint8_t i;
@@ -5315,7 +5734,8 @@ static void read_current_iac_lap_rsp(const void *data, uint8_t size)
 		print_iac(rsp->iac_lap + (i * 3));
 }
 
-static void write_current_iac_lap_cmd(const void *data, uint8_t size)
+static void write_current_iac_lap_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_current_iac_lap *cmd = data;
 	uint8_t i;
@@ -5326,7 +5746,8 @@ static void write_current_iac_lap_cmd(const void *data, uint8_t size)
 		print_iac(cmd->iac_lap + (i * 3));
 }
 
-static void read_page_scan_period_mode_rsp(const void *data, uint8_t size)
+static void read_page_scan_period_mode_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_page_scan_period_mode *rsp = data;
 
@@ -5334,14 +5755,16 @@ static void read_page_scan_period_mode_rsp(const void *data, uint8_t size)
 	print_pscan_period_mode(rsp->mode);
 }
 
-static void write_page_scan_period_mode_cmd(const void *data, uint8_t size)
+static void write_page_scan_period_mode_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_page_scan_period_mode *cmd = data;
 
 	print_pscan_period_mode(cmd->mode);
 }
 
-static void read_page_scan_mode_rsp(const void *data, uint8_t size)
+static void read_page_scan_mode_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_page_scan_mode *rsp = data;
 
@@ -5349,21 +5772,24 @@ static void read_page_scan_mode_rsp(const void *data, uint8_t size)
 	print_pscan_mode(rsp->mode);
 }
 
-static void write_page_scan_mode_cmd(const void *data, uint8_t size)
+static void write_page_scan_mode_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_page_scan_mode *cmd = data;
 
 	print_pscan_mode(cmd->mode);
 }
 
-static void set_afh_host_classification_cmd(const void *data, uint8_t size)
+static void set_afh_host_classification_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_set_afh_host_classification *cmd = data;
 
 	print_channel_map(cmd->map);
 }
 
-static void read_inquiry_scan_type_rsp(const void *data, uint8_t size)
+static void read_inquiry_scan_type_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_inquiry_scan_type *rsp = data;
 
@@ -5371,14 +5797,16 @@ static void read_inquiry_scan_type_rsp(const void *data, uint8_t size)
 	print_inquiry_scan_type(rsp->type);
 }
 
-static void write_inquiry_scan_type_cmd(const void *data, uint8_t size)
+static void write_inquiry_scan_type_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_inquiry_scan_type *cmd = data;
 
 	print_inquiry_scan_type(cmd->type);
 }
 
-static void read_inquiry_mode_rsp(const void *data, uint8_t size)
+static void read_inquiry_mode_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_inquiry_mode *rsp = data;
 
@@ -5386,14 +5814,16 @@ static void read_inquiry_mode_rsp(const void *data, uint8_t size)
 	print_inquiry_mode(rsp->mode);
 }
 
-static void write_inquiry_mode_cmd(const void *data, uint8_t size)
+static void write_inquiry_mode_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_inquiry_mode *cmd = data;
 
 	print_inquiry_mode(cmd->mode);
 }
 
-static void read_page_scan_type_rsp(const void *data, uint8_t size)
+static void read_page_scan_type_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_page_scan_type *rsp = data;
 
@@ -5401,14 +5831,16 @@ static void read_page_scan_type_rsp(const void *data, uint8_t size)
 	print_pscan_type(rsp->type);
 }
 
-static void write_page_scan_type_cmd(const void *data, uint8_t size)
+static void write_page_scan_type_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_page_scan_type *cmd = data;
 
 	print_pscan_type(cmd->type);
 }
 
-static void read_afh_assessment_mode_rsp(const void *data, uint8_t size)
+static void read_afh_assessment_mode_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_afh_assessment_mode *rsp = data;
 
@@ -5416,14 +5848,16 @@ static void read_afh_assessment_mode_rsp(const void *data, uint8_t size)
 	print_enable("Mode", rsp->mode);
 }
 
-static void write_afh_assessment_mode_cmd(const void *data, uint8_t size)
+static void write_afh_assessment_mode_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_afh_assessment_mode *cmd = data;
 
 	print_enable("Mode", cmd->mode);
 }
 
-static void read_ext_inquiry_response_rsp(const void *data, uint8_t size)
+static void read_ext_inquiry_response_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_ext_inquiry_response *rsp = data;
 
@@ -5432,7 +5866,8 @@ static void read_ext_inquiry_response_rsp(const void *data, uint8_t size)
 	print_eir(rsp->data, sizeof(rsp->data), false);
 }
 
-static void write_ext_inquiry_response_cmd(const void *data, uint8_t size)
+static void write_ext_inquiry_response_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_ext_inquiry_response *cmd = data;
 
@@ -5440,14 +5875,16 @@ static void write_ext_inquiry_response_cmd(const void *data, uint8_t size)
 	print_eir(cmd->data, sizeof(cmd->data), false);
 }
 
-static void refresh_encrypt_key_cmd(const void *data, uint8_t size)
+static void refresh_encrypt_key_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_refresh_encrypt_key *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void read_simple_pairing_mode_rsp(const void *data, uint8_t size)
+static void read_simple_pairing_mode_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_simple_pairing_mode *rsp = data;
 
@@ -5455,14 +5892,16 @@ static void read_simple_pairing_mode_rsp(const void *data, uint8_t size)
 	print_enable("Mode", rsp->mode);
 }
 
-static void write_simple_pairing_mode_cmd(const void *data, uint8_t size)
+static void write_simple_pairing_mode_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_simple_pairing_mode *cmd = data;
 
 	print_enable("Mode", cmd->mode);
 }
 
-static void read_local_oob_data_rsp(const void *data, uint8_t size)
+static void read_local_oob_data_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_local_oob_data *rsp = data;
 
@@ -5471,7 +5910,8 @@ static void read_local_oob_data_rsp(const void *data, uint8_t size)
 	print_randomizer_p192(rsp->randomizer);
 }
 
-static void read_inquiry_resp_tx_power_rsp(const void *data, uint8_t size)
+static void read_inquiry_resp_tx_power_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_inquiry_resp_tx_power *rsp = data;
 
@@ -5479,14 +5919,16 @@ static void read_inquiry_resp_tx_power_rsp(const void *data, uint8_t size)
 	print_power_level(rsp->level, NULL);
 }
 
-static void write_inquiry_tx_power_cmd(const void *data, uint8_t size)
+static void write_inquiry_tx_power_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_inquiry_tx_power *cmd = data;
 
 	print_power_level(cmd->level, NULL);
 }
 
-static void read_erroneous_reporting_rsp(const void *data, uint8_t size)
+static void read_erroneous_reporting_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_erroneous_reporting *rsp = data;
 
@@ -5494,14 +5936,15 @@ static void read_erroneous_reporting_rsp(const void *data, uint8_t size)
 	print_enable("Mode", rsp->mode);
 }
 
-static void write_erroneous_reporting_cmd(const void *data, uint8_t size)
+static void write_erroneous_reporting_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_erroneous_reporting *cmd = data;
 
 	print_enable("Mode", cmd->mode);
 }
 
-static void enhanced_flush_cmd(const void *data, uint8_t size)
+static void enhanced_flush_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_enhanced_flush *cmd = data;
 	const char *str;
@@ -5520,7 +5963,8 @@ static void enhanced_flush_cmd(const void *data, uint8_t size)
 	print_field("Type: %s (0x%2.2x)", str, cmd->type);
 }
 
-static void send_keypress_notify_cmd(const void *data, uint8_t size)
+static void send_keypress_notify_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_send_keypress_notify *cmd = data;
 	const char *str;
@@ -5551,7 +5995,8 @@ static void send_keypress_notify_cmd(const void *data, uint8_t size)
 	print_field("Type: %s (0x%2.2x)", str, cmd->type);
 }
 
-static void send_keypress_notify_rsp(const void *data, uint8_t size)
+static void send_keypress_notify_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_send_keypress_notify *rsp = data;
 
@@ -5559,14 +6004,16 @@ static void send_keypress_notify_rsp(const void *data, uint8_t size)
 	print_bdaddr(rsp->bdaddr);
 }
 
-static void set_event_mask_page2_cmd(const void *data, uint8_t size)
+static void set_event_mask_page2_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_set_event_mask_page2 *cmd = data;
 
 	print_event_mask(cmd->mask, events_page2_table);
 }
 
-static void read_location_data_rsp(const void *data, uint8_t size)
+static void read_location_data_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_location_data *rsp = data;
 
@@ -5577,7 +6024,8 @@ static void read_location_data_rsp(const void *data, uint8_t size)
 	print_location_options(rsp->options);
 }
 
-static void write_location_data_cmd(const void *data, uint8_t size)
+static void write_location_data_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_location_data *cmd = data;
 
@@ -5587,7 +6035,8 @@ static void write_location_data_cmd(const void *data, uint8_t size)
 	print_location_options(cmd->options);
 }
 
-static void read_flow_control_mode_rsp(const void *data, uint8_t size)
+static void read_flow_control_mode_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_flow_control_mode *rsp = data;
 
@@ -5595,14 +6044,16 @@ static void read_flow_control_mode_rsp(const void *data, uint8_t size)
 	print_flow_control_mode(rsp->mode);
 }
 
-static void write_flow_control_mode_cmd(const void *data, uint8_t size)
+static void write_flow_control_mode_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_flow_control_mode *cmd = data;
 
 	print_flow_control_mode(cmd->mode);
 }
 
-static void read_enhanced_tx_power_cmd(const void *data, uint8_t size)
+static void read_enhanced_tx_power_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_read_enhanced_tx_power *cmd = data;
 
@@ -5610,7 +6061,8 @@ static void read_enhanced_tx_power_cmd(const void *data, uint8_t size)
 	print_power_type(cmd->type);
 }
 
-static void read_enhanced_tx_power_rsp(const void *data, uint8_t size)
+static void read_enhanced_tx_power_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_enhanced_tx_power *rsp = data;
 
@@ -5621,7 +6073,7 @@ static void read_enhanced_tx_power_rsp(const void *data, uint8_t size)
 	print_power_level(rsp->level_8dpsk, "8DPSK");
 }
 
-static void short_range_mode_cmd(const void *data, uint8_t size)
+static void short_range_mode_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_short_range_mode *cmd = data;
 
@@ -5629,7 +6081,8 @@ static void short_range_mode_cmd(const void *data, uint8_t size)
 	print_enable("Short range mode", cmd->mode);
 }
 
-static void read_le_host_supported_rsp(const void *data, uint8_t size)
+static void read_le_host_supported_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_le_host_supported *rsp = data;
 
@@ -5638,7 +6091,8 @@ static void read_le_host_supported_rsp(const void *data, uint8_t size)
 	print_field("Simultaneous: 0x%2.2x", rsp->simultaneous);
 }
 
-static void write_le_host_supported_cmd(const void *data, uint8_t size)
+static void write_le_host_supported_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_le_host_supported *cmd = data;
 
@@ -5646,14 +6100,16 @@ static void write_le_host_supported_cmd(const void *data, uint8_t size)
 	print_field("Simultaneous: 0x%2.2x", cmd->simultaneous);
 }
 
-static void set_reserved_lt_addr_cmd(const void *data, uint8_t size)
+static void set_reserved_lt_addr_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_set_reserved_lt_addr *cmd = data;
 
 	print_lt_addr(cmd->lt_addr);
 }
 
-static void set_reserved_lt_addr_rsp(const void *data, uint8_t size)
+static void set_reserved_lt_addr_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_set_reserved_lt_addr *rsp = data;
 
@@ -5661,14 +6117,16 @@ static void set_reserved_lt_addr_rsp(const void *data, uint8_t size)
 	print_lt_addr(rsp->lt_addr);
 }
 
-static void delete_reserved_lt_addr_cmd(const void *data, uint8_t size)
+static void delete_reserved_lt_addr_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_delete_reserved_lt_addr *cmd = data;
 
 	print_lt_addr(cmd->lt_addr);
 }
 
-static void delete_reserved_lt_addr_rsp(const void *data, uint8_t size)
+static void delete_reserved_lt_addr_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_delete_reserved_lt_addr *rsp = data;
 
@@ -5676,7 +6134,8 @@ static void delete_reserved_lt_addr_rsp(const void *data, uint8_t size)
 	print_lt_addr(rsp->lt_addr);
 }
 
-static void set_peripheral_broadcast_data_cmd(const void *data, uint8_t size)
+static void set_peripheral_broadcast_data_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_set_peripheral_broadcast_data *cmd = data;
 
@@ -5691,7 +6150,8 @@ static void set_peripheral_broadcast_data_cmd(const void *data, uint8_t size)
 	packet_hexdump(data + 3, size - 3);
 }
 
-static void set_peripheral_broadcast_data_rsp(const void *data, uint8_t size)
+static void set_peripheral_broadcast_data_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_set_peripheral_broadcast_data *rsp = data;
 
@@ -5699,7 +6159,8 @@ static void set_peripheral_broadcast_data_rsp(const void *data, uint8_t size)
 	print_lt_addr(rsp->lt_addr);
 }
 
-static void read_sync_train_params_rsp(const void *data, uint8_t size)
+static void read_sync_train_params_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_sync_train_params *rsp = data;
 
@@ -5711,7 +6172,8 @@ static void read_sync_train_params_rsp(const void *data, uint8_t size)
 	print_field("Service data: 0x%2.2x", rsp->service_data);
 }
 
-static void write_sync_train_params_cmd(const void *data, uint8_t size)
+static void write_sync_train_params_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_sync_train_params *cmd = data;
 
@@ -5723,7 +6185,8 @@ static void write_sync_train_params_cmd(const void *data, uint8_t size)
 	print_field("Service data: 0x%2.2x", cmd->service_data);
 }
 
-static void write_sync_train_params_rsp(const void *data, uint8_t size)
+static void write_sync_train_params_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_write_sync_train_params *rsp = data;
 
@@ -5731,7 +6194,8 @@ static void write_sync_train_params_rsp(const void *data, uint8_t size)
 	print_interval(rsp->interval);
 }
 
-static void read_secure_conn_support_rsp(const void *data, uint8_t size)
+static void read_secure_conn_support_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_secure_conn_support *rsp = data;
 
@@ -5739,21 +6203,24 @@ static void read_secure_conn_support_rsp(const void *data, uint8_t size)
 	print_enable("Support", rsp->support);
 }
 
-static void write_secure_conn_support_cmd(const void *data, uint8_t size)
+static void write_secure_conn_support_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_secure_conn_support *cmd = data;
 
 	print_enable("Support", cmd->support);
 }
 
-static void read_auth_payload_timeout_cmd(const void *data, uint8_t size)
+static void read_auth_payload_timeout_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_read_auth_payload_timeout *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void read_auth_payload_timeout_rsp(const void *data, uint8_t size)
+static void read_auth_payload_timeout_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_auth_payload_timeout *rsp = data;
 
@@ -5762,7 +6229,8 @@ static void read_auth_payload_timeout_rsp(const void *data, uint8_t size)
 	print_auth_payload_timeout(rsp->timeout);
 }
 
-static void write_auth_payload_timeout_cmd(const void *data, uint8_t size)
+static void write_auth_payload_timeout_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_auth_payload_timeout *cmd = data;
 
@@ -5770,7 +6238,8 @@ static void write_auth_payload_timeout_cmd(const void *data, uint8_t size)
 	print_auth_payload_timeout(cmd->timeout);
 }
 
-static void write_auth_payload_timeout_rsp(const void *data, uint8_t size)
+static void write_auth_payload_timeout_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_write_auth_payload_timeout *rsp = data;
 
@@ -5778,7 +6247,8 @@ static void write_auth_payload_timeout_rsp(const void *data, uint8_t size)
 	print_handle(rsp->handle);
 }
 
-static void read_local_oob_ext_data_rsp(const void *data, uint8_t size)
+static void read_local_oob_ext_data_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_local_oob_ext_data *rsp = data;
 
@@ -5789,7 +6259,8 @@ static void read_local_oob_ext_data_rsp(const void *data, uint8_t size)
 	print_randomizer_p256(rsp->randomizer256);
 }
 
-static void read_ext_page_timeout_rsp(const void *data, uint8_t size)
+static void read_ext_page_timeout_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_ext_page_timeout *rsp = data;
 
@@ -5797,14 +6268,16 @@ static void read_ext_page_timeout_rsp(const void *data, uint8_t size)
 	print_timeout(rsp->timeout);
 }
 
-static void write_ext_page_timeout_cmd(const void *data, uint8_t size)
+static void write_ext_page_timeout_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_ext_page_timeout *cmd = data;
 
 	print_timeout(cmd->timeout);
 }
 
-static void read_ext_inquiry_length_rsp(const void *data, uint8_t size)
+static void read_ext_inquiry_length_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_ext_inquiry_length *rsp = data;
 
@@ -5812,14 +6285,16 @@ static void read_ext_inquiry_length_rsp(const void *data, uint8_t size)
 	print_interval(rsp->interval);
 }
 
-static void write_ext_inquiry_length_cmd(const void *data, uint8_t size)
+static void write_ext_inquiry_length_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_ext_inquiry_length *cmd = data;
 
 	print_interval(cmd->interval);
 }
 
-static void read_local_version_rsp(const void *data, uint8_t size)
+static void read_local_version_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_local_version *rsp = data;
 	uint16_t manufacturer;
@@ -5851,7 +6326,8 @@ static void read_local_version_rsp(const void *data, uint8_t size)
 	}
 }
 
-static void read_local_commands_rsp(const void *data, uint8_t size)
+static void read_local_commands_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_local_commands *rsp = data;
 
@@ -5859,7 +6335,8 @@ static void read_local_commands_rsp(const void *data, uint8_t size)
 	print_commands(rsp->commands);
 }
 
-static void read_local_features_rsp(const void *data, uint8_t size)
+static void read_local_features_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_local_features *rsp = data;
 
@@ -5867,14 +6344,16 @@ static void read_local_features_rsp(const void *data, uint8_t size)
 	print_features(0, rsp->features, 0x00);
 }
 
-static void read_local_ext_features_cmd(const void *data, uint8_t size)
+static void read_local_ext_features_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_read_local_ext_features *cmd = data;
 
 	print_field("Page: %d", cmd->page);
 }
 
-static void read_local_ext_features_rsp(const void *data, uint8_t size)
+static void read_local_ext_features_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_local_ext_features *rsp = data;
 
@@ -5883,7 +6362,7 @@ static void read_local_ext_features_rsp(const void *data, uint8_t size)
 	print_features(rsp->page, rsp->features, 0x00);
 }
 
-static void read_buffer_size_rsp(const void *data, uint8_t size)
+static void read_buffer_size_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_rsp_read_buffer_size *rsp = data;
 
@@ -5896,7 +6375,8 @@ static void read_buffer_size_rsp(const void *data, uint8_t size)
 					le16_to_cpu(rsp->sco_max_pkt));
 }
 
-static void read_country_code_rsp(const void *data, uint8_t size)
+static void read_country_code_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_country_code *rsp = data;
 	const char *str;
@@ -5918,7 +6398,7 @@ static void read_country_code_rsp(const void *data, uint8_t size)
 	print_field("Country code: %s (0x%2.2x)", str, rsp->code);
 }
 
-static void read_bd_addr_rsp(const void *data, uint8_t size)
+static void read_bd_addr_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_rsp_read_bd_addr *rsp = data;
 
@@ -5929,7 +6409,8 @@ static void read_bd_addr_rsp(const void *data, uint8_t size)
 		memcpy(index_list[index_current].bdaddr, rsp->bdaddr, 6);
 }
 
-static void read_data_block_size_rsp(const void *data, uint8_t size)
+static void read_data_block_size_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_data_block_size *rsp = data;
 
@@ -5939,7 +6420,8 @@ static void read_data_block_size_rsp(const void *data, uint8_t size)
 	print_field("Num blocks: %d", le16_to_cpu(rsp->num_blocks));
 }
 
-static void read_local_codecs_rsp(const void *data, uint8_t size)
+static void read_local_codecs_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_local_codecs *rsp = data;
 	uint8_t i, num_vnd_codecs;
@@ -5989,7 +6471,22 @@ static void print_list(const void *data, uint8_t size, int num_items,
 		print_hex_field("", data, size);
 }
 
-static void read_local_codecs_rsp_v2(const void *data, uint8_t size)
+static void print_vnd_codecs_v2(const void *data, int i)
+{
+	const struct bt_hci_vnd_codec_v2 *codec = data;
+	uint8_t mask;
+
+	packet_print_company("  Company ID", le16_to_cpu(codec->cid));
+	print_field("  Vendor Codec ID: 0x%4.4x", le16_to_cpu(codec->vid));
+	print_field("  Logical Transport Type: 0x%02x", codec->transport);
+	mask = print_bitfield(4, codec->transport, codec_transport_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_SERVICE_CLASS,
+				"  Unknown transport (0x%2.2x)", mask);
+}
+
+static void read_local_codecs_rsp_v2(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_local_codecs_v2 *rsp = data;
 	uint8_t num_vnd_codecs;
@@ -6021,7 +6518,18 @@ static void read_local_codecs_rsp_v2(const void *data, uint8_t size)
 
 	num_vnd_codecs = rsp->codec[rsp->num_codecs].id;
 
+	size -= 1;
+
 	print_field("Number of vendor codecs: %d", num_vnd_codecs);
+
+	if (size < num_vnd_codecs * sizeof(*rsp->codec)) {
+		print_field("Invalid number of vendor codecs.");
+		return;
+	}
+
+	print_list(&rsp->codec[rsp->num_codecs] + 1, size, num_vnd_codecs,
+			sizeof(struct bt_hci_vnd_codec_v2),
+			print_vnd_codecs_v2);
 }
 
 static void print_path_direction(const char *prefix, uint8_t dir)
@@ -6063,7 +6571,8 @@ static void print_vnd_codec(const char *label,
 				"  Unknown transport (0x%2.2x)", mask);
 }
 
-static void read_local_codec_caps_cmd(const void *data, uint8_t size)
+static void read_local_codec_caps_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_read_local_codec_caps *cmd = data;
 
@@ -6071,7 +6580,8 @@ static void read_local_codec_caps_cmd(const void *data, uint8_t size)
 	print_path_direction("Direction", cmd->dir);
 }
 
-static void read_local_codec_caps_rsp(const void *data, uint8_t size)
+static void read_local_codec_caps_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_local_codec_caps *rsp = data;
 	uint8_t i;
@@ -6099,7 +6609,8 @@ static void read_local_codec_caps_rsp(const void *data, uint8_t size)
 	}
 }
 
-static void read_local_ctrl_delay_cmd(const void *data, uint8_t size)
+static void read_local_ctrl_delay_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_read_local_ctrl_delay *cmd = data;
 
@@ -6108,7 +6619,7 @@ static void read_local_ctrl_delay_cmd(const void *data, uint8_t size)
 	print_field("Length Codec Configuration: %u", cmd->codec_cfg_len);
 }
 
-static void config_data_path_cmd(const void *data, uint8_t size)
+static void config_data_path_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_config_data_path *cmd = data;
 
@@ -6121,14 +6632,13 @@ static void config_data_path_cmd(const void *data, uint8_t size)
 
 static void print_usec_interval(const char *prefix, const uint8_t interval[3])
 {
-	uint32_t u24 = 0;
+	uint32_t value = get_le24(interval);
 
-	memcpy(&u24, interval, 3);
-	print_field("%s: %u us (0x%6.6x)", prefix, le32_to_cpu(u24),
-						le32_to_cpu(u24));
+	print_field("%s: %u us (0x%6.6x)", prefix, value, value);
 }
 
-static void read_local_ctrl_delay_rsp(const void *data, uint8_t size)
+static void read_local_ctrl_delay_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_local_ctrl_delay *rsp = data;
 
@@ -6137,7 +6647,8 @@ static void read_local_ctrl_delay_rsp(const void *data, uint8_t size)
 	print_usec_interval("Maximum Controller delay", rsp->max_delay);
 }
 
-static void read_local_pairing_options_rsp(const void *data, uint8_t size)
+static void read_local_pairing_options_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_local_pairing_options *rsp = data;
 
@@ -6146,14 +6657,16 @@ static void read_local_pairing_options_rsp(const void *data, uint8_t size)
 	print_field("Max encryption key size: %u octets", rsp->max_key_size);
 }
 
-static void read_failed_contact_counter_cmd(const void *data, uint8_t size)
+static void read_failed_contact_counter_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_read_failed_contact_counter *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void read_failed_contact_counter_rsp(const void *data, uint8_t size)
+static void read_failed_contact_counter_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_failed_contact_counter *rsp = data;
 
@@ -6162,14 +6675,16 @@ static void read_failed_contact_counter_rsp(const void *data, uint8_t size)
 	print_field("Counter: %u", le16_to_cpu(rsp->counter));
 }
 
-static void reset_failed_contact_counter_cmd(const void *data, uint8_t size)
+static void reset_failed_contact_counter_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_reset_failed_contact_counter *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void reset_failed_contact_counter_rsp(const void *data, uint8_t size)
+static void reset_failed_contact_counter_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_reset_failed_contact_counter *rsp = data;
 
@@ -6177,14 +6692,16 @@ static void reset_failed_contact_counter_rsp(const void *data, uint8_t size)
 	print_handle(rsp->handle);
 }
 
-static void read_link_quality_cmd(const void *data, uint8_t size)
+static void read_link_quality_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_read_link_quality *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void read_link_quality_rsp(const void *data, uint8_t size)
+static void read_link_quality_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_link_quality *rsp = data;
 
@@ -6193,14 +6710,14 @@ static void read_link_quality_rsp(const void *data, uint8_t size)
 	print_field("Link quality: 0x%2.2x", rsp->link_quality);
 }
 
-static void read_rssi_cmd(const void *data, uint8_t size)
+static void read_rssi_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_read_rssi *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void read_rssi_rsp(const void *data, uint8_t size)
+static void read_rssi_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_rsp_read_rssi *rsp = data;
 
@@ -6209,14 +6726,16 @@ static void read_rssi_rsp(const void *data, uint8_t size)
 	print_rssi(rsp->rssi);
 }
 
-static void read_afh_channel_map_cmd(const void *data, uint8_t size)
+static void read_afh_channel_map_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_read_afh_channel_map *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void read_afh_channel_map_rsp(const void *data, uint8_t size)
+static void read_afh_channel_map_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_afh_channel_map *rsp = data;
 
@@ -6226,7 +6745,7 @@ static void read_afh_channel_map_rsp(const void *data, uint8_t size)
 	print_channel_map(rsp->map);
 }
 
-static void read_clock_cmd(const void *data, uint8_t size)
+static void read_clock_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_read_clock *cmd = data;
 
@@ -6234,7 +6753,7 @@ static void read_clock_cmd(const void *data, uint8_t size)
 	print_clock_type(cmd->type);
 }
 
-static void read_clock_rsp(const void *data, uint8_t size)
+static void read_clock_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_rsp_read_clock *rsp = data;
 
@@ -6244,14 +6763,16 @@ static void read_clock_rsp(const void *data, uint8_t size)
 	print_clock_accuracy(rsp->accuracy);
 }
 
-static void read_encrypt_key_size_cmd(const void *data, uint8_t size)
+static void read_encrypt_key_size_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_read_encrypt_key_size *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void read_encrypt_key_size_rsp(const void *data, uint8_t size)
+static void read_encrypt_key_size_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_encrypt_key_size *rsp = data;
 
@@ -6260,7 +6781,8 @@ static void read_encrypt_key_size_rsp(const void *data, uint8_t size)
 	print_key_size(rsp->key_size);
 }
 
-static void read_local_amp_info_rsp(const void *data, uint8_t size)
+static void read_local_amp_info_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_local_amp_info *rsp = data;
 	const char *str;
@@ -6295,7 +6817,8 @@ static void read_local_amp_info_rsp(const void *data, uint8_t size)
 					le32_to_cpu(rsp->be_flush_to));
 }
 
-static void read_local_amp_assoc_cmd(const void *data, uint8_t size)
+static void read_local_amp_assoc_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_read_local_amp_assoc *cmd = data;
 
@@ -6304,7 +6827,8 @@ static void read_local_amp_assoc_cmd(const void *data, uint8_t size)
 	print_field("Max ASSOC length: %d", le16_to_cpu(cmd->max_assoc_len));
 }
 
-static void read_local_amp_assoc_rsp(const void *data, uint8_t size)
+static void read_local_amp_assoc_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_local_amp_assoc *rsp = data;
 
@@ -6316,7 +6840,8 @@ static void read_local_amp_assoc_rsp(const void *data, uint8_t size)
 	packet_hexdump(data + 4, size - 4);
 }
 
-static void write_remote_amp_assoc_cmd(const void *data, uint8_t size)
+static void write_remote_amp_assoc_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_remote_amp_assoc *cmd = data;
 
@@ -6328,7 +6853,8 @@ static void write_remote_amp_assoc_cmd(const void *data, uint8_t size)
 	packet_hexdump(data + 5, size - 5);
 }
 
-static void write_remote_amp_assoc_rsp(const void *data, uint8_t size)
+static void write_remote_amp_assoc_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_write_remote_amp_assoc *rsp = data;
 
@@ -6336,7 +6862,8 @@ static void write_remote_amp_assoc_rsp(const void *data, uint8_t size)
 	print_phy_handle(rsp->phy_handle);
 }
 
-static void get_mws_transport_config_rsp(const void *data, uint8_t size)
+static void get_mws_transport_config_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_get_mws_transport_config *rsp = data;
 	uint8_t sum_baud_rates = 0;
@@ -6391,7 +6918,8 @@ static void get_mws_transport_config_rsp(const void *data, uint8_t size)
 		size - 2 - rsp->num_transports * 2 - sum_baud_rates * 8);
 }
 
-static void set_triggered_clock_capture_cmd(const void *data, uint8_t size)
+static void set_triggered_clock_capture_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_set_triggered_clock_capture *cmd = data;
 
@@ -6402,7 +6930,8 @@ static void set_triggered_clock_capture_cmd(const void *data, uint8_t size)
 	print_field("Clock captures to filter: %u", cmd->num_filter);
 }
 
-static void read_loopback_mode_rsp(const void *data, uint8_t size)
+static void read_loopback_mode_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_read_loopback_mode *rsp = data;
 
@@ -6410,28 +6939,32 @@ static void read_loopback_mode_rsp(const void *data, uint8_t size)
 	print_loopback_mode(rsp->mode);
 }
 
-static void write_loopback_mode_cmd(const void *data, uint8_t size)
+static void write_loopback_mode_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_loopback_mode *cmd = data;
 
 	print_loopback_mode(cmd->mode);
 }
 
-static void write_ssp_debug_mode_cmd(const void *data, uint8_t size)
+static void write_ssp_debug_mode_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_write_ssp_debug_mode *cmd = data;
 
 	print_enable("Debug Mode", cmd->mode);
 }
 
-static void le_set_event_mask_cmd(const void *data, uint8_t size)
+static void le_set_event_mask_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_event_mask *cmd = data;
 
 	print_event_mask(cmd->mask, events_le_table);
 }
 
-static void le_read_buffer_size_rsp(const void *data, uint8_t size)
+static void le_read_buffer_size_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_read_buffer_size *rsp = data;
 
@@ -6440,7 +6973,8 @@ static void le_read_buffer_size_rsp(const void *data, uint8_t size)
 	print_field("Num data packets: %d", rsp->le_max_pkt);
 }
 
-static void le_read_local_features_rsp(const void *data, uint8_t size)
+static void le_read_local_features_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_read_local_features *rsp = data;
 
@@ -6448,14 +6982,16 @@ static void le_read_local_features_rsp(const void *data, uint8_t size)
 	print_features(0, rsp->features, 0x01);
 }
 
-static void le_set_random_address_cmd(const void *data, uint8_t size)
+static void le_set_random_address_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_random_address *cmd = data;
 
 	print_addr("Address", cmd->addr, 0x01);
 }
 
-static void le_set_adv_parameters_cmd(const void *data, uint8_t size)
+static void le_set_adv_parameters_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_adv_parameters *cmd = data;
 	const char *str;
@@ -6493,7 +7029,8 @@ static void le_set_adv_parameters_cmd(const void *data, uint8_t size)
 	print_adv_filter_policy("Filter policy", cmd->filter_policy);
 }
 
-static void le_read_adv_tx_power_rsp(const void *data, uint8_t size)
+static void le_read_adv_tx_power_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_read_adv_tx_power *rsp = data;
 
@@ -6501,7 +7038,7 @@ static void le_read_adv_tx_power_rsp(const void *data, uint8_t size)
 	print_power_level(rsp->level, NULL);
 }
 
-static void le_set_adv_data_cmd(const void *data, uint8_t size)
+static void le_set_adv_data_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_adv_data *cmd = data;
 
@@ -6509,7 +7046,8 @@ static void le_set_adv_data_cmd(const void *data, uint8_t size)
 	print_eir(cmd->data, cmd->len, true);
 }
 
-static void le_set_scan_rsp_data_cmd(const void *data, uint8_t size)
+static void le_set_scan_rsp_data_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_scan_rsp_data *cmd = data;
 
@@ -6517,7 +7055,8 @@ static void le_set_scan_rsp_data_cmd(const void *data, uint8_t size)
 	print_eir(cmd->data, cmd->len, true);
 }
 
-static void le_set_adv_enable_cmd(const void *data, uint8_t size)
+static void le_set_adv_enable_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_adv_enable *cmd = data;
 
@@ -6568,7 +7107,8 @@ static void print_scan_filter_policy(uint8_t policy)
 	print_field("Filter policy: %s (0x%2.2x)", str, policy);
 }
 
-static void le_set_scan_parameters_cmd(const void *data, uint8_t size)
+static void le_set_scan_parameters_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_scan_parameters *cmd = data;
 
@@ -6579,7 +7119,8 @@ static void le_set_scan_parameters_cmd(const void *data, uint8_t size)
 	print_scan_filter_policy(cmd->filter_policy);
 }
 
-static void le_set_scan_enable_cmd(const void *data, uint8_t size)
+static void le_set_scan_enable_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_scan_enable *cmd = data;
 
@@ -6587,7 +7128,7 @@ static void le_set_scan_enable_cmd(const void *data, uint8_t size)
 	print_enable("Filter duplicates", cmd->filter_dup);
 }
 
-static void le_create_conn_cmd(const void *data, uint8_t size)
+static void le_create_conn_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_create_conn *cmd = data;
 	const char *str;
@@ -6623,7 +7164,8 @@ static void le_create_conn_cmd(const void *data, uint8_t size)
 	print_slot_625("Max connection length", cmd->max_length);
 }
 
-static void le_read_accept_list_size_rsp(const void *data, uint8_t size)
+static void le_read_accept_list_size_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_read_accept_list_size *rsp = data;
 
@@ -6631,7 +7173,8 @@ static void le_read_accept_list_size_rsp(const void *data, uint8_t size)
 	print_field("Size: %u", rsp->size);
 }
 
-static void le_add_to_accept_list_cmd(const void *data, uint8_t size)
+static void le_add_to_accept_list_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_add_to_accept_list *cmd = data;
 
@@ -6639,7 +7182,8 @@ static void le_add_to_accept_list_cmd(const void *data, uint8_t size)
 	print_addr("Address", cmd->addr, cmd->addr_type);
 }
 
-static void le_remove_from_accept_list_cmd(const void *data, uint8_t size)
+static void le_remove_from_accept_list_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_remove_from_accept_list *cmd = data;
 
@@ -6647,7 +7191,7 @@ static void le_remove_from_accept_list_cmd(const void *data, uint8_t size)
 	print_addr("Address", cmd->addr, cmd->addr_type);
 }
 
-static void le_conn_update_cmd(const void *data, uint8_t size)
+static void le_conn_update_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_conn_update *cmd = data;
 
@@ -6662,21 +7206,24 @@ static void le_conn_update_cmd(const void *data, uint8_t size)
 	print_slot_625("Max connection length", cmd->max_length);
 }
 
-static void le_set_host_classification_cmd(const void *data, uint8_t size)
+static void le_set_host_classification_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_host_classification *cmd = data;
 
 	print_le_channel_map(cmd->map);
 }
 
-static void le_read_channel_map_cmd(const void *data, uint8_t size)
+static void le_read_channel_map_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_read_channel_map *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void le_read_channel_map_rsp(const void *data, uint8_t size)
+static void le_read_channel_map_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_read_channel_map *rsp = data;
 
@@ -6685,14 +7232,15 @@ static void le_read_channel_map_rsp(const void *data, uint8_t size)
 	print_le_channel_map(rsp->map);
 }
 
-static void le_read_remote_features_cmd(const void *data, uint8_t size)
+static void le_read_remote_features_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_read_remote_features *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void le_encrypt_cmd(const void *data, uint8_t size)
+static void le_encrypt_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_encrypt *cmd = data;
 
@@ -6700,7 +7248,7 @@ static void le_encrypt_cmd(const void *data, uint8_t size)
 	print_key("Plaintext data", cmd->plaintext);
 }
 
-static void le_encrypt_rsp(const void *data, uint8_t size)
+static void le_encrypt_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_rsp_le_encrypt *rsp = data;
 
@@ -6708,7 +7256,7 @@ static void le_encrypt_rsp(const void *data, uint8_t size)
 	print_key("Encrypted data", rsp->data);
 }
 
-static void le_rand_rsp(const void *data, uint8_t size)
+static void le_rand_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_rsp_le_rand *rsp = data;
 
@@ -6716,7 +7264,7 @@ static void le_rand_rsp(const void *data, uint8_t size)
 	print_random_number(rsp->number);
 }
 
-static void le_start_encrypt_cmd(const void *data, uint8_t size)
+static void le_start_encrypt_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_start_encrypt *cmd = data;
 
@@ -6726,7 +7274,7 @@ static void le_start_encrypt_cmd(const void *data, uint8_t size)
 	print_key("Long term key", cmd->ltk);
 }
 
-static void le_ltk_req_reply_cmd(const void *data, uint8_t size)
+static void le_ltk_req_reply_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_ltk_req_reply *cmd = data;
 
@@ -6734,7 +7282,7 @@ static void le_ltk_req_reply_cmd(const void *data, uint8_t size)
 	print_key("Long term key", cmd->ltk);
 }
 
-static void le_ltk_req_reply_rsp(const void *data, uint8_t size)
+static void le_ltk_req_reply_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_rsp_le_ltk_req_reply *rsp = data;
 
@@ -6742,14 +7290,16 @@ static void le_ltk_req_reply_rsp(const void *data, uint8_t size)
 	print_handle(rsp->handle);
 }
 
-static void le_ltk_req_neg_reply_cmd(const void *data, uint8_t size)
+static void le_ltk_req_neg_reply_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_ltk_req_neg_reply *cmd = data;
 
 	print_handle(cmd->handle);
 }
 
-static void le_ltk_req_neg_reply_rsp(const void *data, uint8_t size)
+static void le_ltk_req_neg_reply_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_ltk_req_neg_reply *rsp = data;
 
@@ -6757,7 +7307,8 @@ static void le_ltk_req_neg_reply_rsp(const void *data, uint8_t size)
 	print_handle(rsp->handle);
 }
 
-static void le_read_supported_states_rsp(const void *data, uint8_t size)
+static void le_read_supported_states_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_read_supported_states *rsp = data;
 
@@ -6765,7 +7316,7 @@ static void le_read_supported_states_rsp(const void *data, uint8_t size)
 	print_le_states(rsp->states);
 }
 
-static void le_receiver_test_cmd(const void *data, uint8_t size)
+static void le_receiver_test_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_receiver_test *cmd = data;
 
@@ -6773,7 +7324,8 @@ static void le_receiver_test_cmd(const void *data, uint8_t size)
 				(cmd->frequency * 2) + 2402, cmd->frequency);
 }
 
-static void le_transmitter_test_cmd(const void *data, uint8_t size)
+static void le_transmitter_test_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_transmitter_test *cmd = data;
 
@@ -6783,7 +7335,7 @@ static void le_transmitter_test_cmd(const void *data, uint8_t size)
 	print_field("Packet payload: 0x%2.2x", cmd->payload);
 }
 
-static void le_test_end_rsp(const void *data, uint8_t size)
+static void le_test_end_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_rsp_le_test_end *rsp = data;
 
@@ -6791,7 +7343,8 @@ static void le_test_end_rsp(const void *data, uint8_t size)
 	print_field("Number of packets: %d", le16_to_cpu(rsp->num_packets));
 }
 
-static void le_conn_param_req_reply_cmd(const void *data, uint8_t size)
+static void le_conn_param_req_reply_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_conn_param_req_reply *cmd = data;
 
@@ -6806,7 +7359,8 @@ static void le_conn_param_req_reply_cmd(const void *data, uint8_t size)
 	print_slot_625("Max connection length", cmd->max_length);
 }
 
-static void le_conn_param_req_reply_rsp(const void *data, uint8_t size)
+static void le_conn_param_req_reply_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_conn_param_req_reply *rsp = data;
 
@@ -6814,7 +7368,8 @@ static void le_conn_param_req_reply_rsp(const void *data, uint8_t size)
 	print_handle(rsp->handle);
 }
 
-static void le_conn_param_req_neg_reply_cmd(const void *data, uint8_t size)
+static void le_conn_param_req_neg_reply_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_conn_param_req_neg_reply *cmd = data;
 
@@ -6822,7 +7377,8 @@ static void le_conn_param_req_neg_reply_cmd(const void *data, uint8_t size)
 	print_reason(cmd->reason);
 }
 
-static void le_conn_param_req_neg_reply_rsp(const void *data, uint8_t size)
+static void le_conn_param_req_neg_reply_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_conn_param_req_neg_reply *rsp = data;
 
@@ -6830,7 +7386,8 @@ static void le_conn_param_req_neg_reply_rsp(const void *data, uint8_t size)
 	print_handle(rsp->handle);
 }
 
-static void le_set_data_length_cmd(const void *data, uint8_t size)
+static void le_set_data_length_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_data_length *cmd = data;
 
@@ -6839,7 +7396,8 @@ static void le_set_data_length_cmd(const void *data, uint8_t size)
 	print_field("TX time: %d", le16_to_cpu(cmd->tx_time));
 }
 
-static void le_set_data_length_rsp(const void *data, uint8_t size)
+static void le_set_data_length_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_set_data_length *rsp = data;
 
@@ -6847,7 +7405,8 @@ static void le_set_data_length_rsp(const void *data, uint8_t size)
 	print_handle(rsp->handle);
 }
 
-static void le_read_default_data_length_rsp(const void *data, uint8_t size)
+static void le_read_default_data_length_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_read_default_data_length *rsp = data;
 
@@ -6856,7 +7415,8 @@ static void le_read_default_data_length_rsp(const void *data, uint8_t size)
 	print_field("TX time: %d", le16_to_cpu(rsp->tx_time));
 }
 
-static void le_write_default_data_length_cmd(const void *data, uint8_t size)
+static void le_write_default_data_length_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_write_default_data_length *cmd = data;
 
@@ -6864,14 +7424,16 @@ static void le_write_default_data_length_cmd(const void *data, uint8_t size)
 	print_field("TX time: %d", le16_to_cpu(cmd->tx_time));
 }
 
-static void le_generate_dhkey_cmd(const void *data, uint8_t size)
+static void le_generate_dhkey_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_generate_dhkey *cmd = data;
 
 	print_pk256("Remote P-256 public key", cmd->remote_pk256);
 }
 
-static void le_add_to_resolv_list_cmd(const void *data, uint8_t size)
+static void le_add_to_resolv_list_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_add_to_resolv_list *cmd = data;
 
@@ -6881,7 +7443,8 @@ static void le_add_to_resolv_list_cmd(const void *data, uint8_t size)
 	print_key("Local identity resolving key", cmd->local_irk);
 }
 
-static void le_remove_from_resolv_list_cmd(const void *data, uint8_t size)
+static void le_remove_from_resolv_list_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_remove_from_resolv_list *cmd = data;
 
@@ -6889,7 +7452,8 @@ static void le_remove_from_resolv_list_cmd(const void *data, uint8_t size)
 	print_addr("Address", cmd->addr, cmd->addr_type);
 }
 
-static void le_read_resolv_list_size_rsp(const void *data, uint8_t size)
+static void le_read_resolv_list_size_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_read_resolv_list_size *rsp = data;
 
@@ -6897,7 +7461,8 @@ static void le_read_resolv_list_size_rsp(const void *data, uint8_t size)
 	print_field("Size: %u", rsp->size);
 }
 
-static void le_read_peer_resolv_addr_cmd(const void *data, uint8_t size)
+static void le_read_peer_resolv_addr_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_read_peer_resolv_addr *cmd = data;
 
@@ -6905,7 +7470,8 @@ static void le_read_peer_resolv_addr_cmd(const void *data, uint8_t size)
 	print_addr("Address", cmd->addr, cmd->addr_type);
 }
 
-static void le_read_peer_resolv_addr_rsp(const void *data, uint8_t size)
+static void le_read_peer_resolv_addr_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_read_peer_resolv_addr *rsp = data;
 
@@ -6913,7 +7479,8 @@ static void le_read_peer_resolv_addr_rsp(const void *data, uint8_t size)
 	print_addr("Address", rsp->addr, 0x01);
 }
 
-static void le_read_local_resolv_addr_cmd(const void *data, uint8_t size)
+static void le_read_local_resolv_addr_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_read_local_resolv_addr *cmd = data;
 
@@ -6921,7 +7488,8 @@ static void le_read_local_resolv_addr_cmd(const void *data, uint8_t size)
 	print_addr("Address", cmd->addr, cmd->addr_type);
 }
 
-static void le_read_local_resolv_addr_rsp(const void *data, uint8_t size)
+static void le_read_local_resolv_addr_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_read_local_resolv_addr *rsp = data;
 
@@ -6929,21 +7497,24 @@ static void le_read_local_resolv_addr_rsp(const void *data, uint8_t size)
 	print_addr("Address", rsp->addr, 0x01);
 }
 
-static void le_set_resolv_enable_cmd(const void *data, uint8_t size)
+static void le_set_resolv_enable_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_resolv_enable *cmd = data;
 
 	print_enable("Address resolution", cmd->enable);
 }
 
-static void le_set_resolv_timeout_cmd(const void *data, uint8_t size)
+static void le_set_resolv_timeout_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_resolv_timeout *cmd = data;
 
 	print_field("Timeout: %u seconds", le16_to_cpu(cmd->timeout));
 }
 
-static void le_read_max_data_length_rsp(const void *data, uint8_t size)
+static void le_read_max_data_length_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_read_max_data_length *rsp = data;
 
@@ -6954,7 +7525,7 @@ static void le_read_max_data_length_rsp(const void *data, uint8_t size)
 	print_field("Max RX time: %d", le16_to_cpu(rsp->max_rx_time));
 }
 
-static void le_read_phy_cmd(const void *data, uint8_t size)
+static void le_read_phy_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_read_phy *cmd = data;
 
@@ -6983,7 +7554,7 @@ static void print_le_phy(const char *prefix, uint8_t phy)
 	print_field("%s: %s (0x%2.2x)", prefix, str, phy);
 }
 
-static void le_read_phy_rsp(const void *data, uint8_t size)
+static void le_read_phy_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_rsp_le_read_phy *rsp = data;
 
@@ -7019,7 +7590,6 @@ static void print_le_phys_preference(uint8_t all_phys, uint8_t tx_phys,
 							" (0x%2.2x)", mask);
 
 	print_field("TX PHYs preference: 0x%2.2x", tx_phys);
-	mask = tx_phys;
 
 	mask = print_bitfield(2, tx_phys, le_phys);
 	if (mask)
@@ -7027,7 +7597,6 @@ static void print_le_phys_preference(uint8_t all_phys, uint8_t tx_phys,
 							" (0x%2.2x)", mask);
 
 	print_field("RX PHYs preference: 0x%2.2x", rx_phys);
-	mask = rx_phys;
 
 	mask = print_bitfield(2, rx_phys, le_phys);
 	if (mask)
@@ -7035,14 +7604,15 @@ static void print_le_phys_preference(uint8_t all_phys, uint8_t tx_phys,
 							" (0x%2.2x)", mask);
 }
 
-static void le_set_default_phy_cmd(const void *data, uint8_t size)
+static void le_set_default_phy_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_default_phy *cmd = data;
 
 	print_le_phys_preference(cmd->all_phys, cmd->tx_phys, cmd->rx_phys);
 }
 
-static void le_set_phy_cmd(const void *data, uint8_t size)
+static void le_set_phy_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_phy *cmd = data;
 	const char *str;
@@ -7064,7 +7634,8 @@ static void le_set_phy_cmd(const void *data, uint8_t size)
 	print_field("PHY options preference: %s (0x%4.4x)", str, cmd->phy_opts);
 }
 
-static void le_enhanced_receiver_test_cmd(const void *data, uint8_t size)
+static void le_enhanced_receiver_test_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_enhanced_receiver_test *cmd = data;
 	const char *str;
@@ -7089,7 +7660,8 @@ static void le_enhanced_receiver_test_cmd(const void *data, uint8_t size)
 							cmd->modulation_index);
 }
 
-static void le_enhanced_transmitter_test_cmd(const void *data, uint8_t size)
+static void le_enhanced_transmitter_test_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_enhanced_transmitter_test *cmd = data;
 	const char *str;
@@ -7120,7 +7692,8 @@ static void le_enhanced_transmitter_test_cmd(const void *data, uint8_t size)
 	print_field("PHY: %s (0x%2.2x)", str, cmd->phy);
 }
 
-static void le_set_adv_set_rand_addr(const void *data, uint8_t size)
+static void le_set_adv_set_rand_addr(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_adv_set_rand_addr *cmd = data;
 
@@ -7206,7 +7779,8 @@ static void print_ext_slot_625(const char *label, const uint8_t value[3])
 						value_cpu * 0.625, value_cpu);
 }
 
-static void le_set_ext_adv_params_cmd(const void *data, uint8_t size)
+static void le_set_ext_adv_params_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_ext_adv_params *cmd = data;
 	const char *str;
@@ -7245,7 +7819,8 @@ static void le_set_ext_adv_params_cmd(const void *data, uint8_t size)
 	print_enable("Scan request notifications", cmd->notif_enable);
 }
 
-static void le_set_ext_adv_params_rsp(const void *data, uint8_t size)
+static void le_set_ext_adv_params_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_set_ext_adv_params *rsp = data;
 
@@ -7253,7 +7828,8 @@ static void le_set_ext_adv_params_rsp(const void *data, uint8_t size)
 	print_power_level(rsp->tx_power, "selected");
 }
 
-static void le_set_ext_adv_data_cmd(const void *data, uint8_t size)
+static void le_set_ext_adv_data_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_ext_adv_data *cmd = data;
 	const char *str;
@@ -7301,7 +7877,8 @@ static void le_set_ext_adv_data_cmd(const void *data, uint8_t size)
 	packet_print_ad(cmd->data, size - sizeof(*cmd));
 }
 
-static void le_set_ext_scan_rsp_data_cmd(const void *data, uint8_t size)
+static void le_set_ext_scan_rsp_data_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_ext_scan_rsp_data *cmd = data;
 	const char *str;
@@ -7349,7 +7926,8 @@ static void le_set_ext_scan_rsp_data_cmd(const void *data, uint8_t size)
 	packet_print_ad(cmd->data, size - sizeof(*cmd));
 }
 
-static void le_set_ext_adv_enable_cmd(const void *data, uint8_t size)
+static void le_set_ext_adv_enable_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_ext_adv_enable *cmd = data;
 	const struct bt_hci_cmd_ext_adv_set *adv_set;
@@ -7377,7 +7955,8 @@ static void le_set_ext_adv_enable_cmd(const void *data, uint8_t size)
 	}
 }
 
-static void le_read_max_adv_data_len_rsp(const void *data, uint8_t size)
+static void le_read_max_adv_data_len_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_read_max_adv_data_len *rsp = data;
 
@@ -7385,7 +7964,8 @@ static void le_read_max_adv_data_len_rsp(const void *data, uint8_t size)
 	print_field("Max length: %d", rsp->max_len);
 }
 
-static void le_read_num_supported_adv_sets_rsp(const void *data, uint8_t size)
+static void le_read_num_supported_adv_sets_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_read_num_supported_adv_sets *rsp = data;
 
@@ -7393,7 +7973,8 @@ static void le_read_num_supported_adv_sets_rsp(const void *data, uint8_t size)
 	print_field("Num supported adv sets: %d", rsp->num_of_sets);
 }
 
-static void le_remove_adv_set_cmd(const void *data, uint8_t size)
+static void le_remove_adv_set_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_remove_adv_set *cmd = data;
 
@@ -7418,7 +7999,7 @@ static void print_pa_properties(uint16_t flags)
 									mask);
 }
 
-static void le_set_pa_params_cmd(const void *data, uint8_t size)
+static void le_set_pa_params_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_pa_params *cmd = data;
 
@@ -7428,7 +8009,7 @@ static void le_set_pa_params_cmd(const void *data, uint8_t size)
 	print_pa_properties(cmd->properties);
 }
 
-static void le_set_pa_data_cmd(const void *data, uint8_t size)
+static void le_set_pa_data_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_pa_data *cmd = data;
 	const char *str;
@@ -7458,7 +8039,7 @@ static void le_set_pa_data_cmd(const void *data, uint8_t size)
 	print_eir(cmd->data, cmd->data_len, true);
 }
 
-static void le_set_pa_enable_cmd(const void *data, uint8_t size)
+static void le_set_pa_enable_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_pa_enable *cmd = data;
 
@@ -7501,7 +8082,8 @@ static void print_ext_scan_phys(const void *data, uint8_t flags)
 							" (0x%2.2x)", mask);
 }
 
-static void le_set_ext_scan_params_cmd(const void *data, uint8_t size)
+static void le_set_ext_scan_params_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_ext_scan_params *cmd = data;
 
@@ -7510,7 +8092,8 @@ static void le_set_ext_scan_params_cmd(const void *data, uint8_t size)
 	print_ext_scan_phys(cmd->data, cmd->num_phys);
 }
 
-static void le_set_ext_scan_enable_cmd(const void *data, uint8_t size)
+static void le_set_ext_scan_enable_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_ext_scan_enable *cmd = data;
 
@@ -7573,7 +8156,8 @@ static void print_ext_conn_phys(const void *data, uint8_t flags)
 							" (0x%2.2x)", mask);
 }
 
-static void le_ext_create_conn_cmd(const void *data, uint8_t size)
+static void le_ext_create_conn_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_ext_create_conn *cmd = data;
 	const char *str;
@@ -7657,7 +8241,8 @@ static void print_create_sync_options(uint8_t flags)
 	}
 }
 
-static void le_pa_create_sync_cmd(const void *data, uint8_t size)
+static void le_pa_create_sync_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_pa_create_sync *cmd = data;
 
@@ -7672,14 +8257,15 @@ static void le_pa_create_sync_cmd(const void *data, uint8_t size)
 	print_create_sync_cte_type(cmd->sync_cte_type);
 }
 
-static void le_pa_term_sync_cmd(const void *data, uint8_t size)
+static void le_pa_term_sync_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_pa_term_sync *cmd = data;
 
 	print_field("Sync handle: 0x%4.4x", cmd->sync_handle);
 }
 
-static void le_add_dev_pa_list_cmd(const void *data, uint8_t size)
+static void le_add_dev_pa_list_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_add_dev_pa_list *cmd = data;
 
@@ -7688,7 +8274,8 @@ static void le_add_dev_pa_list_cmd(const void *data, uint8_t size)
 	print_field("SID: 0x%2.2x", cmd->sid);
 }
 
-static void le_remove_dev_pa_list_cmd(const void *data, uint8_t size)
+static void le_remove_dev_pa_list_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_remove_dev_pa_list *cmd = data;
 
@@ -7697,7 +8284,8 @@ static void le_remove_dev_pa_list_cmd(const void *data, uint8_t size)
 	print_field("SID: 0x%2.2x", cmd->sid);
 }
 
-static void le_read_pa_list_size_rsp(const void *data, uint8_t size)
+static void le_read_pa_list_size_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_read_dev_pa_list_size *rsp = data;
 
@@ -7705,7 +8293,8 @@ static void le_read_pa_list_size_rsp(const void *data, uint8_t size)
 	print_field("List size: 0x%2.2x", rsp->list_size);
 }
 
-static void le_read_tx_power_rsp(const void *data, uint8_t size)
+static void le_read_tx_power_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_read_tx_power *rsp = data;
 
@@ -7714,7 +8303,8 @@ static void le_read_tx_power_rsp(const void *data, uint8_t size)
 	print_field("Max Tx power: %d dBm", rsp->max_tx_power);
 }
 
-static void le_read_rf_path_comp_rsp(const void *data, uint8_t size)
+static void le_read_rf_path_comp_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_read_rf_path_comp *rsp = data;
 
@@ -7725,7 +8315,8 @@ static void le_read_rf_path_comp_rsp(const void *data, uint8_t size)
 							rsp->rf_rx_path_comp);
 }
 
-static void le_write_rf_path_comp_cmd(const void *data, uint8_t size)
+static void le_write_rf_path_comp_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_write_rf_path_comp *cmd = data;
 
@@ -7735,7 +8326,7 @@ static void le_write_rf_path_comp_cmd(const void *data, uint8_t size)
 							cmd->rf_rx_path_comp);
 }
 
-static void le_set_priv_mode_cmd(const void *data, uint8_t size)
+static void le_set_priv_mode_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_priv_mode *cmd = data;
 	const char *str;
@@ -7759,7 +8350,8 @@ static void le_set_priv_mode_cmd(const void *data, uint8_t size)
 	print_field("Privacy Mode: %s (0x%2.2x)", str, cmd->priv_mode);
 }
 
-static void le_receiver_test_cmd_v3(const void *data, uint8_t size)
+static void le_receiver_test_cmd_v3(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_receiver_test_v3 *cmd = data;
 	uint8_t i;
@@ -7820,7 +8412,7 @@ static const char *parse_tx_test_payload(uint8_t payload)
 	}
 }
 
-static void le_tx_test_cmd_v3(const void *data, uint8_t size)
+static void le_tx_test_cmd_v3(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_tx_test_v3 *cmd = data;
 	uint8_t i;
@@ -7861,7 +8453,7 @@ static void le_tx_test_cmd_v3(const void *data, uint8_t size)
 		print_field("  Antenna ID: %u", cmd->antenna_ids[i]);
 }
 
-static void le_pa_rec_enable(const void *data, uint8_t size)
+static void le_pa_rec_enable(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_pa_enable *cmd = data;
 
@@ -7869,7 +8461,7 @@ static void le_pa_rec_enable(const void *data, uint8_t size)
 	print_enable("Reporting", cmd->enable);
 }
 
-static void le_pa_sync_trans(const void *data, uint8_t size)
+static void le_pa_sync_trans(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_periodic_sync_trans *cmd = data;
 
@@ -7878,7 +8470,7 @@ static void le_pa_sync_trans(const void *data, uint8_t size)
 	print_field("Sync handle: %d", cmd->sync_handle);
 }
 
-static void le_pa_set_info_trans(const void *data, uint8_t size)
+static void le_pa_set_info_trans(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_pa_set_info_trans *cmd = data;
 
@@ -7909,7 +8501,8 @@ static void print_sync_mode(uint8_t mode)
 	print_field("Mode: %s (0x%2.2x)", str, mode);
 }
 
-static void le_pa_sync_trans_params(const void *data, uint8_t size)
+static void le_pa_sync_trans_params(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_pa_sync_trans_params *cmd = data;
 
@@ -7922,8 +8515,8 @@ static void le_pa_sync_trans_params(const void *data, uint8_t size)
 	print_create_sync_cte_type(cmd->cte_type);
 }
 
-static void le_set_default_pa_sync_trans_params(const void *data,
-								uint8_t size)
+static void le_set_default_pa_sync_trans_params(uint16_t index,
+						const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_default_pa_sync_trans_params *cmd = data;
 
@@ -7995,7 +8588,8 @@ static void print_framing(uint8_t value)
 	}
 }
 
-static void le_read_buffer_size_v2_rsp(const void *data, uint8_t size)
+static void le_read_buffer_size_v2_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_read_buffer_size_v2 *rsp = data;
 
@@ -8010,14 +8604,16 @@ static void le_read_buffer_size_v2_rsp(const void *data, uint8_t size)
 	print_field("ISO max packet: %d", rsp->iso_max_pkt);
 }
 
-static void le_read_iso_tx_sync_cmd(const void *data, uint8_t size)
+static void le_read_iso_tx_sync_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_read_iso_tx_sync *cmd = data;
 
 	print_field("Handle: %d", le16_to_cpu(cmd->handle));
 }
 
-static void le_read_iso_tx_sync_rsp(const void *data, uint8_t size)
+static void le_read_iso_tx_sync_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_read_iso_tx_sync *rsp = data;
 	uint32_t offset = 0;
@@ -8053,7 +8649,8 @@ static void print_cis_params(const void *data, int i)
 							cis->p_rtn);
 }
 
-static void le_set_cig_params_cmd(const void *data, uint8_t size)
+static void le_set_cig_params_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_cig_params *cmd = data;
 
@@ -8097,7 +8694,8 @@ static void print_cis_params_test(const void *data, int i)
 	print_field("Peripheral to Central Burst Number: 0x%2.2x", cis->p_bn);
 }
 
-static void le_set_cig_params_test_cmd(const void *data, uint8_t size)
+static void le_set_cig_params_test_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_cig_params_test *cmd = data;
 
@@ -8129,7 +8727,8 @@ static void print_cig_handle(const void *data, int i)
 	print_field("Connection Handle #%d: %d", i, handle);
 }
 
-static void le_set_cig_params_rsp(const void *data, uint8_t size)
+static void le_set_cig_params_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_set_cig_params *rsp = data;
 
@@ -8150,12 +8749,17 @@ static void le_set_cig_params_rsp(const void *data, uint8_t size)
 static void print_cis(const void *data, int i)
 {
 	const struct bt_hci_cis *cis = data;
+	struct packet_conn_data *conn;
 
 	print_field("CIS Handle: %d", cis->cis_handle);
 	print_field("ACL Handle: %d", cis->acl_handle);
+
+	conn = packet_get_conn_data(cis->acl_handle);
+	if (conn)
+		conn->link = cis->cis_handle;
 }
 
-static void le_create_cis_cmd(const void *data, uint8_t size)
+static void le_create_cis_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_create_cis *cmd = data;
 
@@ -8166,14 +8770,14 @@ static void le_create_cis_cmd(const void *data, uint8_t size)
 	print_list(cmd->cis, size, cmd->num_cis, sizeof(*cmd->cis), print_cis);
 }
 
-static void le_remove_cig_cmd(const void *data, uint8_t size)
+static void le_remove_cig_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_remove_cig *cmd = data;
 
 	print_field("CIG ID: 0x%02x", cmd->cig_id);
 }
 
-static void le_remove_cig_rsp(const void *data, uint8_t size)
+static void le_remove_cig_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_rsp_le_remove_cig *rsp = data;
 
@@ -8185,14 +8789,16 @@ static void le_remove_cig_rsp(const void *data, uint8_t size)
 	print_field("CIG ID: 0x%2.2x", rsp->cig_id);
 }
 
-static void le_accept_cis_req_cmd(const void *data, uint8_t size)
+static void le_accept_cis_req_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_accept_cis *cmd = data;
 
 	print_field("CIS Handle: %d", le16_to_cpu(cmd->handle));
 }
 
-static void le_reject_cis_req_cmd(const void *data, uint8_t size)
+static void le_reject_cis_req_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_reject_cis *cmd = data;
 
@@ -8214,7 +8820,7 @@ static void print_bis(const struct bt_hci_bis *bis)
 	print_hex_field("Broadcast Code", bis->bcode, 16);
 }
 
-static void le_create_big_cmd(const void *data, uint8_t size)
+static void le_create_big_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_create_big *cmd = data;
 
@@ -8245,11 +8851,12 @@ static void print_bis_test(const void *data, int i)
 	print_hex_field("Broadcast Code", bis->bcode, 16);
 }
 
-static void le_create_big_cmd_test_cmd(const void *data, uint8_t size)
+static void le_create_big_cmd_test_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_create_big_test *cmd = data;
 
-	print_field("BIG ID: 0x%2.2x", cmd->big_id);
+	print_field("BIG Handle: 0x%2.2x", cmd->big_handle);
 	print_field("Advertising Handle: 0x%2.2x", cmd->adv_handle);
 	print_field("Number of BIS: %u", cmd->num_bis);
 
@@ -8259,7 +8866,7 @@ static void le_create_big_cmd_test_cmd(const void *data, uint8_t size)
 						print_bis_test);
 }
 
-static void le_terminate_big_cmd(const void *data, uint8_t size)
+static void le_terminate_big_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_term_big *cmd = data;
 
@@ -8274,14 +8881,15 @@ static void print_bis_sync(const void *data, int i)
 	print_field("BIS ID: 0x%2.2x", *bis_id);
 }
 
-static void le_big_create_sync_cmd(const void *data, uint8_t size)
+static void le_big_create_sync_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_big_create_sync *cmd = data;
 
 	print_field("BIG Handle: 0x%2.2x", cmd->handle);
 	print_field("BIG Sync Handle: 0x%4.4x", le16_to_cpu(cmd->sync_handle));
 	print_field("Encryption: %s (0x%2.2x)",
-			cmd->encryption ? "Unencrypted" : "Encrypted",
+			cmd->encryption ? "Encrypted" : "Unencrypted",
 			cmd->encryption);
 	print_hex_field("Broadcast Code", cmd->bcode, 16);
 	print_field("Maximum Number Subevents: 0x%2.2x", cmd->mse);
@@ -8295,7 +8903,7 @@ static void le_big_create_sync_cmd(const void *data, uint8_t size)
 						print_bis_sync);
 }
 
-static void le_big_term_sync_cmd(const void *data, uint8_t size)
+static void le_big_term_sync_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_big_term_sync *cmd = data;
 
@@ -8316,7 +8924,8 @@ static void print_iso_path(const char *prefix, uint8_t path)
 	}
 }
 
-static void le_setup_iso_path_cmd(const void *data, uint8_t size)
+static void le_setup_iso_path_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_setup_iso_path *cmd = data;
 
@@ -8332,7 +8941,8 @@ static void le_setup_iso_path_cmd(const void *data, uint8_t size)
 						cmd->codec_cfg_len);
 }
 
-static void le_setup_iso_path_rsp(const void *data, uint8_t size)
+static void le_setup_iso_path_rsp(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_rsp_le_setup_iso_path *rsp = data;
 
@@ -8344,7 +8954,8 @@ static void le_setup_iso_path_rsp(const void *data, uint8_t size)
 	print_field("Handle: %d", le16_to_cpu(rsp->handle));
 }
 
-static void le_remove_iso_path_cmd(const void *data, uint8_t size)
+static void le_remove_iso_path_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_remove_iso_path *cmd = data;
 
@@ -8352,14 +8963,15 @@ static void le_remove_iso_path_cmd(const void *data, uint8_t size)
 	print_path_direction("Data Path Direction", cmd->direction);
 }
 
-static void le_req_peer_sca_cmd(const void *data, uint8_t size)
+static void le_req_peer_sca_cmd(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_req_peer_sca *cmd = data;
 
 	print_field("Connection Handle: %d", le16_to_cpu(cmd->handle));
 }
 
-static void le_set_host_feature_cmd(const void *data, uint8_t size)
+static void le_set_host_feature_cmd(uint16_t index, const void *data,
+							uint8_t size)
 {
 	const struct bt_hci_cmd_le_set_host_feature *cmd = data;
 	uint64_t mask;
@@ -8375,14 +8987,45 @@ static void le_set_host_feature_cmd(const void *data, uint8_t size)
 	print_field("Bit Value: %u", cmd->bit_value);
 }
 
+static void le_read_iso_link_quality_cmd(uint16_t index, const void *data,
+							uint8_t size)
+{
+	const struct bt_hci_cmd_le_read_iso_link_quality *cmd = data;
+
+	print_field("Handle: %d", le16_to_cpu(cmd->handle));
+}
+
+static void status_le_read_iso_link_quality_rsp(uint16_t index,
+							const void *data,
+							uint8_t size)
+{
+	const struct bt_hci_rsp_le_read_iso_link_quality *rsp = data;
+
+	print_status(rsp->status);
+
+	if (size == 1)
+		return;
+
+	print_field("Handle: %d", le16_to_cpu(rsp->handle));
+	print_field("TX unacked packets %d", rsp->tx_unacked_packets);
+	print_field("TX flushed packets %d", rsp->tx_flushed_packets);
+	print_field("TX last subevent packets %d",
+					rsp->tx_last_subevent_packets);
+	print_field("TX retransmitted packets %d",
+						rsp->retransmitted_packets);
+	print_field("TX crc error packets %d", rsp->crc_error_packets);
+	print_field("RX unreceived packets %d", rsp->rx_unreceived_packets);
+	print_field("Duplicated packets %d", rsp->duplicated_packets);
+}
+
 struct opcode_data {
 	uint16_t opcode;
 	int bit;
 	const char *str;
-	void (*cmd_func) (const void *data, uint8_t size);
+	void (*cmd_func) (uint16_t index, const void *data, uint8_t size);
 	uint8_t cmd_size;
 	bool cmd_fixed;
-	void (*rsp_func) (const void *data, uint8_t size);
+	void (*rsp_func) (uint16_t index, const void *data, uint8_t size);
 	uint8_t rsp_size;
 	bool rsp_fixed;
 };
@@ -9304,7 +9947,9 @@ static const struct opcode_data opcode_table[] = {
 				"LE Remove Isochronous Data Path",
 				le_remove_iso_path_cmd,
 				sizeof(struct bt_hci_cmd_le_remove_iso_path),
-				true, status_rsp, 1, true },
+				true, status_handle_rsp,
+				sizeof(struct bt_hci_rsp_le_remove_iso_path),
+				true },
 	{ BT_HCI_CMD_LE_ISO_TX_TEST, BT_HCI_BIT_LE_ISO_TX_TEST,
 				"LE Isochronous Transmit Test", NULL, 0,
 				false },
@@ -9322,6 +9967,16 @@ static const struct opcode_data opcode_table[] = {
 				"LE Set Host Feature", le_set_host_feature_cmd,
 				sizeof(struct bt_hci_cmd_le_set_host_feature),
 				true, status_rsp, 1, true },
+	{ BT_HCI_CMD_LE_READ_ISO_LINK_QUALITY,
+				BT_HCI_BIT_LE_READ_ISO_LINK_QUALITY,
+				"LE Read ISO link quality",
+				le_read_iso_link_quality_cmd,
+				sizeof(
+				struct bt_hci_cmd_le_read_iso_link_quality),
+				true, status_le_read_iso_link_quality_rsp,
+				sizeof(
+				struct bt_hci_rsp_le_read_iso_link_quality),
+				true },
 	{ }
 };
 
@@ -9337,7 +9992,7 @@ static const char *get_supported_command(int bit)
 	return NULL;
 }
 
-static const char *current_vendor_str(void)
+static const char *current_vendor_str(uint16_t ocf)
 {
 	uint16_t manufacturer, msft_opcode;
 
@@ -9349,7 +10004,8 @@ static const char *current_vendor_str(void)
 		msft_opcode = BT_HCI_CMD_NOP;
 	}
 
-	if (msft_opcode != BT_HCI_CMD_NOP)
+	if (msft_opcode != BT_HCI_CMD_NOP &&
+				cmd_opcode_ocf(msft_opcode) == ocf)
 		return "Microsoft";
 
 	switch (manufacturer) {
@@ -9393,22 +10049,16 @@ static const struct vendor_ocf *current_vendor_ocf(uint16_t ocf)
 static const struct vendor_evt *current_vendor_evt(const void *data,
 							int *consumed_size)
 {
-	uint16_t manufacturer, msft_opcode;
+	uint16_t manufacturer;
 	uint8_t evt = *((const uint8_t *) data);
 
 	/* A regular vendor event consumes 1 byte. */
 	*consumed_size = 1;
 
-	if (index_current < MAX_INDEX) {
+	if (index_current < MAX_INDEX)
 		manufacturer = index_list[index_current].manufacturer;
-		msft_opcode = index_list[index_current].msft_opcode;
-	} else {
+	else
 		manufacturer = fallback_manufacturer;
-		msft_opcode = BT_HCI_CMD_NOP;
-	}
-
-	if (msft_opcode != BT_HCI_CMD_NOP)
-		return NULL;
 
 	switch (manufacturer) {
 	case 2:
@@ -9420,14 +10070,37 @@ static const struct vendor_evt *current_vendor_evt(const void *data,
 	return NULL;
 }
 
-static void inquiry_complete_evt(const void *data, uint8_t size)
+static const char *current_vendor_evt_str(void)
+{
+	uint16_t manufacturer;
+
+	if (index_current < MAX_INDEX)
+		manufacturer = index_list[index_current].manufacturer;
+	else
+		manufacturer = fallback_manufacturer;
+
+	switch (manufacturer) {
+	case 2:
+		return "Intel";
+	case 15:
+		return "Broadcom";
+	case 93:
+		return "Realtek";
+	}
+
+	return NULL;
+}
+
+static void inquiry_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_inquiry_complete *evt = data;
 
 	print_status(evt->status);
 }
 
-static void inquiry_result_evt(const void *data, uint8_t size)
+static void inquiry_result_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_inquiry_result *evt = data;
 
@@ -9443,7 +10116,8 @@ static void inquiry_result_evt(const void *data, uint8_t size)
 		packet_hexdump(data + sizeof(*evt), size - sizeof(*evt));
 }
 
-static void conn_complete_evt(const void *data, uint8_t size)
+static void conn_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_conn_complete *evt = data;
 
@@ -9454,10 +10128,12 @@ static void conn_complete_evt(const void *data, uint8_t size)
 	print_enable("Encryption", evt->encr_mode);
 
 	if (evt->status == 0x00)
-		assign_handle(le16_to_cpu(evt->handle), 0x00);
+		assign_handle(index, le16_to_cpu(evt->handle), 0x00,
+					(void *)evt->bdaddr, BDADDR_BREDR);
 }
 
-static void conn_request_evt(const void *data, uint8_t size)
+static void conn_request_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_conn_request *evt = data;
 
@@ -9466,7 +10142,8 @@ static void conn_request_evt(const void *data, uint8_t size)
 	print_link_type(evt->link_type);
 }
 
-static void disconnect_complete_evt(const void *data, uint8_t size)
+static void disconnect_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_disconnect_complete *evt = data;
 
@@ -9478,7 +10155,8 @@ static void disconnect_complete_evt(const void *data, uint8_t size)
 		release_handle(le16_to_cpu(evt->handle));
 }
 
-static void auth_complete_evt(const void *data, uint8_t size)
+static void auth_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_auth_complete *evt = data;
 
@@ -9486,7 +10164,8 @@ static void auth_complete_evt(const void *data, uint8_t size)
 	print_handle(evt->handle);
 }
 
-static void remote_name_request_complete_evt(const void *data, uint8_t size)
+static void remote_name_request_complete_evt(struct timeval *tv, uint16_t index,
+						const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_remote_name_request_complete *evt = data;
 
@@ -9495,7 +10174,8 @@ static void remote_name_request_complete_evt(const void *data, uint8_t size)
 	print_name(evt->name);
 }
 
-static void encrypt_change_evt(const void *data, uint8_t size)
+static void encrypt_change_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_encrypt_change *evt = data;
 
@@ -9504,7 +10184,9 @@ static void encrypt_change_evt(const void *data, uint8_t size)
 	print_encr_mode_change(evt->encr_mode, evt->handle);
 }
 
-static void change_conn_link_key_complete_evt(const void *data, uint8_t size)
+static void change_conn_link_key_complete_evt(struct timeval *tv,
+						uint16_t index,
+						const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_change_conn_link_key_complete *evt = data;
 
@@ -9512,7 +10194,8 @@ static void change_conn_link_key_complete_evt(const void *data, uint8_t size)
 	print_handle(evt->handle);
 }
 
-static void link_key_type_changed_evt(const void *data, uint8_t size)
+static void link_key_type_changed_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_link_key_type_changed *evt = data;
 
@@ -9521,7 +10204,8 @@ static void link_key_type_changed_evt(const void *data, uint8_t size)
 	print_key_flag(evt->key_flag);
 }
 
-static void remote_features_complete_evt(const void *data, uint8_t size)
+static void remote_features_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_remote_features_complete *evt = data;
 
@@ -9530,7 +10214,8 @@ static void remote_features_complete_evt(const void *data, uint8_t size)
 	print_features(0, evt->features, 0x00);
 }
 
-static void remote_version_complete_evt(const void *data, uint8_t size)
+static void remote_version_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_remote_version_complete *evt = data;
 
@@ -9546,7 +10231,8 @@ static void remote_version_complete_evt(const void *data, uint8_t size)
 	}
 }
 
-static void qos_setup_complete_evt(const void *data, uint8_t size)
+static void qos_setup_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_qos_setup_complete *evt = data;
 
@@ -9562,7 +10248,8 @@ static void qos_setup_complete_evt(const void *data, uint8_t size)
 	print_field("Delay variation: %d", le32_to_cpu(evt->delay_variation));
 }
 
-static void cmd_complete_evt(const void *data, uint8_t size)
+static void cmd_complete_evt(struct timeval *tv, uint16_t index,
+				const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_cmd_complete *evt = data;
 	uint16_t opcode = le16_to_cpu(evt->opcode);
@@ -9592,7 +10279,7 @@ static void cmd_complete_evt(const void *data, uint8_t size)
 			const struct vendor_ocf *vnd = current_vendor_ocf(ocf);
 
 			if (vnd) {
-				const char *str = current_vendor_str();
+				const char *str = current_vendor_str(ocf);
 
 				if (str) {
 					snprintf(vendor_str, sizeof(vendor_str),
@@ -9655,10 +10342,11 @@ static void cmd_complete_evt(const void *data, uint8_t size)
 		}
 	}
 
-	opcode_data->rsp_func(data + 3, size - 3);
+	opcode_data->rsp_func(index, data + 3, size - 3);
 }
 
-static void cmd_status_evt(const void *data, uint8_t size)
+static void cmd_status_evt(struct timeval *tv, uint16_t index,
+				const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_cmd_status *evt = data;
 	uint16_t opcode = le16_to_cpu(evt->opcode);
@@ -9684,7 +10372,7 @@ static void cmd_status_evt(const void *data, uint8_t size)
 			const struct vendor_ocf *vnd = current_vendor_ocf(ocf);
 
 			if (vnd) {
-				const char *str = current_vendor_str();
+				const char *str = current_vendor_str(ocf);
 
 				if (str) {
 					snprintf(vendor_str, sizeof(vendor_str),
@@ -9710,21 +10398,24 @@ static void cmd_status_evt(const void *data, uint8_t size)
 	print_status(evt->status);
 }
 
-static void hardware_error_evt(const void *data, uint8_t size)
+static void hardware_error_evt(struct timeval *tv, uint16_t index,
+				const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_hardware_error *evt = data;
 
 	print_field("Code: 0x%2.2x", evt->code);
 }
 
-static void flush_occurred_evt(const void *data, uint8_t size)
+static void flush_occurred_evt(struct timeval *tv, uint16_t index,
+				const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_flush_occurred *evt = data;
 
 	print_handle(evt->handle);
 }
 
-static void role_change_evt(const void *data, uint8_t size)
+static void role_change_evt(struct timeval *tv, uint16_t index,
+				const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_role_change *evt = data;
 
@@ -9733,19 +10424,102 @@ static void role_change_evt(const void *data, uint8_t size)
 	print_role(evt->role);
 }
 
-static void num_completed_packets_evt(const void *data, uint8_t size)
+void packet_latency_add(struct packet_latency *latency, struct timeval *delta)
 {
-	const struct bt_hci_evt_num_completed_packets *evt = data;
+	timeradd(&latency->total, delta, &latency->total);
 
-	print_field("Num handles: %d", evt->num_handles);
-	print_handle(evt->handle);
-	print_field("Count: %d", le16_to_cpu(evt->count));
+	if ((!timerisset(&latency->min) || timercmp(delta, &latency->min, <))
+				&& delta->tv_sec >= 0 && delta->tv_usec >= 0)
+		latency->min = *delta;
 
-	if (size > sizeof(*evt))
-		packet_hexdump(data + sizeof(*evt), size - sizeof(*evt));
+	if (!timerisset(&latency->max) || timercmp(delta, &latency->max, >))
+		latency->max = *delta;
+
+	if (timerisset(&latency->med)) {
+		struct timeval tmp;
+
+		timeradd(&latency->med, delta, &tmp);
+
+		tmp.tv_sec /= 2;
+		tmp.tv_usec /= 2;
+		if (tmp.tv_sec % 2) {
+			tmp.tv_usec += 500000;
+			if (tmp.tv_usec >= 1000000) {
+				tmp.tv_sec++;
+				tmp.tv_usec -= 1000000;
+			}
+		}
+
+		latency->med = tmp;
+	} else
+		latency->med = *delta;
 }
 
-static void mode_change_evt(const void *data, uint8_t size)
+static void packet_dequeue_tx(struct timeval *tv, uint16_t handle)
+{
+	struct packet_conn_data *conn;
+	struct packet_frame *frame;
+	struct timeval delta;
+
+	conn = packet_get_conn_data(handle);
+	if (!conn)
+		return;
+
+	frame = queue_pop_head(conn->tx_q);
+	if (!frame)
+		return;
+
+	timersub(tv, &frame->tv, &delta);
+
+	packet_latency_add(&conn->tx_l, &delta);
+
+	print_field("#%zu: len %zu (%lld Kb/s)", frame->num, frame->len,
+					frame->len * 8 / TV_MSEC(delta));
+	print_field("Latency: %lld msec (%lld-%lld msec ~%lld msec)",
+			TV_MSEC(delta), TV_MSEC(conn->tx_l.min),
+			TV_MSEC(conn->tx_l.max), TV_MSEC(conn->tx_l.med));
+
+	l2cap_dequeue_frame(&delta, conn);
+
+	free(frame);
+}
+
+static void num_completed_packets_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
+{
+	struct iovec iov = { (void *)data, size};
+	const struct bt_hci_evt_num_completed_packets *evt = data;
+	int i;
+
+	iov_pull(&iov, 1);
+
+	print_field("Num handles: %d", evt->num_handles);
+
+	for (i = 0; i < evt->num_handles; i++) {
+		uint16_t handle;
+		uint16_t count;
+		int j;
+
+		if (!util_iov_pull_le16(&iov, &handle))
+			break;
+
+		print_handle_native(handle);
+
+		if (!util_iov_pull_le16(&iov, &count))
+			break;
+
+		print_field("Count: %d", count);
+
+		for (j = 0; j < count; j++)
+			packet_dequeue_tx(tv, handle);
+	}
+
+	if (iov.iov_len)
+		packet_hexdump(iov.iov_base, iov.iov_len);
+}
+
+static void mode_change_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_mode_change *evt = data;
 
@@ -9755,7 +10529,8 @@ static void mode_change_evt(const void *data, uint8_t size)
 	print_interval(evt->interval);
 }
 
-static void return_link_keys_evt(const void *data, uint8_t size)
+static void return_link_keys_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_return_link_keys *evt = data;
 	uint8_t i;
@@ -9768,21 +10543,24 @@ static void return_link_keys_evt(const void *data, uint8_t size)
 	}
 }
 
-static void pin_code_request_evt(const void *data, uint8_t size)
+static void pin_code_request_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_pin_code_request *evt = data;
 
 	print_bdaddr(evt->bdaddr);
 }
 
-static void link_key_request_evt(const void *data, uint8_t size)
+static void link_key_request_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_link_key_request *evt = data;
 
 	print_bdaddr(evt->bdaddr);
 }
 
-static void link_key_notify_evt(const void *data, uint8_t size)
+static void link_key_notify_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_link_key_notify *evt = data;
 
@@ -9791,19 +10569,22 @@ static void link_key_notify_evt(const void *data, uint8_t size)
 	print_key_type(evt->key_type);
 }
 
-static void loopback_command_evt(const void *data, uint8_t size)
+static void loopback_command_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	packet_hexdump(data, size);
 }
 
-static void data_buffer_overflow_evt(const void *data, uint8_t size)
+static void data_buffer_overflow_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_data_buffer_overflow *evt = data;
 
 	print_link_type(evt->link_type);
 }
 
-static void max_slots_change_evt(const void *data, uint8_t size)
+static void max_slots_change_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_max_slots_change *evt = data;
 
@@ -9811,7 +10592,8 @@ static void max_slots_change_evt(const void *data, uint8_t size)
 	print_field("Max slots: %d", evt->max_slots);
 }
 
-static void clock_offset_complete_evt(const void *data, uint8_t size)
+static void clock_offset_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_clock_offset_complete *evt = data;
 
@@ -9820,7 +10602,8 @@ static void clock_offset_complete_evt(const void *data, uint8_t size)
 	print_clock_offset(evt->clock_offset);
 }
 
-static void conn_pkt_type_changed_evt(const void *data, uint8_t size)
+static void conn_pkt_type_changed_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_conn_pkt_type_changed *evt = data;
 
@@ -9829,14 +10612,16 @@ static void conn_pkt_type_changed_evt(const void *data, uint8_t size)
 	print_pkt_type(evt->pkt_type);
 }
 
-static void qos_violation_evt(const void *data, uint8_t size)
+static void qos_violation_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_qos_violation *evt = data;
 
 	print_handle(evt->handle);
 }
 
-static void pscan_mode_change_evt(const void *data, uint8_t size)
+static void pscan_mode_change_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_pscan_mode_change *evt = data;
 
@@ -9844,7 +10629,8 @@ static void pscan_mode_change_evt(const void *data, uint8_t size)
 	print_pscan_mode(evt->pscan_mode);
 }
 
-static void pscan_rep_mode_change_evt(const void *data, uint8_t size)
+static void pscan_rep_mode_change_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_pscan_rep_mode_change *evt = data;
 
@@ -9852,7 +10638,8 @@ static void pscan_rep_mode_change_evt(const void *data, uint8_t size)
 	print_pscan_rep_mode(evt->pscan_rep_mode);
 }
 
-static void flow_spec_complete_evt(const void *data, uint8_t size)
+static void flow_spec_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_flow_spec_complete *evt = data;
 
@@ -9870,7 +10657,8 @@ static void flow_spec_complete_evt(const void *data, uint8_t size)
 	print_field("Access latency: %d", le32_to_cpu(evt->access_latency));
 }
 
-static void inquiry_result_with_rssi_evt(const void *data, uint8_t size)
+static void inquiry_result_with_rssi_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_inquiry_result_with_rssi *evt = data;
 
@@ -9886,7 +10674,8 @@ static void inquiry_result_with_rssi_evt(const void *data, uint8_t size)
 		packet_hexdump(data + sizeof(*evt), size - sizeof(*evt));
 }
 
-static void remote_ext_features_complete_evt(const void *data, uint8_t size)
+static void remote_ext_features_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_remote_ext_features_complete *evt = data;
 
@@ -9896,7 +10685,8 @@ static void remote_ext_features_complete_evt(const void *data, uint8_t size)
 	print_features(evt->page, evt->features, 0x00);
 }
 
-static void sync_conn_complete_evt(const void *data, uint8_t size)
+static void sync_conn_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_sync_conn_complete *evt = data;
 
@@ -9909,9 +10699,14 @@ static void sync_conn_complete_evt(const void *data, uint8_t size)
 	print_field("RX packet length: %d", le16_to_cpu(evt->rx_pkt_len));
 	print_field("TX packet length: %d", le16_to_cpu(evt->tx_pkt_len));
 	print_air_mode(evt->air_mode);
+
+	if (evt->status == 0x00)
+		assign_handle(index, le16_to_cpu(evt->handle), evt->link_type,
+					(void *)evt->bdaddr, BDADDR_BREDR);
 }
 
-static void sync_conn_changed_evt(const void *data, uint8_t size)
+static void sync_conn_changed_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_sync_conn_changed *evt = data;
 
@@ -9923,7 +10718,8 @@ static void sync_conn_changed_evt(const void *data, uint8_t size)
 	print_field("TX packet length: %d", le16_to_cpu(evt->tx_pkt_len));
 }
 
-static void sniff_subrating_evt(const void *data, uint8_t size)
+static void sniff_subrating_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_sniff_subrating *evt = data;
 
@@ -9935,7 +10731,8 @@ static void sniff_subrating_evt(const void *data, uint8_t size)
 	print_slot_625("Min local timeout", evt->min_local_timeout);
 }
 
-static void ext_inquiry_result_evt(const void *data, uint8_t size)
+static void ext_inquiry_result_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_ext_inquiry_result *evt = data;
 
@@ -9949,7 +10746,8 @@ static void ext_inquiry_result_evt(const void *data, uint8_t size)
 	print_eir(evt->data, sizeof(evt->data), false);
 }
 
-static void encrypt_key_refresh_complete_evt(const void *data, uint8_t size)
+static void encrypt_key_refresh_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_encrypt_key_refresh_complete *evt = data;
 
@@ -9957,14 +10755,16 @@ static void encrypt_key_refresh_complete_evt(const void *data, uint8_t size)
 	print_handle(evt->handle);
 }
 
-static void io_capability_request_evt(const void *data, uint8_t size)
+static void io_capability_request_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_io_capability_request *evt = data;
 
 	print_bdaddr(evt->bdaddr);
 }
 
-static void io_capability_response_evt(const void *data, uint8_t size)
+static void io_capability_response_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_io_capability_response *evt = data;
 
@@ -9974,7 +10774,8 @@ static void io_capability_response_evt(const void *data, uint8_t size)
 	print_authentication(evt->authentication);
 }
 
-static void user_confirm_request_evt(const void *data, uint8_t size)
+static void user_confirm_request_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_user_confirm_request *evt = data;
 
@@ -9982,21 +10783,24 @@ static void user_confirm_request_evt(const void *data, uint8_t size)
 	print_passkey(evt->passkey);
 }
 
-static void user_passkey_request_evt(const void *data, uint8_t size)
+static void user_passkey_request_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_user_passkey_request *evt = data;
 
 	print_bdaddr(evt->bdaddr);
 }
 
-static void remote_oob_data_request_evt(const void *data, uint8_t size)
+static void remote_oob_data_request_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_remote_oob_data_request *evt = data;
 
 	print_bdaddr(evt->bdaddr);
 }
 
-static void simple_pairing_complete_evt(const void *data, uint8_t size)
+static void simple_pairing_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_simple_pairing_complete *evt = data;
 
@@ -10004,7 +10808,8 @@ static void simple_pairing_complete_evt(const void *data, uint8_t size)
 	print_bdaddr(evt->bdaddr);
 }
 
-static void link_supv_timeout_changed_evt(const void *data, uint8_t size)
+static void link_supv_timeout_changed_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_link_supv_timeout_changed *evt = data;
 
@@ -10012,14 +10817,16 @@ static void link_supv_timeout_changed_evt(const void *data, uint8_t size)
 	print_timeout(evt->timeout);
 }
 
-static void enhanced_flush_complete_evt(const void *data, uint8_t size)
+static void enhanced_flush_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_enhanced_flush_complete *evt = data;
 
 	print_handle(evt->handle);
 }
 
-static void user_passkey_notify_evt(const void *data, uint8_t size)
+static void user_passkey_notify_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_user_passkey_notify *evt = data;
 
@@ -10027,7 +10834,8 @@ static void user_passkey_notify_evt(const void *data, uint8_t size)
 	print_passkey(evt->passkey);
 }
 
-static void keypress_notify_evt(const void *data, uint8_t size)
+static void keypress_notify_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_keypress_notify *evt = data;
 	const char *str;
@@ -10058,7 +10866,8 @@ static void keypress_notify_evt(const void *data, uint8_t size)
 	print_field("Notification type: %s (0x%2.2x)", str, evt->type);
 }
 
-static void remote_host_features_notify_evt(const void *data, uint8_t size)
+static void remote_host_features_notify_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_remote_host_features_notify *evt = data;
 
@@ -10066,7 +10875,8 @@ static void remote_host_features_notify_evt(const void *data, uint8_t size)
 	print_features(1, evt->features, 0x00);
 }
 
-static void phy_link_complete_evt(const void *data, uint8_t size)
+static void phy_link_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_phy_link_complete *evt = data;
 
@@ -10074,14 +10884,16 @@ static void phy_link_complete_evt(const void *data, uint8_t size)
 	print_phy_handle(evt->phy_handle);
 }
 
-static void channel_selected_evt(const void *data, uint8_t size)
+static void channel_selected_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_channel_selected *evt = data;
 
 	print_phy_handle(evt->phy_handle);
 }
 
-static void disconn_phy_link_complete_evt(const void *data, uint8_t size)
+static void disconn_phy_link_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_disconn_phy_link_complete *evt = data;
 
@@ -10090,7 +10902,8 @@ static void disconn_phy_link_complete_evt(const void *data, uint8_t size)
 	print_reason(evt->reason);
 }
 
-static void phy_link_loss_early_warning_evt(const void *data, uint8_t size)
+static void phy_link_loss_early_warning_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_phy_link_loss_early_warning *evt = data;
 	const char *str;
@@ -10121,14 +10934,16 @@ static void phy_link_loss_early_warning_evt(const void *data, uint8_t size)
 	print_field("Reason: %s (0x%2.2x)", str, evt->reason);
 }
 
-static void phy_link_recovery_evt(const void *data, uint8_t size)
+static void phy_link_recovery_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_phy_link_recovery *evt = data;
 
 	print_phy_handle(evt->phy_handle);
 }
 
-static void logic_link_complete_evt(const void *data, uint8_t size)
+static void logic_link_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_logic_link_complete *evt = data;
 
@@ -10138,7 +10953,8 @@ static void logic_link_complete_evt(const void *data, uint8_t size)
 	print_field("TX flow spec: 0x%2.2x", evt->flow_spec);
 }
 
-static void disconn_logic_link_complete_evt(const void *data, uint8_t size)
+static void disconn_logic_link_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_disconn_logic_link_complete *evt = data;
 
@@ -10147,7 +10963,8 @@ static void disconn_logic_link_complete_evt(const void *data, uint8_t size)
 	print_reason(evt->reason);
 }
 
-static void flow_spec_modify_complete_evt(const void *data, uint8_t size)
+static void flow_spec_modify_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_flow_spec_modify_complete *evt = data;
 
@@ -10155,7 +10972,8 @@ static void flow_spec_modify_complete_evt(const void *data, uint8_t size)
 	print_handle(evt->handle);
 }
 
-static void num_completed_data_blocks_evt(const void *data, uint8_t size)
+static void num_completed_data_blocks_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_num_completed_data_blocks *evt = data;
 
@@ -10170,7 +10988,8 @@ static void num_completed_data_blocks_evt(const void *data, uint8_t size)
 		packet_hexdump(data + sizeof(*evt), size - sizeof(*evt));
 }
 
-static void short_range_mode_change_evt(const void *data, uint8_t size)
+static void short_range_mode_change_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_short_range_mode_change *evt = data;
 
@@ -10179,7 +10998,8 @@ static void short_range_mode_change_evt(const void *data, uint8_t size)
 	print_enable("Short range mode", evt->mode);
 }
 
-static void amp_status_change_evt(const void *data, uint8_t size)
+static void amp_status_change_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_amp_status_change *evt = data;
 
@@ -10187,7 +11007,8 @@ static void amp_status_change_evt(const void *data, uint8_t size)
 	print_amp_status(evt->amp_status);
 }
 
-static void triggered_clock_capture_evt(const void *data, uint8_t size)
+static void triggered_clock_capture_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_triggered_clock_capture *evt = data;
 
@@ -10197,14 +11018,16 @@ static void triggered_clock_capture_evt(const void *data, uint8_t size)
 	print_clock_offset(evt->clock_offset);
 }
 
-static void sync_train_complete_evt(const void *data, uint8_t size)
+static void sync_train_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_sync_train_complete *evt = data;
 
 	print_status(evt->status);
 }
 
-static void sync_train_received_evt(const void *data, uint8_t size)
+static void sync_train_received_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_sync_train_received *evt = data;
 
@@ -10219,7 +11042,8 @@ static void sync_train_received_evt(const void *data, uint8_t size)
 	print_field("Service Data: 0x%2.2x", evt->service_data);
 }
 
-static void peripheral_broadcast_receive_evt(const void *data, uint8_t size)
+static void peripheral_broadcast_receive_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_peripheral_broadcast_receive *evt = data;
 
@@ -10241,7 +11065,8 @@ static void peripheral_broadcast_receive_evt(const void *data, uint8_t size)
 		packet_hexdump(data + 18, size - 18);
 }
 
-static void peripheral_broadcast_timeout_evt(const void *data, uint8_t size)
+static void peripheral_broadcast_timeout_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_peripheral_broadcast_timeout *evt = data;
 
@@ -10249,7 +11074,8 @@ static void peripheral_broadcast_timeout_evt(const void *data, uint8_t size)
 	print_lt_addr(evt->lt_addr);
 }
 
-static void truncated_page_complete_evt(const void *data, uint8_t size)
+static void truncated_page_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_truncated_page_complete *evt = data;
 
@@ -10257,18 +11083,22 @@ static void truncated_page_complete_evt(const void *data, uint8_t size)
 	print_bdaddr(evt->bdaddr);
 }
 
-static void peripheral_page_response_timeout_evt(const void *data, uint8_t size)
+static void peripheral_page_response_timeout_evt(struct timeval *tv,
+					uint16_t index, const void *data,
+					uint8_t size)
 {
 }
 
-static void channel_map_change_evt(const void *data, uint8_t size)
+static void channel_map_change_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_channel_map_change *evt = data;
 
 	print_channel_map(evt->map);
 }
 
-static void inquiry_response_notify_evt(const void *data, uint8_t size)
+static void inquiry_response_notify_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_inquiry_response_notify *evt = data;
 
@@ -10276,14 +11106,16 @@ static void inquiry_response_notify_evt(const void *data, uint8_t size)
 	print_rssi(evt->rssi);
 }
 
-static void auth_payload_timeout_expired_evt(const void *data, uint8_t size)
+static void auth_payload_timeout_expired_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_auth_payload_timeout_expired *evt = data;
 
 	print_handle(evt->handle);
 }
 
-static void le_conn_complete_evt(const void *data, uint8_t size)
+static void le_conn_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_conn_complete *evt = data;
 
@@ -10300,10 +11132,12 @@ static void le_conn_complete_evt(const void *data, uint8_t size)
 	print_field("Central clock accuracy: 0x%2.2x", evt->clock_accuracy);
 
 	if (evt->status == 0x00)
-		assign_handle(le16_to_cpu(evt->handle), 0x01);
+		assign_handle(index, le16_to_cpu(evt->handle), 0x01,
+				(void *)evt->peer_addr, evt->peer_addr_type);
 }
 
-static void le_adv_report_evt(const void *data, uint8_t size)
+static void le_adv_report_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_adv_report *evt = data;
 	uint8_t evt_len;
@@ -10331,7 +11165,8 @@ report:
 	}
 }
 
-static void le_conn_update_complete_evt(const void *data, uint8_t size)
+static void le_conn_update_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_conn_update_complete *evt = data;
 
@@ -10344,7 +11179,8 @@ static void le_conn_update_complete_evt(const void *data, uint8_t size)
 					le16_to_cpu(evt->supv_timeout));
 }
 
-static void le_remote_features_complete_evt(const void *data, uint8_t size)
+static void le_remote_features_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_remote_features_complete *evt = data;
 
@@ -10353,7 +11189,8 @@ static void le_remote_features_complete_evt(const void *data, uint8_t size)
 	print_features(0, evt->features, 0x01);
 }
 
-static void le_long_term_key_request_evt(const void *data, uint8_t size)
+static void le_long_term_key_request_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_long_term_key_request *evt = data;
 
@@ -10362,7 +11199,8 @@ static void le_long_term_key_request_evt(const void *data, uint8_t size)
 	print_encrypted_diversifier(evt->ediv);
 }
 
-static void le_conn_param_request_evt(const void *data, uint8_t size)
+static void le_conn_param_request_evt(struct timeval *tv, uint16_t index,
+				      const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_conn_param_request *evt = data;
 
@@ -10375,7 +11213,8 @@ static void le_conn_param_request_evt(const void *data, uint8_t size)
 					le16_to_cpu(evt->supv_timeout));
 }
 
-static void le_data_length_change_evt(const void *data, uint8_t size)
+static void le_data_length_change_evt(struct timeval *tv, uint16_t index,
+				      const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_data_length_change *evt = data;
 
@@ -10386,7 +11225,8 @@ static void le_data_length_change_evt(const void *data, uint8_t size)
 	print_field("Max RX time: %d", le16_to_cpu(evt->max_rx_time));
 }
 
-static void le_read_local_pk256_complete_evt(const void *data, uint8_t size)
+static void le_read_local_pk256_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_read_local_pk256_complete *evt = data;
 
@@ -10394,7 +11234,8 @@ static void le_read_local_pk256_complete_evt(const void *data, uint8_t size)
 	print_pk256("Local P-256 public key", evt->local_pk256);
 }
 
-static void le_generate_dhkey_complete_evt(const void *data, uint8_t size)
+static void le_generate_dhkey_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_generate_dhkey_complete *evt = data;
 
@@ -10402,7 +11243,8 @@ static void le_generate_dhkey_complete_evt(const void *data, uint8_t size)
 	print_dhkey(evt->dhkey);
 }
 
-static void le_enhanced_conn_complete_evt(const void *data, uint8_t size)
+static void le_enhanced_conn_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_enhanced_conn_complete *evt = data;
 
@@ -10421,10 +11263,12 @@ static void le_enhanced_conn_complete_evt(const void *data, uint8_t size)
 	print_field("Central clock accuracy: 0x%2.2x", evt->clock_accuracy);
 
 	if (evt->status == 0x00)
-		assign_handle(le16_to_cpu(evt->handle), 0x01);
+		assign_handle(index, le16_to_cpu(evt->handle), 0x01,
+				(void *)evt->peer_addr, evt->peer_addr_type);
 }
 
-static void le_direct_adv_report_evt(const void *data, uint8_t size)
+static void le_direct_adv_report_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_direct_adv_report *evt = data;
 
@@ -10441,7 +11285,8 @@ static void le_direct_adv_report_evt(const void *data, uint8_t size)
 		packet_hexdump(data + sizeof(*evt), size - sizeof(*evt));
 }
 
-static void le_phy_update_complete_evt(const void *data, uint8_t size)
+static void le_phy_update_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_phy_update_complete *evt = data;
 
@@ -10544,7 +11389,8 @@ static void print_legacy_adv_report_pdu(uint16_t flags)
 	print_field("  Legacy PDU Type: %s (0x%4.4x)", str, flags);
 }
 
-static void le_ext_adv_report_evt(const void *data, uint8_t size)
+static void le_ext_adv_report_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_ext_adv_report *evt = data;
 	const struct bt_hci_le_ext_adv_report *report;
@@ -10631,7 +11477,8 @@ static void le_ext_adv_report_evt(const void *data, uint8_t size)
 	}
 }
 
-static void le_pa_sync(const void *data, uint8_t size)
+static void le_pa_sync_evt(struct timeval *tv, uint16_t index,
+				const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_per_sync_established *evt = data;
 
@@ -10649,7 +11496,8 @@ static void le_pa_sync(const void *data, uint8_t size)
 	print_field("Advertiser clock accuracy: 0x%2.2x", evt->clock_accuracy);
 }
 
-static void le_pa_report_evt(const void *data, uint8_t size)
+static void le_pa_report_evt(struct timeval *tv, uint16_t index,
+				const void *data, uint8_t size)
 {
 	const struct bt_hci_le_pa_report *evt = data;
 	const char *color_on;
@@ -10682,9 +11530,10 @@ static void le_pa_report_evt(const void *data, uint8_t size)
 		break;
 	default:
 		str = "Reserved";
-		color_on = COLOR_RED;
 		break;
 	}
+
+	print_field("CTE Type: %s (0x%2x)", str, evt->cte_type);
 
 	switch (evt->data_status) {
 	case 0x00:
@@ -10710,14 +11559,16 @@ static void le_pa_report_evt(const void *data, uint8_t size)
 	packet_hexdump(evt->data, evt->data_len);
 }
 
-static void le_pa_sync_lost(const void *data, uint8_t size)
+static void le_pa_sync_lost_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_per_sync_lost *evt = data;
 
 	print_field("Sync handle: %d", evt->handle);
 }
 
-static void le_adv_set_term_evt(const void *data, uint8_t size)
+static void le_adv_set_term_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_adv_set_term *evt = data;
 
@@ -10728,7 +11579,8 @@ static void le_adv_set_term_evt(const void *data, uint8_t size)
 			evt->num_evts);
 }
 
-static void le_scan_req_received_evt(const void *data, uint8_t size)
+static void le_scan_req_received_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_scan_req_received *evt = data;
 
@@ -10738,7 +11590,8 @@ static void le_scan_req_received_evt(const void *data, uint8_t size)
 							evt->scanner_addr_type);
 }
 
-static void le_chan_select_alg_evt(const void *data, uint8_t size)
+static void le_chan_select_alg_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_chan_select_alg *evt = data;
 	const char *str;
@@ -10760,7 +11613,8 @@ static void le_chan_select_alg_evt(const void *data, uint8_t size)
 	print_field("Algorithm: %s (0x%2.2x)", str, evt->algorithm);
 }
 
-static void le_cte_request_failed_evt(const void *data, uint8_t size)
+static void le_cte_request_failed_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_cte_request_failed *evt = data;
 
@@ -10768,7 +11622,8 @@ static void le_cte_request_failed_evt(const void *data, uint8_t size)
 	print_field("Connection handle: %d", evt->handle);
 }
 
-static void le_pa_sync_trans_rec_evt(const void *data, uint8_t size)
+static void le_pa_sync_trans_rec_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_pa_sync_trans_rec *evt = data;
 
@@ -10786,7 +11641,8 @@ static void le_pa_sync_trans_rec_evt(const void *data, uint8_t size)
 	print_clock_accuracy(evt->clock_accuracy);
 }
 
-static void le_cis_established_evt(const void *data, uint8_t size)
+static void le_cis_established_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_cis_established *evt = data;
 
@@ -10805,17 +11661,27 @@ static void le_cis_established_evt(const void *data, uint8_t size)
 	print_field("Peripheral to Central Flush Timeout: %u", evt->p_ft);
 	print_field("Central to Peripheral MTU: %u", le16_to_cpu(evt->c_mtu));
 	print_field("Peripheral to Central MTU: %u", le16_to_cpu(evt->p_mtu));
-	print_field("ISO Interval: %u", le16_to_cpu(evt->interval));
+	print_slot_125("ISO Interval", evt->interval);
+
+	if (!evt->status)
+		assign_handle(index, le16_to_cpu(evt->conn_handle), 0x05,
+					NULL, BDADDR_LE_PUBLIC);
 }
 
-static void le_req_cis_evt(const void *data, uint8_t size)
+static void le_req_cis_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_cis_req *evt = data;
+	struct packet_conn_data *conn;
 
 	print_field("ACL Handle: %d", le16_to_cpu(evt->acl_handle));
 	print_field("CIS Handle: %d", le16_to_cpu(evt->cis_handle));
 	print_field("CIG ID: 0x%2.2x", evt->cig_id);
 	print_field("CIS ID: 0x%2.2x", evt->cis_id);
+
+	conn = packet_get_conn_data(evt->acl_handle);
+	if (conn)
+		conn->link = evt->cis_handle;
 }
 
 static void print_bis_handle(const void *data, int i)
@@ -10825,7 +11691,8 @@ static void print_bis_handle(const void *data, int i)
 	print_field("Connection Handle #%d: %d", i, handle);
 }
 
-static void le_big_complete_evt(const void *data, uint8_t size)
+static void le_big_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_big_complete *evt = data;
 
@@ -10836,15 +11703,24 @@ static void le_big_complete_evt(const void *data, uint8_t size)
 	print_le_phy("PHY", evt->phy);
 	print_field("NSE: %u", evt->nse);
 	print_field("BN: %u", evt->bn);
-	print_field("PTO: %u", evt->bn);
+	print_field("PTO: %u", evt->pto);
 	print_field("IRC: %u", evt->irc);
 	print_field("Maximum PDU: %u", evt->max_pdu);
 	print_slot_125("ISO Interval", evt->interval);
 	print_list(evt->bis_handle, size, evt->num_bis,
 				sizeof(*evt->bis_handle), print_bis_handle);
+
+	if (!evt->status) {
+		int i;
+
+		for (i = 0; i < evt->num_bis; i++)
+			assign_handle(index, le16_to_cpu(evt->bis_handle[i]),
+					0x05, NULL, BDADDR_LE_PUBLIC);
+	}
 }
 
-static void le_big_terminate_evt(const void *data, uint8_t size)
+static void le_big_terminate_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_big_terminate *evt = data;
 
@@ -10852,7 +11728,8 @@ static void le_big_terminate_evt(const void *data, uint8_t size)
 	print_reason(evt->reason);
 }
 
-static void le_big_sync_estabilished_evt(const void *data, uint8_t size)
+static void le_big_sync_estabilished_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_big_sync_estabilished *evt = data;
 
@@ -10867,17 +11744,27 @@ static void le_big_sync_estabilished_evt(const void *data, uint8_t size)
 	print_slot_125("ISO Interval", evt->interval);
 	print_list(evt->bis, size, evt->num_bis, sizeof(*evt->bis),
 						print_bis_handle);
+
+	if (!evt->status) {
+		int i;
+
+		for (i = 0; i < evt->num_bis; i++)
+			assign_handle(index, le16_to_cpu(evt->bis[i]),
+					0x05, NULL, BDADDR_LE_PUBLIC);
+	}
 }
 
-static void le_big_sync_lost_evt(const void *data, uint8_t size)
+static void le_big_sync_lost_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_big_sync_lost *evt = data;
 
-	print_field("BIG ID: 0x%2.2x", evt->big_id);
+	print_field("BIG Handle: 0x%2.2x", evt->big_handle);
 	print_reason(evt->reason);
 }
 
-static void le_req_sca_complete_evt(const void *data, uint8_t size)
+static void le_req_sca_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_req_peer_sca_complete *evt = data;
 
@@ -10886,16 +11773,38 @@ static void le_req_sca_complete_evt(const void *data, uint8_t size)
 	print_sca(evt->sca);
 }
 
+static void le_big_info_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
+{
+	const struct bt_hci_evt_le_big_info_adv_report *evt = data;
+
+	print_field("Sync Handle: 0x%4.4x", evt->sync_handle);
+	print_field("Number BIS: %u", evt->num_bis);
+	print_field("NSE: %u", evt->nse);
+	print_slot_125("ISO Interval", evt->iso_interval);
+	print_field("BN: %u", evt->bn);
+	print_field("PTO: %u", evt->bn);
+	print_field("IRC: %u", evt->irc);
+	print_field("Maximum PDU: %u", evt->max_pdu);
+	print_usec_interval("SDU Interval", evt->sdu_interval);
+	print_field("Maximum SDU: %u", evt->max_sdu);
+	print_le_phy("PHY", evt->phy);
+	print_framing(evt->framing);
+	print_field("Encryption: 0x%02x", evt->encryption);
+}
+
 struct subevent_data {
 	uint8_t subevent;
 	const char *str;
-	void (*func) (const void *data, uint8_t size);
+	void (*func) (struct timeval *tv, uint16_t index, const void *data,
+							uint8_t size);
 	uint8_t size;
 	bool fixed;
 };
 
-static void print_subevent(const struct subevent_data *subevent_data,
-					const void *data, uint8_t size)
+static void print_subevent(struct timeval *tv, uint16_t index,
+				const struct subevent_data *subevent_data,
+				const void *data, uint8_t size)
 {
 	const char *subevent_color;
 
@@ -10926,7 +11835,7 @@ static void print_subevent(const struct subevent_data *subevent_data,
 		}
 	}
 
-	subevent_data->func(data, size);
+	subevent_data->func(tv, index, data, size);
 }
 
 static const struct subevent_data le_meta_event_table[] = {
@@ -10957,11 +11866,11 @@ static const struct subevent_data le_meta_event_table[] = {
 	{ 0x0d, "LE Extended Advertising Report",
 				le_ext_adv_report_evt, 1, false},
 	{ 0x0e, "LE Periodic Advertising Sync Established",
-				le_pa_sync, 15, true },
+				le_pa_sync_evt, 15, true },
 	{ 0x0f, "LE Periodic Advertising Report",
 				le_pa_report_evt, 7, false},
 	{ 0x10, "LE Periodic Advertising Sync Lost",
-				le_pa_sync_lost, 2, true},
+				le_pa_sync_lost_evt, 2, true},
 	{ 0x11, "LE Scan Timeout" },
 	{ 0x12, "LE Advertising Set Terminated",
 				le_adv_set_term_evt, 5, true},
@@ -11004,10 +11913,15 @@ static const struct subevent_data le_meta_event_table[] = {
 				le_req_sca_complete_evt,
 				sizeof(
 				struct bt_hci_evt_le_req_peer_sca_complete)},
+	{ BT_HCI_EVT_LE_BIG_INFO_ADV_REPORT,
+		"LE Broadcast Isochronous Group Info Advertising Report",
+		le_big_info_evt,
+		sizeof(struct bt_hci_evt_le_big_info_adv_report) },
 	{ }
 };
 
-static void le_meta_event_evt(const void *data, uint8_t size)
+static void le_meta_event_evt(struct timeval *tv, uint16_t index,
+				const void *data, uint8_t size)
 {
 	uint8_t subevent = *((const uint8_t *) data);
 	struct subevent_data unknown;
@@ -11027,10 +11941,11 @@ static void le_meta_event_evt(const void *data, uint8_t size)
 		}
 	}
 
-	print_subevent(subevent_data, data + 1, size - 1);
+	print_subevent(tv, index, subevent_data, data + 1, size - 1);
 }
 
-static void vendor_evt(const void *data, uint8_t size)
+static void vendor_evt(struct timeval *tv, uint16_t index,
+				const void *data, uint8_t size)
 {
 	struct subevent_data vendor_data;
 	char vendor_str[150];
@@ -11038,7 +11953,7 @@ static void vendor_evt(const void *data, uint8_t size)
 	const struct vendor_evt *vnd = current_vendor_evt(data, &consumed_size);
 
 	if (vnd) {
-		const char *str = current_vendor_str();
+		const char *str = current_vendor_evt_str();
 
 		if (str) {
 			snprintf(vendor_str, sizeof(vendor_str),
@@ -11051,7 +11966,7 @@ static void vendor_evt(const void *data, uint8_t size)
 		vendor_data.size = vnd->evt_size;
 		vendor_data.fixed = vnd->evt_fixed;
 
-		print_subevent(&vendor_data, data + consumed_size,
+		print_subevent(tv, index, &vendor_data, data + consumed_size,
 							size - consumed_size);
 	} else {
 		uint16_t manufacturer;
@@ -11068,7 +11983,8 @@ static void vendor_evt(const void *data, uint8_t size)
 struct event_data {
 	uint8_t event;
 	const char *str;
-	void (*func) (const void *data, uint8_t size);
+	void (*func) (struct timeval *tv, uint16_t index, const void *data,
+							uint8_t size);
 	uint8_t size;
 	bool fixed;
 };
@@ -11301,7 +12217,7 @@ void packet_system_note(struct timeval *tv, struct ucred *cred,
 struct monitor_l2cap_hdr {
 	uint16_t cid;
 	uint16_t psm;
-};
+} __attribute__((packed));
 
 static void packet_decode(struct timeval *tv, struct ucred *cred, char dir,
 				uint16_t index, const char *color,
@@ -11320,7 +12236,8 @@ static void packet_decode(struct timeval *tv, struct ucred *cred, char dir,
 				NULL);
 
 	/* Discard last byte since it just a filler */
-	l2cap_frame(index, dir == '>', 0, hdr->cid, hdr->psm,
+	l2cap_frame(index, dir == '>', 0,
+			le16_to_cpu(hdr->cid), le16_to_cpu(hdr->psm),
 			data + sizeof(*hdr), size - (sizeof(*hdr) + 1));
 }
 
@@ -11329,7 +12246,6 @@ void packet_user_logging(struct timeval *tv, struct ucred *cred,
 					const char *ident, const void *data,
 					uint16_t size)
 {
-	char pid_str[140];
 	const char *label;
 	const char *color;
 
@@ -11355,26 +12271,7 @@ void packet_user_logging(struct timeval *tv, struct ucred *cred,
 	}
 
 	if (cred) {
-		char *path = alloca(24);
-		char line[128];
-		FILE *fp;
-
-		snprintf(path, 23, "/proc/%u/comm", cred->pid);
-
-		fp = fopen(path, "re");
-		if (fp) {
-			if (fgets(line, sizeof(line), fp)) {
-				line[strcspn(line, "\r\n")] = '\0';
-				snprintf(pid_str, sizeof(pid_str), "%s[%u]",
-							line, cred->pid);
-			} else
-				snprintf(pid_str, sizeof(pid_str), "%u",
-								cred->pid);
-			fclose(fp);
-		} else
-			snprintf(pid_str, sizeof(pid_str), "%u", cred->pid);
-
-		label = pid_str;
+		label = NULL;
         } else {
 		if (ident)
 			label = ident;
@@ -11384,8 +12281,8 @@ void packet_user_logging(struct timeval *tv, struct ucred *cred,
 
 	if (ident && (ident[0] == '<' || ident[0] == '>')) {
 		packet_decode(tv, cred, ident[0], index, color,
-				label == ident ? &ident[2] : label,
-				data, size);
+			      label == ident ? &ident[2] : label,
+			      data, size);
 		return;
 	}
 
@@ -11440,7 +12337,7 @@ void packet_hci_command(struct timeval *tv, struct ucred *cred, uint16_t index,
 			const struct vendor_ocf *vnd = current_vendor_ocf(ocf);
 
 			if (vnd) {
-				const char *str = current_vendor_str();
+				const char *str = current_vendor_str(ocf);
 
 				if (str) {
 					snprintf(vendor_str, sizeof(vendor_str),
@@ -11500,7 +12397,7 @@ void packet_hci_command(struct timeval *tv, struct ucred *cred, uint16_t index,
 		}
 	}
 
-	opcode_data->cmd_func(data, hdr->plen);
+	opcode_data->cmd_func(index, data, hdr->plen);
 }
 
 void packet_hci_event(struct timeval *tv, struct ucred *cred, uint16_t index,
@@ -11580,7 +12477,28 @@ void packet_hci_event(struct timeval *tv, struct ucred *cred, uint16_t index,
 		}
 	}
 
-	event_data->func(data, hdr->plen);
+	event_data->func(tv, index, data, hdr->plen);
+}
+
+static void packet_enqueue_tx(struct timeval *tv, uint16_t handle,
+				size_t num, uint16_t len)
+{
+	struct packet_conn_data *conn;
+	struct packet_frame *frame;
+
+	conn = packet_get_conn_data(handle);
+	if (!conn)
+		return;
+
+	if (!conn->tx_q)
+		conn->tx_q = queue_new();
+
+	frame = new0(struct packet_frame, 1);
+	if (tv)
+		memcpy(&frame->tv, tv, sizeof(*tv));
+	frame->num = num;
+	frame->len = len;
+	queue_push_tail(conn->tx_q, frame);
 }
 
 void packet_hci_acldata(struct timeval *tv, struct ucred *cred, uint16_t index,
@@ -11619,6 +12537,10 @@ void packet_hci_acldata(struct timeval *tv, struct ucred *cred, uint16_t index,
 	print_packet(tv, cred, in ? '>' : '<', index, NULL, COLOR_HCI_ACLDATA,
 				in ? "ACL Data RX" : "ACL Data TX",
 						handle_str, extra_str);
+
+	if (!in)
+		packet_enqueue_tx(tv, acl_handle(handle),
+					index_list[index].frame, dlen);
 
 	if (size != dlen) {
 		print_text(COLOR_ERROR, "invalid packet size (%d != %d)",
@@ -11669,6 +12591,10 @@ void packet_hci_scodata(struct timeval *tv, struct ucred *cred, uint16_t index,
 				in ? "SCO Data RX" : "SCO Data TX",
 						handle_str, extra_str);
 
+	if (!in)
+		packet_enqueue_tx(tv, acl_handle(handle),
+					index_list[index].frame, hdr->dlen);
+
 	if (size != hdr->dlen) {
 		print_text(COLOR_ERROR, "invalid packet size (%d != %d)",
 							size, hdr->dlen);
@@ -11712,9 +12638,13 @@ void packet_hci_isodata(struct timeval *tv, struct ucred *cred, uint16_t index,
 	sprintf(handle_str, "Handle %d", acl_handle(handle));
 	sprintf(extra_str, "flags 0x%2.2x dlen %d", flags, hdr->dlen);
 
-	print_packet(tv, cred, in ? '>' : '<', index, NULL, COLOR_HCI_SCODATA,
+	print_packet(tv, cred, in ? '>' : '<', index, NULL, COLOR_HCI_ISODATA,
 				in ? "ISO Data RX" : "ISO Data TX",
 						handle_str, extra_str);
+
+	if (!in)
+		packet_enqueue_tx(tv, acl_handle(handle),
+					index_list[index].frame, hdr->dlen);
 
 	if (size != hdr->dlen) {
 		print_text(COLOR_ERROR, "invalid packet size (%d != %d)",
@@ -11723,7 +12653,7 @@ void packet_hci_isodata(struct timeval *tv, struct ucred *cred, uint16_t index,
 		return;
 	}
 
-	if (filter_mask & PACKET_FILTER_SHOW_SCO_DATA)
+	if (filter_mask & PACKET_FILTER_SHOW_ISO_DATA)
 		packet_hexdump(data, size);
 }
 
@@ -12006,7 +12936,11 @@ static const struct bitfield_data mgmt_settings_table[] = {
 	{ 15, "Static Address"		},
 	{ 16, "PHY Configuration"	},
 	{ 17, "Wideband Speech"		},
-	{ }
+	{ 18, "CIS Central"		},
+	{ 19, "CIS Peripheral"		},
+	{ 20, "ISO Broadcaster"		},
+	{ 21, "Sync Receiver"		},
+	{}
 };
 
 static void mgmt_print_settings(const char *label, uint32_t settings)
@@ -12060,6 +12994,8 @@ static const struct bitfield_data mgmt_device_flags_table[] = {
 	{  1, "Legacy Pairing"			},
 	{  2, "Not Connectable"			},
 	{  3, "Connection Locally Initiated"	},
+	{  4, "Name Request Failed"		},
+	{  5, "Scan Response"			},
 	{ }
 };
 
@@ -12108,10 +13044,13 @@ static const struct bitfield_data mgmt_adv_flags_table[] = {
 	{  7, "Advertise in 1M on Secondary channel"	},
 	{  8, "Advertise in 2M on Secondary channel"	},
 	{  9, "Advertise in CODED on Secondary channel"	},
+	{  10, "Support setting Tx Power"		},
+	{  11, "Support HW offload"			},
 	{  12, "Use provided duration parameter"	},
 	{  13, "Use provided timeout parameter"		},
 	{  14, "Use provided interval parameters"	},
 	{  15, "Use provided tx power parameter"	},
+	{  16, "Contain Scan Response Data"		},
 	{ }
 };
 #define MGMT_ADV_PARAM_DURATION		(1 << 12)
@@ -12222,6 +13161,7 @@ static void mgmt_print_identity_resolving_key(const void *data)
 
 	mgmt_print_address(data, address_type);
 	print_hex_field("Key", data + 7, 16);
+	keys_add_identity(data, address_type, data + 7);
 }
 
 static void mgmt_print_signature_resolving_key(const void *data)
@@ -13602,6 +14542,74 @@ static void mgmt_remove_adv_monitor_patterns_rsp(const void *data,
 	print_field("Handle: %d", handle);
 }
 
+static void mgmt_set_mesh_receiver_cmd(const void *data, uint16_t size)
+{
+	uint8_t enable = get_u8(data);
+	uint16_t window = get_le16(data + 1);
+	uint16_t period = get_le16(data + 3);
+	uint8_t num_ad_types = get_u8(data + 5);
+	const uint8_t *ad_types = data + 6;
+
+	print_field("Enable: %d", enable);
+	print_field("Window: %d", window);
+	print_field("Period: %d", period);
+	print_field("Num AD Types: %d", num_ad_types);
+	size -= 6;
+
+	while (size--)
+		print_field("  AD Type: %d", *ad_types++);
+}
+
+static void mgmt_read_mesh_features_rsp(const void *data, uint16_t size)
+{
+	uint16_t index = get_le16(data);
+	uint8_t max_handles = get_u8(data + 2);
+	uint8_t used_handles = get_u8(data + 3);
+	const uint8_t *handles = data + 4;
+
+	print_field("Index: %d", index);
+	print_field("Max Handles: %d", max_handles);
+	print_field("Used Handles: %d", used_handles);
+	size -= 4;
+
+	while (size--)
+		print_field("  Used Handle: %d", *handles++);
+}
+
+static void mgmt_mesh_send_cmd(const void *data, uint16_t size)
+{
+	const uint8_t *addr = data;
+	uint8_t addr_type = get_u8(data + 6);
+	uint64_t instant = get_le64(data + 7);
+	uint16_t delay = get_le16(data + 15);
+	uint8_t cnt = get_u8(data + 17);
+	uint8_t adv_data_len = get_u8(data + 18);
+
+	data += 19;
+	size -= 19;
+	print_bdaddr(addr);
+	print_field("Addr Type: %d", addr_type);
+	print_field("Instant: 0x%16.16" PRIx64, instant);
+	print_field("Delay: %d", delay);
+	print_field("Count: %d", cnt);
+	print_field("Data Length: %d", adv_data_len);
+	print_hex_field("Data", data, size);
+}
+
+static void mgmt_mesh_send_rsp(const void *data, uint16_t size)
+{
+	uint8_t handle = get_u8(data);
+
+	print_field("Handle: %d", handle);
+}
+
+static void mgmt_mesh_send_cancel_cmd(const void *data, uint16_t size)
+{
+	uint8_t handle = get_u8(data);
+
+	print_field("Handle: %d", handle);
+}
+
 struct mgmt_data {
 	uint16_t opcode;
 	const char *str;
@@ -13859,6 +14867,18 @@ static const struct mgmt_data mgmt_command_table[] = {
 				mgmt_add_adv_monitor_patterns_rssi_cmd, 8,
 									false,
 				mgmt_add_adv_monitor_patterns_rsp, 2, true},
+	{ 0x0057, "Set Mesh Receiver",
+				mgmt_set_mesh_receiver_cmd, 6, false,
+				mgmt_null_rsp, 0, true},
+	{ 0x0058, "Read Mesh Features",
+				mgmt_null_cmd, 0, true,
+				mgmt_read_mesh_features_rsp, 4, false},
+	{ 0x0059, "Mesh Send",
+				mgmt_mesh_send_cmd, 19, false,
+				mgmt_mesh_send_rsp, 1, true},
+	{ 0x0056, "Mesh Send Cancel",
+				mgmt_mesh_send_cancel_cmd, 1, true,
+				mgmt_null_rsp, 0, true},
 	{ }
 };
 
@@ -14325,6 +15345,64 @@ static void mgmt_controller_resume_evt(const void *data, uint16_t size)
 	mgmt_print_address(data, addr_type);
 }
 
+static void mgmt_adv_monitor_device_found_evt(const void *data, uint16_t size)
+{
+	uint16_t handle = get_le16(data);
+	const uint8_t *addr = data + 2;
+	uint8_t addr_type = get_u8(data + 8);
+	int8_t rssi = get_s8(data + 9);
+	uint32_t flags = get_le32(data + 10);
+	uint16_t ad_data_len = get_le16(data + 14);
+	const uint8_t *ad_data = data + 16;
+
+	print_field("Handle: %d", handle);
+	print_bdaddr(addr);
+	print_field("Addr Type: %d", addr_type);
+	print_field("RSSI: %d", rssi);
+	mgmt_print_device_flags(flags);
+	print_field("AD Data Len: %d", ad_data_len);
+	size -= 16;
+	print_hex_field("AD Data", ad_data, size);
+}
+
+static void mgmt_adv_monitor_device_lost_evt(const void *data, uint16_t size)
+{
+	uint16_t handle = get_le16(data);
+	const uint8_t *addr = data + 2;
+	uint8_t addr_type = get_u8(data + 8);
+
+	print_field("Handle: %d", handle);
+	print_bdaddr(addr);
+	print_field("Addr Type: %d", addr_type);
+}
+
+static void mgmt_mesh_device_found_evt(const void *data, uint16_t size)
+{
+	const uint8_t *addr = data;
+	uint8_t addr_type = get_u8(data + 6);
+	int8_t rssi = get_s8(data + 7);
+	uint64_t instant = get_le64(data + 8);
+	uint32_t flags = get_le32(data + 16);
+	uint16_t eir_len = get_le16(data + 20);
+	const uint8_t *eir_data = data + 22;
+
+	print_bdaddr(addr);
+	print_field("Addr Type: %d", addr_type);
+	print_field("RSSI: %d", rssi);
+	print_field("Instant: 0x%16.16" PRIx64, instant);
+	mgmt_print_device_flags(flags);
+	print_field("EIR Length: %d", eir_len);
+	size -= 22;
+	print_hex_field("EIR Data", eir_data, size);
+}
+
+static void mgmt_mesh_packet_cmplt_evt(const void *data, uint16_t size)
+{
+	uint8_t handle = get_u8(data);
+
+	print_field("Handle: %d", handle);
+}
+
 static const struct mgmt_data mgmt_event_table[] = {
 	{ 0x0001, "Command Complete",
 			mgmt_command_complete_evt, 3, false },
@@ -14414,6 +15492,14 @@ static const struct mgmt_data mgmt_event_table[] = {
 			mgmt_controller_suspend_evt, 1, true },
 	{ 0x002e, "Controller Resumed",
 			mgmt_controller_resume_evt, 8, true },
+	{ 0x002f, "ADV Monitor Device Found",
+			mgmt_adv_monitor_device_found_evt, 16, false },
+	{ 0x0030, "ADV Monitor Device Lost",
+			mgmt_adv_monitor_device_lost_evt, 9, true },
+	{ 0x0031, "Mesh Device Found",
+			mgmt_mesh_device_found_evt, 22, false },
+	{ 0x0032, "Mesh Packet Complete",
+			mgmt_mesh_packet_cmplt_evt, 1, true },
 	{ }
 };
 

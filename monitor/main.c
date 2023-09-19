@@ -51,6 +51,9 @@ static void usage(void)
 		"\t-r, --read <file>      Read traces in btsnoop format\n"
 		"\t-w, --write <file>     Save traces in btsnoop format\n"
 		"\t-a, --analyze <file>   Analyze traces in btsnoop format\n"
+		"\t                       If gnuplot is installed on the\n"
+                "\t                       system it will also attempt to plot\n"
+		"\t                       packet latency graph.\n"
 		"\t-s, --server <socket>  Start monitor server socket\n"
 		"\t-p, --priority <level> Show only priority or lower\n"
 		"\t-i, --index <num>      Show only specified controller\n"
@@ -62,6 +65,7 @@ static void usage(void)
 		"\t-T, --date             Show time and date information\n"
 		"\t-S, --sco              Dump SCO traffic\n"
 		"\t-A, --a2dp             Dump A2DP stream traffic\n"
+		"\t-I, --iso              Dump ISO traffic\n"
 		"\t-E, --ellisys [ip]     Send Ellisys HCI Injection\n"
 		"\t-P, --no-pager         Disable pager usage\n"
 		"\t-J  --jlink <device>,[<serialno>],[<interface>],[<speed>]\n"
@@ -89,6 +93,7 @@ static const struct option main_options[] = {
 	{ "date",      no_argument,       NULL, 'T' },
 	{ "sco",       no_argument,       NULL, 'S' },
 	{ "a2dp",      no_argument,       NULL, 'A' },
+	{ "iso",       no_argument,       NULL, 'I' },
 	{ "ellisys",   required_argument, NULL, 'E' },
 	{ "no-pager",  no_argument,       NULL, 'P' },
 	{ "jlink",     required_argument, NULL, 'J' },
@@ -126,8 +131,8 @@ int main(int argc, char *argv[])
 		struct sockaddr_un addr;
 
 		opt = getopt_long(argc, argv,
-					"r:w:a:s:p:i:d:B:V:MNtTSAE:PJ:R:C:c:vh",
-					main_options, NULL);
+				"r:w:a:s:p:i:d:B:V:MNtTSAIE:PJ:R:C:c:vh",
+				main_options, NULL);
 		if (opt < 0)
 			break;
 
@@ -196,6 +201,9 @@ int main(int argc, char *argv[])
 			break;
 		case 'A':
 			filter_mask |= PACKET_FILTER_SHOW_A2DP_STREAM;
+			break;
+		case 'I':
+			filter_mask |= PACKET_FILTER_SHOW_ISO_DATA;
 			break;
 		case 'E':
 			ellisys_server = optarg;

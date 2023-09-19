@@ -2765,8 +2765,11 @@ static gboolean avdtp_discover_resp(struct avdtp *session,
 
 		ret = send_request(session, TRUE, NULL, getcap_cmd,
 							&req, sizeof(req));
-		if (ret < 0)
+		if (ret < 0) {
+			session->seps = g_slist_remove(session->seps, sep);
+			g_free(sep);
 			break;
+		}
 		getcap_pending = TRUE;
 	}
 
@@ -3429,6 +3432,9 @@ int avdtp_discover(struct avdtp *session, avdtp_discover_cb_t cb,
 	if (err == 0) {
 		session->discover->cb = cb;
 		session->discover->user_data = user_data;
+	} else if (session->discover) {
+		g_free(session->discover);
+		session->discover = NULL;
 	}
 
 	return err;
@@ -3522,6 +3528,9 @@ int avdtp_set_configuration(struct avdtp *session,
 
 	if (!(lsep && rsep))
 		return -EINVAL;
+
+	if (lsep->stream)
+		return -EBUSY;
 
 	DBG("%p: int_seid=%u, acp_seid=%u", session,
 			lsep->info.seid, rsep->seid);

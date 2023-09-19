@@ -1,0 +1,85 @@
+From 0a8a015f567993d31c963a01adc9932142cf0340 Mon Sep 17 00:00:00 2001
+From: Nobuhiro Iwamatsu <iwamatsu@debian.org>
+Date: Sun, 6 Aug 2023 08:34:28 +0900
+Subject: [PATCH] Add HCI_TO_STR macro for FIRMWARE_DIR
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+If the macro specified with -D is string, it cannot be expanded and an error
+will occur. This adds HCI_TO_STR macro that expands as string and wraps it
+when expanding FIRMWARE_DIR.
+
+```
+tools/hciattach_bcm43xx.c: In function ‘bcm43xx_init’:
+<command-line>: error: expected expression before ‘/’ token
+tools/hciattach_bcm43xx.c:352:34: note: in expansion of macro ‘FIRMWARE_DIR’
+  352 |         if (bcm43xx_locate_patch(FIRMWARE_DIR, chip_name, fw_path)) {
+      |                                  ^~~~~~~~~~~~
+```
+
+Signed-off-by: Nobuhiro Iwamatsu <iwamatsu@debian.org>
+---
+ tools/hciattach.h          | 4 ++++
+ tools/hciattach_bcm43xx.c  | 2 +-
+ tools/hciattach_qualcomm.c | 2 +-
+ tools/hciattach_tialt.c    | 2 +-
+ 4 files changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/tools/hciattach.h b/tools/hciattach.h
+index dfa4c1e7a..ad4fb70b2 100644
+--- a/tools/hciattach.h
++++ b/tools/hciattach.h
+@@ -42,6 +42,10 @@
+ 
+ #ifndef FIRMWARE_DIR
+ #define FIRMWARE_DIR "/etc/firmware"
++#define HCI_TO_STR(x) (x)
++#else
++#define __HCI_TO_STR(x) (#x)
++#define HCI_TO_STR(x) __HCI_TO_STR(x)
+ #endif
+ 
+ int read_hci_event(int fd, unsigned char *buf, int size);
+diff --git a/tools/hciattach_bcm43xx.c b/tools/hciattach_bcm43xx.c
+index b89fc1b50..9df246800 100644
+--- a/tools/hciattach_bcm43xx.c
++++ b/tools/hciattach_bcm43xx.c
+@@ -349,7 +349,7 @@ int bcm43xx_init(int fd, int def_speed, int speed, struct termios *ti,
+ 	if (bcm43xx_read_local_name(fd, chip_name, sizeof(chip_name)))
+ 		return -1;
+ 
+-	if (bcm43xx_locate_patch(FIRMWARE_DIR, chip_name, fw_path)) {
++	if (bcm43xx_locate_patch(HCI_TO_STR(FIRMWARE_DIR), chip_name, fw_path)) {
+ 		fprintf(stderr, "Patch not found, continue anyway\n");
+ 	} else {
+ 		if (bcm43xx_set_speed(fd, ti, speed))
+diff --git a/tools/hciattach_qualcomm.c b/tools/hciattach_qualcomm.c
+index d751f42b1..33e742c00 100644
+--- a/tools/hciattach_qualcomm.c
++++ b/tools/hciattach_qualcomm.c
+@@ -219,7 +219,7 @@ int qualcomm_init(int fd, int speed, struct termios *ti, const char *bdaddr)
+ 	} while (resp[3] != 0 && resp[4] != 2);
+ 
+ 	snprintf(fw, sizeof(fw), "%s/%c%c%c%c%c%c_%c%c%c%c.bin",
+-				FIRMWARE_DIR,
++				HCI_TO_STR(FIRMWARE_DIR),
+ 				resp[18], resp[19], resp[20], resp[21],
+ 				resp[22], resp[23],
+ 				resp[32], resp[33], resp[34], resp[35]);
+diff --git a/tools/hciattach_tialt.c b/tools/hciattach_tialt.c
+index bf6e84923..69f6b3ee5 100644
+--- a/tools/hciattach_tialt.c
++++ b/tools/hciattach_tialt.c
+@@ -222,7 +222,7 @@ int texasalt_init(int fd, int speed, struct termios *ti)
+ 				brf_chip);
+ 
+ 		sprintf(fw, "%s/%s.bin",
+-			FIRMWARE_DIR,
++			HCI_TO_STR(FIRMWARE_DIR),
+ 			(brf_chip > 7) ? "unknown" : c_brf_chip[brf_chip]);
+ 		texas_load_firmware(fd, fw);
+ 
+-- 
+2.40.1
+

@@ -1,13 +1,18 @@
-Description: Add huawei patch to support pangu machine.
- hisi_init in hciattach tools.
- Migrate the pangu machine changes to the mainline.
-Author: lishengyu <lishengyu@uniontech.com>
-Origin: https://gerrit.uniontech.com/plugins/gitiles/base/bluez/+/c8b440b4e8f3880ab34337bc4ec70489c36cb531
-Last-Update: 2022-05-20
+From 04e16df5d3ae1b5f5c76dd4bd4bfcbc424e85b58 Mon Sep 17 00:00:00 2001
+From: xzl <xiangzelong@deepin.org>
+Date: Tue, 19 Sep 2023 16:18:56 +0800
+Subject: [PATCH 2/2] Add huawei patch to support pangu machine
 
---- bluez-5.64.orig/tools/hciattach.c
-+++ bluez-5.64/tools/hciattach.c
-@@ -1097,6 +1097,11 @@ struct uart_t uart[] = {
+---
+ tools/hciattach.c | 43 +++++++++++++++++++++++++++++++++++++++++++
+ tools/hciattach.h |  1 +
+ 2 files changed, 44 insertions(+)
+
+diff --git a/tools/hciattach.c b/tools/hciattach.c
+index 276a4e5..78eb530 100644
+--- a/tools/hciattach.c
++++ b/tools/hciattach.c
+@@ -1097,7 +1097,13 @@ struct uart_t uart[] = {
  	{ "amp",	0x0000, 0x0000, HCI_UART_H4, 115200, 115200,
  			AMP_DEV, DISABLE_PM, NULL, NULL, NULL },
  
@@ -15,11 +20,13 @@ Last-Update: 2022-05-20
 +	{ "hisi",		0x0000, 0x0000, HCI_UART_H4,   115200, 4000000,
 +			FLOW_CTL, DISABLE_PM, NULL, NULL, NULL },
 +
-+
  	{ NULL, 0 }
++
++
  };
  
-@@ -1210,6 +1215,31 @@ fail:
+ static struct uart_t * get_by_id(int m_id, int p_id)
+@@ -1210,6 +1216,31 @@ fail:
  	return -1;
  }
  
@@ -51,7 +58,7 @@ Last-Update: 2022-05-20
  static void usage(void)
  {
  	printf("hciattach - HCI UART driver initialization utility\n");
-@@ -1346,6 +1376,18 @@ int main(int argc, char *argv[])
+@@ -1346,6 +1377,18 @@ int main(int argc, char *argv[])
  		exit(1);
  	}
  
@@ -70,8 +77,10 @@ Last-Update: 2022-05-20
  	/* If user specified a initial speed, use that instead of
  	   the hardware's default */
  	if (init_speed)
---- bluez-5.64.orig/tools/hciattach.h
-+++ bluez-5.64/tools/hciattach.h
+diff --git a/tools/hciattach.h b/tools/hciattach.h
+index dfa4c1e..c23af90 100644
+--- a/tools/hciattach.h
++++ b/tools/hciattach.h
 @@ -14,6 +14,7 @@
  #define N_HCI	15
  #endif
@@ -80,3 +89,5 @@ Last-Update: 2022-05-20
  #define HCIUARTSETPROTO		_IOW('U', 200, int)
  #define HCIUARTGETPROTO		_IOR('U', 201, int)
  #define HCIUARTGETDEVICE	_IOR('U', 202, int)
+-- 
+2.33.1

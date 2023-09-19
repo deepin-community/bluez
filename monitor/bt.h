@@ -5,6 +5,7 @@
  *
  *  Copyright (C) 2011-2014  Intel Corporation
  *  Copyright (C) 2002-2010  Marcel Holtmann <marcel@holtmann.org>
+ *  Copyright 2023 NXP
  *
  *
  */
@@ -94,8 +95,36 @@ struct bt_ll_peripheral_feature_req {
 } __attribute__ ((packed));
 
 #define BT_LL_CONN_PARAM_REQ	0x0f
+struct bt_ll_conn_param_req {
+	uint16_t interval_min;
+	uint16_t interval_max;
+	uint16_t latency;
+	uint16_t timeout;
+	uint8_t pref_period;
+	uint16_t pref_conn_evt_count;
+	uint8_t offset_0;
+	uint8_t offset_1;
+	uint8_t offset_2;
+	uint8_t offset_3;
+	uint8_t offset_4;
+	uint8_t offset_5;
+} __attribute__ ((packed));
 
 #define BT_LL_CONN_PARAM_RSP	0x10
+struct bt_ll_conn_param_rsp {
+	uint16_t interval_min;
+	uint16_t interval_max;
+	uint16_t latency;
+	uint16_t timeout;
+	uint8_t pref_period;
+	uint16_t pref_conn_evt_count;
+	uint8_t offset_0;
+	uint8_t offset_1;
+	uint8_t offset_2;
+	uint8_t offset_3;
+	uint8_t offset_4;
+	uint8_t offset_5;
+} __attribute__ ((packed));
 
 #define BT_LL_REJECT_IND_EXT	0x11
 struct bt_ll_reject_ind_ext {
@@ -559,6 +588,10 @@ struct bt_hci_cmd_add_sco_conn {
 
 #define BT_HCI_CMD_CREATE_CONN_CANCEL		0x0408
 struct bt_hci_cmd_create_conn_cancel {
+	uint8_t  bdaddr[6];
+} __attribute__ ((packed));
+struct bt_hci_rsp_create_conn_cancel {
+	uint8_t  status;
 	uint8_t  bdaddr[6];
 } __attribute__ ((packed));
 
@@ -1787,6 +1820,12 @@ struct bt_hci_rsp_read_local_pairing_options {
 #define BT_HCI_LOCAL_CODEC_LE_CIS		BIT(2)
 #define BT_HCI_LOCAL_CODEC_LE_BIS		BIT(3)
 
+struct bt_hci_vnd_codec_v2 {
+	uint16_t cid;
+	uint16_t vid;
+	uint8_t  transport;
+} __attribute__ ((packed));
+
 struct bt_hci_vnd_codec {
 	uint8_t  id;
 	uint16_t cid;
@@ -2601,7 +2640,7 @@ struct bt_hci_cmd_periodic_sync_trans {
 struct bt_hci_cmd_pa_set_info_trans {
 	uint16_t handle;
 	uint16_t service_data;
-	uint16_t adv_handle;
+	uint8_t adv_handle;
 } __attribute__ ((packed));
 
 #define BT_HCI_CMD_PA_SYNC_TRANS_PARAMS		0x205c
@@ -2770,20 +2809,19 @@ struct bt_hci_bis_test {
 	uint16_t iso_interval;
 	uint8_t  nse;
 	uint16_t sdu;
-	uint8_t  pdu;
+	uint16_t  pdu;
 	uint8_t  phy;
 	uint8_t  packing;
 	uint8_t  framing;
 	uint8_t  bn;
 	uint8_t  irc;
 	uint8_t  pto;
-	uint8_t  adv_handle;
 	uint8_t  encryption;
 	uint8_t  bcode[16];
 } __attribute__ ((packed));
 
 struct bt_hci_cmd_le_create_big_test {
-	uint8_t  big_id;
+	uint8_t  big_handle;
 	uint8_t  adv_handle;
 	uint8_t  num_bis;
 	struct bt_hci_bis_test bis[0];
@@ -2856,6 +2894,11 @@ struct bt_hci_cmd_le_remove_iso_path {
 	uint8_t  direction;
 } __attribute__ ((packed));
 
+struct bt_hci_rsp_le_remove_iso_path {
+	uint8_t  status;
+	uint16_t handle;
+} __attribute__ ((packed));
+
 #define BT_HCI_CMD_LE_ISO_TX_TEST		0x2070
 #define BT_HCI_BIT_LE_ISO_TX_TEST		BT_HCI_CMD_BIT(43, 5)
 
@@ -2873,6 +2916,24 @@ struct bt_hci_cmd_le_remove_iso_path {
 struct bt_hci_cmd_le_set_host_feature {
 	uint8_t  bit_number;
 	uint8_t  bit_value;
+} __attribute__ ((packed));
+
+#define BT_HCI_CMD_LE_READ_ISO_LINK_QUALITY	0x2075
+#define BT_HCI_BIT_LE_READ_ISO_LINK_QUALITY	BT_HCI_CMD_BIT(45, 1)
+struct bt_hci_cmd_le_read_iso_link_quality {
+	uint16_t handle;
+} __attribute__ ((packed));
+
+struct bt_hci_rsp_le_read_iso_link_quality {
+	uint8_t  status;
+	uint16_t handle;
+	uint32_t tx_unacked_packets;
+	uint32_t tx_flushed_packets;
+	uint32_t tx_last_subevent_packets;
+	uint32_t retransmitted_packets;
+	uint32_t crc_error_packets;
+	uint32_t rx_unreceived_packets;
+	uint32_t duplicated_packets;
 } __attribute__ ((packed));
 
 #define BT_HCI_EVT_INQUIRY_COMPLETE		0x01
@@ -3517,6 +3578,34 @@ struct bt_hci_evt_le_per_sync_established {
 	uint8_t  clock_accuracy;
 } __attribute__ ((packed));
 
+struct bt_hci_le_pa_base_codec {
+	uint8_t  id;
+	uint16_t cid;
+	uint16_t vid;
+} __attribute__ ((packed));
+
+struct bt_hci_lv_data {
+	uint8_t  len;
+	uint8_t  data[];
+} __attribute__ ((packed));
+
+struct bt_hci_le_pa_base_bis {
+	uint8_t  index;
+	struct bt_hci_lv_data codec_cfg[];
+} __attribute__ ((packed));
+
+struct bt_hci_le_pa_base_subgroup {
+	uint8_t  num_bis;
+	struct bt_hci_le_pa_base_codec codec;
+	uint8_t  data[];
+} __attribute__ ((packed));
+
+struct bt_hci_le_pa_base_data {
+	uint8_t  pd[3];
+	uint8_t  num_subgroups;
+	struct bt_hci_le_pa_base_subgroup subgroups[];
+} __attribute__ ((packed));
+
 #define BT_HCI_EVT_LE_PA_REPORT			0x0f
 struct bt_hci_le_pa_report {
 	uint16_t handle;
@@ -3621,8 +3710,8 @@ struct bt_hci_evt_le_big_complete {
 
 #define BT_HCI_EVT_LE_BIG_TERMINATE		0x1c
 struct bt_hci_evt_le_big_terminate {
-	uint8_t  reason;
 	uint8_t  handle;
+	uint8_t  reason;
 } __attribute__ ((packed));
 
 #define BT_HCI_EVT_LE_BIG_SYNC_ESTABILISHED	0x1d
@@ -3642,7 +3731,7 @@ struct bt_hci_evt_le_big_sync_estabilished {
 
 #define BT_HCI_EVT_LE_BIG_SYNC_LOST		0x1e
 struct bt_hci_evt_le_big_sync_lost {
-	uint8_t  big_id;
+	uint8_t  big_handle;
 	uint8_t  reason;
 } __attribute__ ((packed));
 
@@ -3653,6 +3742,23 @@ struct bt_hci_evt_le_req_peer_sca_complete {
 	uint8_t  sca;
 } __attribute__ ((packed));
 
+#define BT_HCI_EVT_LE_BIG_INFO_ADV_REPORT	0x22
+struct bt_hci_evt_le_big_info_adv_report {
+	uint16_t sync_handle;
+	uint8_t  num_bis;
+	uint8_t  nse;
+	uint16_t iso_interval;
+	uint8_t  bn;
+	uint8_t  pto;
+	uint8_t  irc;
+	uint16_t max_pdu;
+	uint8_t  sdu_interval[3];
+	uint16_t max_sdu;
+	uint8_t  phy;
+	uint8_t  framing;
+	uint8_t  encryption;
+} __attribute__ ((packed));
+
 #define BT_HCI_ERR_SUCCESS			0x00
 #define BT_HCI_ERR_UNKNOWN_COMMAND		0x01
 #define BT_HCI_ERR_UNKNOWN_CONN_ID		0x02
@@ -3661,14 +3767,17 @@ struct bt_hci_evt_le_req_peer_sca_complete {
 #define BT_HCI_ERR_AUTH_FAILURE			0x05
 #define BT_HCI_ERR_PIN_OR_KEY_MISSING		0x06
 #define BT_HCI_ERR_MEM_CAPACITY_EXCEEDED	0x07
+#define BT_HCI_ERR_CONN_ALREADY_EXISTS		0x0b
 #define BT_HCI_ERR_COMMAND_DISALLOWED		0x0c
 #define BT_HCI_ERR_UNSUPPORTED_FEATURE		0x11
 #define BT_HCI_ERR_INVALID_PARAMETERS		0x12
+#define BT_HCI_ERR_LOCAL_HOST_TERM		0x16
 #define BT_HCI_ERR_UNSPECIFIED_ERROR		0x1f
 #define BT_HCI_ERR_ADV_TIMEOUT			0x3c
 #define BT_HCI_ERR_CONN_FAILED_TO_ESTABLISH	0x3e
 #define BT_HCI_ERR_UNKNOWN_ADVERTISING_ID	0x42
 #define BT_HCI_ERR_CANCELLED			0x44
+#define BT_HCI_ERR_ENC_MODE_NOT_ACCEPTABLE	0x25
 
 struct bt_l2cap_hdr {
 	uint16_t len;

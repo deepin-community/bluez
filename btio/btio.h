@@ -5,6 +5,7 @@
  *
  *  Copyright (C) 2009-2010  Marcel Holtmann <marcel@holtmann.org>
  *  Copyright (C) 2009-2010  Nokia Corporation
+ *  Copyright 2023 NXP
  *
  *
  */
@@ -44,6 +45,11 @@ typedef enum {
 	BT_IO_OPT_PRIORITY,
 	BT_IO_OPT_VOICE,
 	BT_IO_OPT_PHY,
+	BT_IO_OPT_QOS,
+	BT_IO_OPT_BASE,
+	BT_IO_OPT_ISO_BC_SID,
+	BT_IO_OPT_ISO_BC_NUM_BIS,
+	BT_IO_OPT_ISO_BC_BIS,
 } BtIOOption;
 
 typedef enum {
@@ -58,7 +64,8 @@ typedef enum {
 	BT_IO_MODE_ERTM,
 	BT_IO_MODE_STREAMING,
 	BT_IO_MODE_LE_FLOWCTL,
-	BT_IO_MODE_EXT_FLOWCTL
+	BT_IO_MODE_EXT_FLOWCTL,
+	BT_IO_MODE_ISO
 } BtIOMode;
 
 typedef void (*BtIOConfirm)(GIOChannel *io, gpointer user_data);

@@ -6,14 +6,14 @@ Subject: [PATCH 1/5] obex: Use GLib helper function to manipulate paths
 Instead of trying to do it by hand. This also makes sure that
 relative paths aren't used by the agent.
 ---
- obexd/src/manager.c | 10 +++++-----
- 1 file changed, 5 insertions(+), 5 deletions(-)
+ obexd/src/manager.c | 12 ++++--------
+ 1 file changed, 4 insertions(+), 8 deletions(-)
 
 diff --git a/obexd/src/manager.c b/obexd/src/manager.c
-index cec8a39..f18896e 100644
+index 73fd6b9af..5945e7e37 100644
 --- a/obexd/src/manager.c
 +++ b/obexd/src/manager.c
-@@ -651,14 +651,14 @@ static void agent_reply(DBusPendingCall *call, void *user_data)
+@@ -644,17 +644,13 @@ static void agent_reply(DBusPendingCall *call, void *user_data)
  				DBUS_TYPE_STRING, &name,
  				DBUS_TYPE_INVALID)) {
  		/* Splits folder and name */
@@ -22,17 +22,19 @@ index cec8a39..f18896e 100644
  		DBG("Agent replied with %s", name);
 -		if (!slash) {
 -			agent->new_name = g_strdup(name);
++		agent->new_name = g_path_get_basename(name);
 +		if (is_relative) {
-+			agent->new_name = g_path_get_basename(name);
  			agent->new_folder = NULL;
  		} else {
--			agent->new_name = g_strdup(slash + 1);
+-			if (strlen(slash) == 1)
+-				agent->new_name = NULL;
+-			else
+-				agent->new_name = g_strdup(slash + 1);
 -			agent->new_folder = g_strndup(name, slash - name);
-+			agent->new_name = g_path_get_basename(name);
 +			agent->new_folder = g_path_get_dirname(name);
  		}
  	}
  
 -- 
-1.8.4.2
+2.40.1
 

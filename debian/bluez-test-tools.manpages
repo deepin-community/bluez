@@ -1,3 +1,4 @@
 debian/manpages/b1ee.1
 debian/manpages/btvirt.1
 debian/manpages/*-tester.1
+usr/share/man/man1/isotest.1

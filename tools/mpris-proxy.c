@@ -480,6 +480,7 @@ static void add_player(DBusConnection *conn, const char *name,
 	reply = dbus_connection_send_with_reply_and_block(sys, msg, -1, &err);
 	if (!reply) {
 		fprintf(stderr, "Can't register player\n");
+		dbus_connection_unregister_object_path(sys, path);
 		free(owner);
 		if (dbus_error_is_set(&err)) {
 			fprintf(stderr, "%s\n", err.message);
@@ -1978,7 +1979,7 @@ static void register_player(GDBusProxy *proxy)
 
 	player->conn = g_dbus_setup_private(DBUS_BUS_SESSION, player->bus_name,
 									NULL);
-	if (!session) {
+	if (!player->conn) {
 		fprintf(stderr, "Could not register bus name %s",
 							player->bus_name);
 		goto fail;

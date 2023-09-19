@@ -11,10 +11,6 @@ shared-gatt-client-Fix-segfault-after-PIN-entry.patch
 main.conf-Add-more-details-Closes-904212.patch
 headers-use-releative-symlinks.patch
 Change-shebang-from-usr-bin-python-to-usr-bin-python.patch
-deepin-fix-daemon-failed-restart.patch
-deepin-huawei.patch
-deepin-add-custom-config-for-huawei.patch
-deepin-huawei-fix-main.conf.patch
-uniontech-fix-pair-failed-Already-Paired-0x13.patch
-deepin-hciattach-add-hisi-init.patch
-uniontech-device-Fix-not-removing-connected-device.patch
+Add-HCI_TO_STR-macro-for-FIRMWARE_DIR.patch
+0001-Add-custom-config-for-huawei.patch
+0002-Add-huawei-patch-to-support-pangu-machine.patch

@@ -38,6 +38,8 @@
 #include "dbus-common.h"
 #include "profile.h"
 #include "service.h"
+#include "textfile.h"
+#include "settings.h"
 
 #define GATT_MANAGER_IFACE	"org.bluez.GattManager1"
 #define GATT_PROFILE_IFACE	"org.bluez.GattProfile1"
@@ -108,6 +110,12 @@ struct external_profile {
 	struct queue *profiles; /* btd_profile list */
 };
 
+struct client_io {
+	struct bt_att *att;
+	unsigned int disconn_id;
+	struct io *io;
+};
+
 struct external_chrc {
 	struct external_service *service;
 	char *path;
@@ -117,8 +125,8 @@ struct external_chrc {
 	uint32_t perm;
 	uint32_t ccc_perm;
 	uint16_t mtu;
-	struct io *write_io;
-	struct io *notify_io;
+	struct queue *write_ios;
+	struct queue *notify_ios;
 	struct gatt_db_attribute *attrib;
 	struct gatt_db_attribute *ccc;
 	struct queue *pending_reads;
@@ -461,12 +469,22 @@ static void cancel_pending_write(void *data)
 	op->owner_queue = NULL;
 }
 
+static void client_io_free(void *data)
+{
+	struct client_io *client = data;
+
+	bt_att_unregister_disconnect(client->att, client->disconn_id);
+	bt_att_unref(client->att);
+	io_destroy(client->io);
+	free(client);
+}
+
 static void chrc_free(void *data)
 {
 	struct external_chrc *chrc = data;
 
-	io_destroy(chrc->write_io);
-	io_destroy(chrc->notify_io);
+	queue_destroy(chrc->write_ios, client_io_free);
+	queue_destroy(chrc->notify_ios, client_io_free);
 
 	queue_destroy(chrc->pending_reads, cancel_pending_read);
 	queue_destroy(chrc->pending_writes, cancel_pending_write);
@@ -1236,7 +1254,8 @@ static void populate_gatt_service(struct btd_gatt_database *database)
 				NULL, NULL, database);
 
 	database->svc_chngd_ccc = service_add_ccc(service, database, NULL, NULL,
-								    0, NULL);
+						BT_ATT_PERM_READ |
+						BT_ATT_PERM_WRITE, NULL);
 
 	bt_uuid16_create(&uuid, GATT_CHARAC_CLI_FEAT);
 	database->cli_feat = gatt_db_service_add_characteristic(service,
@@ -1528,6 +1547,17 @@ static void send_service_changed(struct btd_gatt_database *database,
 		error("Failed to notify Service Changed");
 }
 
+static void database_store(struct btd_gatt_database *database)
+{
+	char filename[PATH_MAX];
+
+	create_filename(filename, PATH_MAX, "/%s/attributes",
+				btd_adapter_get_storage_dir(database->adapter));
+	create_file(filename, 0600);
+
+	btd_settings_gatt_db_store(database->db, filename);
+}
+
 static void gatt_db_service_added(struct gatt_db_attribute *attrib,
 								void *user_data)
 {
@@ -1538,6 +1568,8 @@ static void gatt_db_service_added(struct gatt_db_attribute *attrib,
 	database_add_record(database, attrib);
 
 	send_service_changed(database, attrib);
+
+	database_store(database);
 }
 
 static bool ccc_match_service(const void *data, const void *match_data)
@@ -1711,8 +1743,10 @@ static bool parse_chrc_flags(DBusMessageIter *array, uint8_t *props,
 			*perm |= BT_ATT_PERM_WRITE;
 		} else if (!strcmp("notify", flag)) {
 			*props |= BT_GATT_CHRC_PROP_NOTIFY;
+			*ccc_perm |= BT_ATT_PERM_WRITE;
 		} else if (!strcmp("indicate", flag)) {
 			*props |= BT_GATT_CHRC_PROP_INDICATE;
+			*ccc_perm |= BT_ATT_PERM_WRITE;
 		} else if (!strcmp("authenticated-signed-writes", flag)) {
 			*props |= BT_GATT_CHRC_PROP_AUTH;
 			*perm |= BT_ATT_PERM_WRITE;
@@ -2177,27 +2211,43 @@ static bool parse_handle(GDBusProxy *proxy, uint16_t *handle)
 	return true;
 }
 
-static uint8_t dbus_error_to_att_ecode(const char *error_name, uint8_t perm_err)
+static uint8_t dbus_error_to_att_ecode(const char *name, const char *msg,
+				       uint8_t perm_err)
 {
-	if (strcmp(error_name, ERROR_INTERFACE ".Failed") == 0)
-		return 0x80;  /* For now return this "application error" */
+	if (strcmp(name, ERROR_INTERFACE ".Failed") == 0) {
+		char *endptr = NULL;
+		uint32_t ecode;
 
-	if (strcmp(error_name, ERROR_INTERFACE ".NotSupported") == 0)
+		ecode = strtol(msg, &endptr, 0);
+
+		/* If message doesn't set an error code just use 0x80 */
+		if (!endptr || *endptr != '\0')
+			return 0x80;
+
+		if (ecode < 0x80 || ecode > 0x9f) {
+			error("Invalid error code: %s", msg);
+			return BT_ATT_ERROR_UNLIKELY;
+		}
+
+		return ecode;
+	}
+
+	if (strcmp(name, ERROR_INTERFACE ".NotSupported") == 0)
 		return BT_ATT_ERROR_REQUEST_NOT_SUPPORTED;
 
-	if (strcmp(error_name, ERROR_INTERFACE ".NotAuthorized") == 0)
+	if (strcmp(name, ERROR_INTERFACE ".NotAuthorized") == 0)
 		return BT_ATT_ERROR_AUTHORIZATION;
 
-	if (strcmp(error_name, ERROR_INTERFACE ".InvalidValueLength") == 0)
+	if (strcmp(name, ERROR_INTERFACE ".InvalidValueLength") == 0)
 		return BT_ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LEN;
 
-	if (strcmp(error_name, ERROR_INTERFACE ".InvalidOffset") == 0)
+	if (strcmp(name, ERROR_INTERFACE ".InvalidOffset") == 0)
 		return BT_ATT_ERROR_INVALID_OFFSET;
 
-	if (strcmp(error_name, ERROR_INTERFACE ".InProgress") == 0)
+	if (strcmp(name, ERROR_INTERFACE ".InProgress") == 0)
 		return BT_ERROR_ALREADY_IN_PROGRESS;
 
-	if (strcmp(error_name, ERROR_INTERFACE ".NotPermitted") == 0)
+	if (strcmp(name, ERROR_INTERFACE ".NotPermitted") == 0)
 		return perm_err;
 
 	return BT_ATT_ERROR_UNLIKELY;
@@ -2221,7 +2271,7 @@ static void read_reply_cb(DBusMessage *message, void *user_data)
 
 	if (dbus_set_error_from_message(&err, message) == TRUE) {
 		DBG("Failed to read value: %s: %s", err.name, err.message);
-		ecode = dbus_error_to_att_ecode(err.name,
+		ecode = dbus_error_to_att_ecode(err.name, err.message,
 					BT_ATT_ERROR_READ_NOT_PERMITTED);
 		dbus_error_free(&err);
 		goto done;
@@ -2400,7 +2450,7 @@ static void write_reply_cb(DBusMessage *message, void *user_data)
 
 	if (dbus_set_error_from_message(&err, message) == TRUE) {
 		DBG("Failed to write value: %s: %s", err.name, err.message);
-		ecode = dbus_error_to_att_ecode(err.name,
+		ecode = dbus_error_to_att_ecode(err.name, err.message,
 					BT_ATT_ERROR_WRITE_NOT_PERMITTED);
 		dbus_error_free(&err);
 		goto done;
@@ -2509,18 +2559,29 @@ static void flush_pending_writes(GDBusProxy *proxy,
 	queue_remove_all(owner_queue, NULL, NULL, NULL);
 }
 
+static bool match_client_io(const void *data, const void *user_data)
+{
+	const struct client_io *client = data;
+	const struct io *io = user_data;
+
+	return client->io == io;
+}
+
 static bool sock_hup(struct io *io, void *user_data)
 {
 	struct external_chrc *chrc = user_data;
+	struct client_io *client;
 
 	DBG("%p closed\n", io);
 
-	if (io == chrc->write_io)
-		chrc->write_io = NULL;
-	else
-		chrc->notify_io = NULL;
+	client = queue_remove_if(chrc->write_ios, match_client_io, io);
+	if (!client) {
+		client = queue_remove_if(chrc->notify_ios, match_client_io, io);
+		if (!client)
+			return false;
+	}
 
-	io_destroy(io);
+	client_io_free(client);
 
 	return false;
 }
@@ -2574,10 +2635,68 @@ static int sock_io_send(struct io *io, const void *data, size_t len)
 	return sendmsg(io_get_fd(io), &msg, MSG_NOSIGNAL);
 }
 
+static void att_disconnect_cb(int err, void *user_data)
+{
+	struct client_io *client = user_data;
+
+	/* If ATT is disconnected shutdown correspondent client IO so sock_hup
+	 * is triggered and the server socket is closed.
+	 */
+	io_shutdown(client->io);
+}
+
+static struct client_io *
+client_io_new(struct external_chrc *chrc, int fd, struct bt_att *att)
+{
+	struct client_io *client;
+
+	client = new0(struct client_io, 1);
+	client->att = bt_att_ref(att);
+	client->disconn_id = bt_att_register_disconnect(att, att_disconnect_cb,
+							client, NULL);
+	client->io = sock_io_new(fd, chrc);
+
+	return client;
+}
+
+static bool match_client_att(const void *data, const void *user_data)
+{
+	const struct client_io *client = data;
+	const struct bt_att *att = user_data;
+
+	/* Always match if ATT instance is not set since that is used by
+	 * clear_cc_state to clear all instances.
+	 */
+	if (!att)
+		return true;
+
+	return client->att == att;
+}
+
+static struct client_io *
+client_write_io_get(struct external_chrc *chrc, int fd, struct bt_att *att)
+{
+	struct client_io *client;
+
+	client = queue_find(chrc->write_ios, match_client_att, att);
+	if (client)
+		return client;
+
+	client = client_io_new(chrc, fd, att);
+
+	if (!chrc->write_ios)
+		chrc->write_ios = queue_new();
+
+	queue_push_tail(chrc->write_ios, client);
+
+	return client;
+}
+
 static void acquire_write_reply(DBusMessage *message, void *user_data)
 {
 	struct pending_op *op = user_data;
 	struct external_chrc *chrc;
+	struct client_io *client;
 	DBusError err;
 	int fd;
 	uint16_t mtu;
@@ -2595,7 +2714,7 @@ static void acquire_write_reply(DBusMessage *message, void *user_data)
 
 		error("Failed to acquire write: %s\n", err.name);
 
-		ecode = dbus_error_to_att_ecode(err.name,
+		ecode = dbus_error_to_att_ecode(err.name, err.message,
 					BT_ATT_ERROR_WRITE_NOT_PERMITTED);
 		dbus_error_free(&err);
 
@@ -2617,10 +2736,12 @@ static void acquire_write_reply(DBusMessage *message, void *user_data)
 
 	DBG("AcquireWrite success: fd %d MTU %u\n", fd, mtu);
 
-	chrc->write_io = sock_io_new(fd, chrc);
+	client = client_write_io_get(chrc, fd, op->att);
+	if (!client)
+		goto retry;
 
 	while ((op = queue_peek_head(chrc->pending_writes)) != NULL) {
-		if (sock_io_send(chrc->write_io, op->data.iov_base,
+		if (sock_io_send(client->io, op->data.iov_base,
 					op->data.iov_len) < 0)
 			goto retry;
 
@@ -2677,10 +2798,32 @@ static struct pending_op *acquire_write(struct external_chrc *chrc,
 	return NULL;
 }
 
+static struct client_io *
+client_notify_io_get(struct external_chrc *chrc, int fd, struct bt_att *att)
+{
+	struct client_io *client;
+
+	client = queue_find(chrc->notify_ios, match_client_att, att);
+	if (client)
+		return client;
+
+	client = client_io_new(chrc, fd, att);
+
+	io_set_read_handler(client->io, sock_io_read, chrc, NULL);
+
+	if (!chrc->notify_ios)
+		chrc->notify_ios = queue_new();
+
+	queue_push_tail(chrc->notify_ios, client);
+
+	return client;
+}
+
 static void acquire_notify_reply(DBusMessage *message, void *user_data)
 {
 	struct pending_op *op = user_data;
 	struct external_chrc *chrc = (void *) op->data.iov_base;
+	struct client_io *client;
 	DBusError err;
 	int fd;
 	uint16_t mtu;
@@ -2714,8 +2857,9 @@ static void acquire_notify_reply(DBusMessage *message, void *user_data)
 
 	DBG("AcquireNotify success: fd %d MTU %u\n", fd, mtu);
 
-	chrc->notify_io = sock_io_new(fd, chrc);
-	io_set_read_handler(chrc->notify_io, sock_io_read, chrc, NULL);
+	client = client_notify_io_get(chrc, fd, op->att);
+	if (!client)
+		goto retry;
 
 	__sync_fetch_and_add(&chrc->ntfy_cnt, 1);
 
@@ -2748,6 +2892,7 @@ static void acquire_notify_setup(DBusMessageIter *iter, void *user_data)
 static uint8_t ccc_write_cb(struct pending_op *op, void *user_data)
 {
 	struct external_chrc *chrc = user_data;
+	struct client_io *client;
 	DBusMessageIter iter;
 	uint16_t value;
 
@@ -2760,14 +2905,16 @@ static uint8_t ccc_write_cb(struct pending_op *op, void *user_data)
 		if (!chrc->ntfy_cnt)
 			goto done;
 
-		if (__sync_sub_and_fetch(&chrc->ntfy_cnt, 1))
-			goto done;
-
-		if (chrc->notify_io) {
-			io_destroy(chrc->notify_io);
-			chrc->notify_io = NULL;
+		client = queue_remove_if(chrc->notify_ios, match_client_att,
+							op ? op->att : NULL);
+		if (client) {
+			client_io_free(client);
+			__sync_sub_and_fetch(&chrc->ntfy_cnt, 1);
 			goto done;
 		}
+
+		if (__sync_sub_and_fetch(&chrc->ntfy_cnt, 1))
+			goto done;
 
 		/*
 		 * Send request to stop notifying. This is best-effort
@@ -2788,7 +2935,8 @@ static uint8_t ccc_write_cb(struct pending_op *op, void *user_data)
 		(value == 2 && !(chrc->props & BT_GATT_CHRC_PROP_INDICATE)))
 		return BT_ERROR_CCC_IMPROPERLY_CONFIGURED;
 
-	if (chrc->notify_io) {
+	client = queue_find(chrc->notify_ios, match_client_att, op->att);
+	if (client) {
 		__sync_fetch_and_add(&chrc->ntfy_cnt, 1);
 		goto done;
 	}
@@ -2833,17 +2981,19 @@ static void property_changed_cb(GDBusProxy *proxy, const char *name,
 	if (strcmp(name, "Value"))
 		return;
 
-	if (dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_ARRAY) {
-		DBG("Malformed \"Value\" property received");
-		return;
-	}
+	if (iter) {
+		if (dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_ARRAY) {
+			DBG("Malformed \"Value\" property received");
+			return;
+		}
 
-	dbus_message_iter_recurse(iter, &array);
-	dbus_message_iter_get_fixed_array(&array, &value, &len);
+		dbus_message_iter_recurse(iter, &array);
+		dbus_message_iter_get_fixed_array(&array, &value, &len);
 
-	if (len < 0) {
-		DBG("Malformed \"Value\" property received");
-		return;
+		if (len < 0) {
+			DBG("Malformed \"Value\" property received");
+			return;
+		}
 	}
 
 	/* Truncate the value if it's too large */
@@ -2864,6 +3014,9 @@ static bool database_add_ccc(struct external_service *service,
 	if (!(chrc->props & BT_GATT_CHRC_PROP_NOTIFY) &&
 				!(chrc->props & BT_GATT_CHRC_PROP_INDICATE))
 		return true;
+
+	/* Always set read/write permissions */
+	chrc->ccc_perm |= BT_ATT_PERM_WRITE | BT_ATT_PERM_READ;
 
 	chrc->ccc = service_add_ccc(service->attrib, service->app->database,
 				    ccc_write_cb, chrc, chrc->ccc_perm, NULL);
@@ -2974,7 +3127,7 @@ static void desc_write_cb(struct gatt_db_attribute *attrib,
 	}
 
 	if (opcode == BT_ATT_OP_PREP_WRITE_REQ) {
-		if (!device_is_trusted(device) && !desc->prep_authorized &&
+		if (!btd_device_is_trusted(device) && !desc->prep_authorized &&
 						desc->req_prep_authorization)
 			send_write(att, attrib, desc->proxy,
 					desc->pending_writes, id, value, len,
@@ -3084,6 +3237,7 @@ static void chrc_write_cb(struct gatt_db_attribute *attrib,
 					void *user_data)
 {
 	struct external_chrc *chrc = user_data;
+	struct client_io *client;
 	struct btd_device *device;
 	struct queue *queue;
 	DBusMessageIter iter;
@@ -3105,7 +3259,7 @@ static void chrc_write_cb(struct gatt_db_attribute *attrib,
 		queue = NULL;
 
 	if (opcode == BT_ATT_OP_PREP_WRITE_REQ) {
-		if (!device_is_trusted(device) && !chrc->prep_authorized &&
+		if (!btd_device_is_trusted(device) && !chrc->prep_authorized &&
 						chrc->req_prep_authorization)
 			send_write(att, attrib, chrc->proxy, queue,
 					id, value, len, offset,
@@ -3119,8 +3273,9 @@ static void chrc_write_cb(struct gatt_db_attribute *attrib,
 	if (opcode == BT_ATT_OP_EXEC_WRITE_REQ)
 		chrc->prep_authorized = false;
 
-	if (chrc->write_io) {
-		if (sock_io_send(chrc->write_io, value, len) < 0) {
+	client = queue_find(chrc->write_ios, match_client_att, att);
+	if (client) {
+		if (sock_io_send(client->io, value, len) < 0) {
 			error("Unable to write: %s", strerror(errno));
 			goto fail;
 		}
@@ -3501,8 +3656,8 @@ static void register_characteristic(void *data, void *user_data)
 {
 	struct gatt_app *app = user_data;
 	GDBusProxy *proxy = data;
-	const char *iface = g_dbus_proxy_get_interface(proxy);
-	const char *path = g_dbus_proxy_get_path(proxy);
+	const char *iface;
+	const char *path;
 
 	if (app->failed)
 		return;
@@ -3749,6 +3904,70 @@ static uint8_t server_authorize(struct bt_att *att, uint8_t opcode,
 	return BT_ATT_ERROR_DB_OUT_OF_SYNC;
 }
 
+static void eatt_confirm_cb(GIOChannel *io, gpointer data)
+{
+	char address[18];
+	uint8_t dst_type;
+	bdaddr_t src, dst;
+	GError *gerr = NULL;
+	struct btd_device *device;
+	struct bt_gatt_server *server;
+	struct bt_att *att;
+
+	bt_io_get(io, &gerr, BT_IO_OPT_SOURCE_BDADDR, &src,
+				BT_IO_OPT_DEST_BDADDR, &dst,
+				BT_IO_OPT_DEST_TYPE, &dst_type,
+				BT_IO_OPT_DEST, address,
+				BT_IO_OPT_INVALID);
+	if (gerr) {
+		error("bt_io_get: %s", gerr->message);
+		g_error_free(gerr);
+		goto drop;
+	}
+
+	DBG("New incoming EATT connection");
+
+	/* Confirm the device exists before accepting the connection, if the
+	 * device is using an RPA it could be that the MGMT event has not been
+	 * processed yet which would lead to create a second copy of the same
+	 * device using its identity address.
+	 */
+	device = btd_adapter_find_device(adapter_find(&src), &dst, dst_type);
+	if (!device) {
+		error("Unable to find device: %s", address);
+		goto drop;
+	}
+
+	/* Only allow EATT connection from central */
+	if (btd_device_is_initiator(device)) {
+		warn("EATT connection from peripheral may cause collisions");
+		goto drop;
+	}
+
+	server = btd_device_get_gatt_server(device);
+	if (!server) {
+		error("Unable to resolve bt_server");
+		goto drop;
+	}
+
+	att = bt_gatt_server_get_att(server);
+	if (bt_att_get_channels(att) == btd_opts.gatt_channels) {
+		DBG("EATT channel limit reached");
+		goto drop;
+	}
+
+	if (!bt_io_accept(io, connect_cb, NULL, NULL, &gerr)) {
+		error("bt_io_accept: %s", gerr->message);
+		g_error_free(gerr);
+		goto drop;
+	}
+
+	return;
+
+drop:
+	g_io_channel_shutdown(io, TRUE, NULL);
+}
+
 struct btd_gatt_database *btd_gatt_database_new(struct btd_adapter *adapter)
 {
 	struct btd_gatt_database *database;
@@ -3785,14 +4004,14 @@ struct btd_gatt_database *btd_gatt_database_new(struct btd_adapter *adapter)
 	if (btd_opts.gatt_channels == 1)
 		goto bredr;
 
-	/* EATT socket */
-	database->eatt_io = bt_io_listen(connect_cb, NULL, NULL, NULL,
+	/* EATT socket, encryption is required */
+	database->eatt_io = bt_io_listen(NULL, eatt_confirm_cb, NULL, NULL,
 					&gerr,
 					BT_IO_OPT_SOURCE_BDADDR, addr,
 					BT_IO_OPT_SOURCE_TYPE,
 					btd_adapter_get_address_type(adapter),
 					BT_IO_OPT_PSM, BT_ATT_EATT_PSM,
-					BT_IO_OPT_SEC_LEVEL, BT_IO_SEC_LOW,
+					BT_IO_OPT_SEC_LEVEL, BT_IO_SEC_MEDIUM,
 					BT_IO_OPT_MTU, btd_opts.gatt_mtu,
 					BT_IO_OPT_INVALID);
 	if (!database->eatt_io) {
@@ -3876,6 +4095,10 @@ void btd_gatt_database_server_connected(struct btd_gatt_database *database,
 		return;
 
 	send_notification_to_device(state, state->pending);
+
+	state = find_device_state(database, &bdaddr, bdaddr_type);
+	if (!state || !state->pending)
+		return;
 
 	free(state->pending->value);
 	free(state->pending);
