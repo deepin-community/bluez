@@ -48,6 +48,7 @@ override_dh_install:
 	# Remove test scripts, and these are taken directly into the package
 	# from the test directory
 	rm -rf debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/bluez
+	install -m 755 -D src/bluetoothd.sh debian/tmp/usr/libexec/bluetooth
 	dh_install
 
 override_dh_auto_configure:

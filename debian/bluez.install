@@ -28,3 +28,4 @@ lib/systemd/system/bluetooth.service
 usr/share/dbus-1/system.d/bluetooth.conf
 usr/share/dbus-1/system-services/org.bluez.service
 usr/share/zsh/site-functions/_bluetoothctl
+usr/libexec/bluetooth/bluetoothd.sh

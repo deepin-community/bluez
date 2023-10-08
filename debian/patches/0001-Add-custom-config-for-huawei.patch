@@ -7,7 +7,7 @@ Subject: [PATCH 1/2] Add-custom-config-for-huawei
  src/bluetooth.service.in | 4 ++--
  src/bluetoothd.sh        | 8 ++++++++
  2 files changed, 10 insertions(+), 2 deletions(-)
- create mode 100644 src/bluetoothd.sh
+ create mode 100755 src/bluetoothd.sh
 
 diff --git a/src/bluetooth.service.in b/src/bluetooth.service.in
 index beb98ce..f4eeaca 100644
@@ -27,7 +27,7 @@ index beb98ce..f4eeaca 100644
  LimitNPROC=1
  
 diff --git a/src/bluetoothd.sh b/src/bluetoothd.sh
-new file mode 100644
+new file mode 100755
 index 0000000..66d7160
 --- /dev/null
 +++ b/src/bluetoothd.sh
