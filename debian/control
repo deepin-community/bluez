@@ -18,7 +18,8 @@ Build-Depends: debhelper-compat (= 13),
                python3-docutils,
                udev,
                check <!nocheck>,
-               systemd
+               systemd,
+               systemd-dev,
 Standards-Version: 4.6.1
 Rules-Requires-Root: no
 Vcs-Browser: https://salsa.debian.org/bluetooth-team/bluez

@@ -170,6 +170,7 @@ static GSList *conn_fail_list = NULL;
 
 struct link_key_info {
 	bdaddr_t bdaddr;
+	uint8_t bdaddr_type;
 	unsigned char key[16];
 	uint8_t type;
 	uint8_t pin_len;
@@ -260,6 +261,7 @@ struct btd_adapter {
 
 	bdaddr_t bdaddr;		/* controller Bluetooth address */
 	uint8_t bdaddr_type;		/* address type */
+	uint8_t version;                /* controller core spec version */
 	uint32_t dev_class;		/* controller class of device */
 	char *name;			/* controller device name */
 	char *short_name;		/* controller short name */
@@ -2645,10 +2647,13 @@ static bool parse_transport(DBusMessageIter *value,
 static bool parse_duplicate_data(DBusMessageIter *value,
 					struct discovery_filter *filter)
 {
+	dbus_bool_t duplicate = false;
+
 	if (dbus_message_iter_get_arg_type(value) != DBUS_TYPE_BOOLEAN)
 		return false;
 
-	dbus_message_iter_get_basic(value, &filter->duplicate);
+	dbus_message_iter_get_basic(value, &duplicate);
+	filter->duplicate = duplicate;
 
 	return true;
 }
@@ -2656,10 +2661,13 @@ static bool parse_duplicate_data(DBusMessageIter *value,
 static bool parse_discoverable(DBusMessageIter *value,
 					struct discovery_filter *filter)
 {
+	dbus_bool_t discoverable = false;
+
 	if (dbus_message_iter_get_arg_type(value) != DBUS_TYPE_BOOLEAN)
 		return false;
 
-	dbus_message_iter_get_basic(value, &filter->discoverable);
+	dbus_message_iter_get_basic(value, &discoverable);
+	filter->discoverable = discoverable;
 
 	return true;
 }
@@ -3540,6 +3548,29 @@ static gboolean property_experimental_exists(const GDBusPropertyTable *property,
 	return !queue_isempty(adapter->exps);
 }
 
+static gboolean property_get_manufacturer(const GDBusPropertyTable *property,
+					  DBusMessageIter *iter,
+					  void *user_data)
+{
+	struct btd_adapter *adapter = user_data;
+	dbus_uint16_t val = adapter->manufacturer;
+
+	dbus_message_iter_append_basic(iter, DBUS_TYPE_UINT16, &val);
+
+	return TRUE;
+}
+
+static gboolean property_get_version(const GDBusPropertyTable *property,
+				     DBusMessageIter *iter, void *user_data)
+{
+	struct btd_adapter *adapter = user_data;
+	uint8_t val = adapter->version;
+
+	dbus_message_iter_append_basic(iter, DBUS_TYPE_BYTE, &val);
+
+	return TRUE;
+}
+
 static DBusMessage *remove_device(DBusConnection *conn,
 					DBusMessage *msg, void *user_data)
 {
@@ -3898,6 +3929,8 @@ static const GDBusPropertyTable adapter_properties[] = {
 	{ "Roles", "as", property_get_roles },
 	{ "ExperimentalFeatures", "as", property_get_experimental, NULL,
 					property_experimental_exists },
+	{ "Manufacturer", "q", property_get_manufacturer },
+	{ "Version", "y", property_get_version },
 	{ }
 };
 
@@ -3932,7 +3965,9 @@ static bool is_blocked_key(uint8_t key_type, uint8_t *key_value)
 	return false;
 }
 
-static struct link_key_info *get_key_info(GKeyFile *key_file, const char *peer)
+static struct link_key_info *get_key_info(GKeyFile *key_file, const char *peer,
+					uint8_t bdaddr_type)
+
 {
 	struct link_key_info *info = NULL;
 	char *str;
@@ -3944,6 +3979,7 @@ static struct link_key_info *get_key_info(GKeyFile *key_file, const char *peer)
 	info = g_new0(struct link_key_info, 1);
 
 	str2ba(peer, &info->bdaddr);
+	info->bdaddr_type = bdaddr_type;
 
 	if (!strncmp(str, "0x", 2))
 		str2buf(&str[2], info->key, sizeof(info->key));
@@ -4311,7 +4347,7 @@ static void load_link_keys(struct btd_adapter *adapter, GSList *keys,
 		struct link_key_info *info = l->data;
 
 		bacpy(&key->addr.bdaddr, &info->bdaddr);
-		key->addr.type = BDADDR_BREDR;
+		key->addr.type = info->bdaddr_type;
 		key->type = info->type;
 		memcpy(key->val, info->key, 16);
 		key->pin_len = info->pin_len;
@@ -4566,14 +4602,18 @@ static void load_conn_params(struct btd_adapter *adapter, GSList *params)
 		btd_error(adapter->dev_id, "Load connection parameters failed");
 }
 
-static uint8_t get_le_addr_type(GKeyFile *keyfile)
+static uint8_t get_addr_type(GKeyFile *keyfile)
 {
 	uint8_t addr_type;
 	char *type;
 
+	/* The AddressType is written to file only When dev->le is
+	 * set to true, as referenced in the update_technologies().
+	 * Therefore, When type is NULL, it default to BDADDR_BREDR.
+	 */
 	type = g_key_file_get_string(keyfile, "General", "AddressType", NULL);
 	if (!type)
-		return BDADDR_LE_PUBLIC;
+		return BDADDR_BREDR;
 
 	if (g_str_equal(type, "public"))
 		addr_type = BDADDR_LE_PUBLIC;
@@ -4882,9 +4922,9 @@ static void load_devices(struct btd_adapter *adapter)
 			g_clear_error(&gerr);
 		}
 
-		key_info = get_key_info(key_file, entry->d_name);
+		bdaddr_type = get_addr_type(key_file);
 
-		bdaddr_type = get_le_addr_type(key_file);
+		key_info = get_key_info(key_file, entry->d_name, bdaddr_type);
 
 		ltk_info = get_ltk_info(key_file, entry->d_name, bdaddr_type);
 
@@ -5163,9 +5203,10 @@ static void adapter_remove_device(struct btd_adapter *adapter,
 
 static void adapter_add_connection(struct btd_adapter *adapter,
 						struct btd_device *device,
-						uint8_t bdaddr_type)
+						uint8_t bdaddr_type,
+						uint32_t flags)
 {
-	device_add_connection(device, bdaddr_type);
+	device_add_connection(device, bdaddr_type, flags);
 
 	if (g_slist_find(adapter->connections, device)) {
 		btd_error(adapter->dev_id,
@@ -5218,7 +5259,7 @@ static void get_connections_complete(uint8_t status, uint16_t length,
 		device = btd_adapter_get_device(adapter, &addr->bdaddr,
 								addr->type);
 		if (device)
-			adapter_add_connection(adapter, device, addr->type);
+			adapter_add_connection(adapter, device, addr->type, 0);
 	}
 }
 
@@ -9259,10 +9300,8 @@ static int adapter_register(struct btd_adapter *adapter)
 		agent_unref(agent);
 	}
 
-	if (g_dbus_get_flags() & G_DBUS_FLAG_ENABLE_EXPERIMENTAL) {
-		adapter->battery_provider_manager =
-			btd_battery_provider_manager_create(adapter);
-	}
+	adapter->battery_provider_manager =
+		btd_battery_provider_manager_create(adapter);
 
 	/* Don't start GATT database and advertising managers on
 	 * non-LE controllers.
@@ -9426,7 +9465,8 @@ static void connected_callback(uint16_t index, uint16_t length,
 	if (eir_data.class != 0)
 		device_set_class(device, eir_data.class);
 
-	adapter_add_connection(adapter, device, ev->addr.type);
+	adapter_add_connection(adapter, device, ev->addr.type,
+					le32_to_cpu(ev->flags));
 
 	name_known = device_name_known(device);
 
@@ -10162,6 +10202,8 @@ static void read_info_complete(uint8_t status, uint16_t length,
 	adapter->supported_settings = btohl(rp->supported_settings);
 	adapter->current_settings = btohl(rp->current_settings);
 
+	adapter->version = rp->version;
+
 	clear_uuids(adapter);
 	clear_devices(adapter);
 
@@ -10195,12 +10237,12 @@ static void read_info_complete(uint8_t status, uint16_t length,
 
 	switch (btd_opts.mode) {
 	case BT_MODE_DUAL:
-		if (missing_settings & MGMT_SETTING_SSP)
-			set_mode(adapter, MGMT_OP_SET_SSP, 0x01);
 		if (missing_settings & MGMT_SETTING_LE)
 			set_mode(adapter, MGMT_OP_SET_LE, 0x01);
 		if (missing_settings & MGMT_SETTING_BREDR)
 			set_mode(adapter, MGMT_OP_SET_BREDR, 0x01);
+		if (missing_settings & MGMT_SETTING_SSP)
+			set_mode(adapter, MGMT_OP_SET_SSP, 0x01);
 		break;
 	case BT_MODE_BREDR:
 		if (!(adapter->supported_settings & MGMT_SETTING_BREDR)) {
@@ -10209,10 +10251,10 @@ static void read_info_complete(uint8_t status, uint16_t length,
 			goto failed;
 		}
 
-		if (missing_settings & MGMT_SETTING_SSP)
-			set_mode(adapter, MGMT_OP_SET_SSP, 0x01);
 		if (missing_settings & MGMT_SETTING_BREDR)
 			set_mode(adapter, MGMT_OP_SET_BREDR, 0x01);
+		if (missing_settings & MGMT_SETTING_SSP)
+			set_mode(adapter, MGMT_OP_SET_SSP, 0x01);
 		if (adapter->current_settings & MGMT_SETTING_LE)
 			set_mode(adapter, MGMT_OP_SET_LE, 0x00);
 		break;

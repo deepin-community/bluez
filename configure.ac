@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 AC_PREREQ(2.60)
-AC_INIT(bluez, 5.69)
+AC_INIT(bluez, 5.71)
 
 AM_INIT_AUTOMAKE([foreign subdir-objects color-tests silent-rules
 					tar-pax no-dist-gzip dist-xz])
@@ -211,6 +211,10 @@ AC_ARG_ENABLE(vcp, AS_HELP_STRING([--disable-vcp],
 		[disable VCP profile]), [enable_vcp=${enableval}])
 AM_CONDITIONAL(VCP, test "${enable_vcp}" != "no")
 
+AC_ARG_ENABLE(micp, AS_HELP_STRING([--disable-micp],
+		[disable MICP profile]), [enable_micp=${enableval}])
+AM_CONDITIONAL(MICP, test "${enable_micp}" != "no")
+
 AC_ARG_ENABLE(csip, AS_HELP_STRING([--disable-csip],
 		[disable CSIP profile]), [enable_csip=${enableval}])
 AM_CONDITIONAL(CSIP, test "${enable_csip}" != "no")
@@ -297,7 +301,8 @@ if (test "${enable_external_ell}" = "yes"); then
 	AC_SUBST(ELL_CFLAGS)
 	AC_SUBST(ELL_LIBS)
 fi
-if (test "${enable_external_ell}" != "yes"); then
+if (test "${enable_external_ell}" != "yes" &&
+		(test "${enable_btpclient}" = "yes" || test "${enable_mesh}" = "yes")); then
 	if (test ! -f ${srcdir}/ell/ell.h) &&
 			(test ! -f ${srcdir}/../ell/ell/ell.h); then
 				AC_MSG_ERROR(ELL source is required or use --enable-external-ell)

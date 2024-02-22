@@ -75,7 +75,7 @@ struct bt_bap_ucast_qos {
 struct bt_bap_bcast_qos {
 	uint8_t  big;
 	uint8_t  bis;
-	uint8_t  sync_interval;
+	uint8_t  sync_factor;
 	uint8_t  packing;
 	uint8_t  framing;
 	uint8_t  encryption;
@@ -131,6 +131,9 @@ struct bt_bap_pac_qos {
 	uint32_t pd_max;
 	uint32_t ppd_min;
 	uint32_t ppd_max;
+	uint32_t location;
+	uint16_t supported_context;
+	uint16_t context;
 };
 
 struct bt_bap_pac *bt_bap_add_vendor_pac(struct gatt_db *db,
@@ -165,6 +168,12 @@ uint8_t bt_bap_pac_get_type(struct bt_bap_pac *pac);
 
 uint32_t bt_bap_pac_get_locations(struct bt_bap_pac *pac);
 
+uint16_t bt_bap_pac_get_supported_context(struct bt_bap_pac *pac);
+
+uint16_t bt_bap_pac_get_context(struct bt_bap_pac *pac);
+
+struct bt_bap_pac_qos *bt_bap_pac_get_qos(struct bt_bap_pac *pac);
+
 uint8_t bt_bap_stream_get_type(struct bt_bap_stream *stream);
 
 struct bt_bap_stream *bt_bap_pac_get_stream(struct bt_bap_pac *pac);
@@ -191,9 +200,6 @@ void bt_bap_detach(struct bt_bap *bap);
 
 bool bt_bap_set_debug(struct bt_bap *bap, bt_bap_debug_func_t cb,
 			void *user_data, bt_bap_destroy_func_t destroy);
-
-bool bap_print_cc(void *data, size_t len, util_debug_func_t func,
-						void *user_data);
 
 unsigned int bt_bap_pac_register(struct bt_bap *bap, bt_bap_pac_func_t added,
 				bt_bap_pac_func_t removed, void *user_data,
@@ -311,3 +317,6 @@ void bt_bap_update_bcast_source(struct bt_bap_pac *pac,
 					struct bt_bap_codec *codec,
 					struct iovec *data,
 					struct iovec *metadata);
+
+bool bt_bap_pac_bcast_is_local(struct bt_bap *bap, struct bt_bap_pac *pac);
+
