@@ -7,7 +7,7 @@ index 2796f155e..490abef65 100644
  # This includes adapters present on start as well as adapters that are plugged
  # in later on. Defaults to 'true'.
 -#AutoEnable=true
-+AutoEnable=true
- 
++AutoEnable=false
+
  # Audio devices that were disconnected due to suspend will be reconnected on
  # resume. ResumeDelay determines the delay between when the controller
