@@ -41,6 +41,9 @@ ifeq ($(shell dpkg-vendor --is Ubuntu && echo yes) $(DEB_HOST_ARCH), yes i386)
    skip_packages = -Nbluez-cups
 endif
 
+export deb_systemdsystemunitdir = $(shell pkg-config --variable=systemdsystemunitdir systemd | sed s,^/,,)
+export deb_udevdir = $(shell pkg-config --variable=udevdir udev | sed s,^/,,)
+
 %:
 	dh $@ --exclude=.la
 
@@ -48,7 +51,6 @@ override_dh_install:
 	# Remove test scripts, and these are taken directly into the package
 	# from the test directory
 	rm -rf debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/bluez
-	install -m 755 -D src/bluetoothd.sh debian/tmp/usr/libexec/bluetooth
 	dh_install
 
 override_dh_auto_configure:

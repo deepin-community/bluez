@@ -774,16 +774,21 @@ static int sco_bind(int sock, const bdaddr_t *src, GError **err)
 	return 0;
 }
 
-static int iso_bind(int sock, const bdaddr_t *src, uint8_t src_type,
-					const bdaddr_t *dst, uint8_t dst_type,
-					uint8_t bc_sid, uint8_t num_bis,
-					uint8_t *bis, GError **err)
+static int iso_bind(int sock, bool server, const bdaddr_t *src,
+					uint8_t src_type, const bdaddr_t *dst,
+					uint8_t dst_type, uint8_t bc_sid,
+					uint8_t num_bis, uint8_t *bis,
+					GError **err)
 {
 	struct sockaddr_iso *addr = NULL;
 	size_t addr_len;
 	int ret = 0;
 
-	if (num_bis)
+	/* If this is an ISO listener and the destination address
+	 * is not BDADDR_ANY, the listener should be bound to the
+	 * broadcaster address
+	 */
+	if (server && bacmp(dst, BDADDR_ANY))
 		addr_len = sizeof(*addr) + sizeof(*addr->iso_bc);
 	else
 		addr_len = sizeof(*addr);
@@ -798,7 +803,7 @@ static int iso_bind(int sock, const bdaddr_t *src, uint8_t src_type,
 	bacpy(&addr->iso_bdaddr, src);
 	addr->iso_bdaddr_type = src_type;
 
-	if (num_bis) {
+	if (addr_len > sizeof(*addr)) {
 		bacpy(&addr->iso_bc->bc_bdaddr, dst);
 		addr->iso_bc->bc_bdaddr_type = dst_type;
 		addr->iso_bc->bc_sid = bc_sid;
@@ -1649,10 +1654,12 @@ static gboolean iso_get(int sock, GError **err, BtIOOption opt1, va_list args)
 		return FALSE;
 	}
 
-	if (getsockopt(sock, SOL_BLUETOOTH, BT_ISO_BASE, &base, &len) < 0) {
+	if (getsockopt(sock, SOL_BLUETOOTH, BT_ISO_BASE,
+			&base.base, &len) < 0) {
 		ERROR_FAILED(err, "getsockopt(BT_ISO_BASE)", errno);
 		return FALSE;
 	}
+	base.base_len = len;
 
 	if (!get_src(sock, &src, sizeof(src), err))
 		return FALSE;
@@ -1787,6 +1794,90 @@ gboolean bt_io_accept(GIOChannel *io, BtIOConnect connect, gpointer user_data,
 	return TRUE;
 }
 
+gboolean bt_io_bcast_accept(GIOChannel *io, BtIOConnect connect,
+				gpointer user_data, GDestroyNotify destroy,
+				GError * *err, BtIOOption opt1, ...)
+{
+	int sock;
+	char c;
+	struct pollfd pfd;
+	va_list args;
+	struct sockaddr_iso *addr = NULL;
+	uint8_t bc_num_bis = 0;
+	uint8_t bc_bis[ISO_MAX_NUM_BIS] = {0};
+	BtIOOption opt = opt1;
+
+	va_start(args, opt1);
+
+	while (opt != BT_IO_OPT_INVALID) {
+		if (opt == BT_IO_OPT_ISO_BC_NUM_BIS)  {
+			bc_num_bis = va_arg(args, int);
+		} else if (opt == BT_IO_OPT_ISO_BC_BIS) {
+			memcpy(bc_bis, va_arg(args, uint8_t *),
+					bc_num_bis);
+		} else {
+			g_set_error(err, BT_IO_ERROR, EINVAL,
+					"Invalid option %d", opt);
+			break;
+		}
+
+		opt = va_arg(args, int);
+	}
+
+	va_end(args);
+
+	if (*err)
+		return FALSE;
+
+	sock = g_io_channel_unix_get_fd(io);
+
+	if (bc_num_bis) {
+		addr = malloc(sizeof(*addr) + sizeof(*addr->iso_bc));
+
+		if (!addr) {
+			ERROR_FAILED(err, "poll", ENOMEM);
+			return FALSE;
+		}
+
+		memset(addr, 0, sizeof(*addr) + sizeof(*addr->iso_bc));
+		addr->iso_family = AF_BLUETOOTH;
+
+		addr->iso_bc->bc_num_bis = bc_num_bis;
+		memcpy(addr->iso_bc->bc_bis, bc_bis,
+			addr->iso_bc->bc_num_bis);
+
+		if (bind(sock, (struct sockaddr *)addr,
+			sizeof(*addr) + sizeof(*addr->iso_bc)) < 0) {
+			ERROR_FAILED(err, "bind", errno);
+		}
+
+		free(addr);
+
+		if (*err)
+			return FALSE;
+	}
+
+	memset(&pfd, 0, sizeof(pfd));
+	pfd.fd = sock;
+	pfd.events = POLLOUT;
+
+	if (poll(&pfd, 1, 0) < 0) {
+		ERROR_FAILED(err, "poll", errno);
+		return FALSE;
+	}
+
+	if (!(pfd.revents & POLLOUT)) {
+		if (read(sock, &c, 1) < 0) {
+			ERROR_FAILED(err, "read", errno);
+			return FALSE;
+		}
+	}
+
+	server_add(io, connect, NULL, user_data, destroy);
+
+	return TRUE;
+}
+
 gboolean bt_io_set(GIOChannel *io, GError **err, BtIOOption opt1, ...)
 {
 	va_list args;
@@ -1897,10 +1988,9 @@ static GIOChannel *create_io(gboolean server, struct set_opts *opts,
 			return NULL;
 		}
 
-		if (iso_bind(sock, &opts->src, opts->src_type,
-				 &opts->dst, opts->dst_type,
-				 opts->bc_sid, opts->bc_num_bis,
-				 opts->bc_bis, err) < 0)
+		if (iso_bind(sock, server, &opts->src, opts->src_type,
+				 &opts->dst, opts->dst_type, opts->bc_sid,
+				 opts->bc_num_bis, opts->bc_bis, err) < 0)
 			goto failed;
 		if (!iso_set_qos(sock, &opts->qos, err))
 			goto failed;

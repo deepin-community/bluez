@@ -35,6 +35,7 @@
 #include "src/shared/util.h"
 #include "src/shared/btsnoop.h"
 #include "src/shared/queue.h"
+#include "src/shared/bap-debug.h"
 #include "display.h"
 #include "bt.h"
 #include "ll.h"
@@ -172,7 +173,9 @@ static uint16_t get_format(uint32_t cookie)
 
 #define MAX_CONN 16
 
-static struct packet_conn_data conn_list[MAX_CONN];
+static struct packet_conn_data conn_list[MAX_CONN] = {
+	 [0 ... MAX_CONN - 1].handle = 0xffff
+};
 
 static struct packet_conn_data *lookup_parent(uint16_t handle)
 {
@@ -192,7 +195,7 @@ static void assign_handle(uint16_t index, uint16_t handle, uint8_t type,
 	int i;
 
 	for (i = 0; i < MAX_CONN; i++) {
-		if (conn_list[i].handle == 0x0000) {
+		if (conn_list[i].handle == 0xffff) {
 			hci_devba(index, (bdaddr_t *)conn_list[i].src);
 
 			conn_list[i].index = index;
@@ -236,6 +239,7 @@ static void release_handle(uint16_t handle)
 			queue_destroy(conn->tx_q, free);
 			queue_destroy(conn->chan_q, free);
 			memset(conn, 0, sizeof(*conn));
+			conn->handle = 0xffff;
 			break;
 		}
 	}
@@ -2448,6 +2452,9 @@ void packet_print_version(const char *label, uint8_t version,
 	case 0x0c:
 		str = "Bluetooth 5.3";
 		break;
+	case 0x0d:
+		str = "Bluetooth 5.4";
+		break;
 	default:
 		str = "Reserved";
 		break;
@@ -2720,7 +2727,7 @@ static const struct bitfield_data features_le[] = {
 	{ 29, "Connected Isochronous Stream - Peripheral"	},
 	{ 30, "Isochronous Broadcaster"				},
 	{ 31, "Synchronized Receiver"				},
-	{ 32, "Isochronous Channels (Host Support)"		},
+	{ 32, "Connected Isochronous Stream (Host Support)"	},
 	{ 33, "LE Power Control Request"			},
 	{ 34, "LE Power Control Request"			},
 	{ 35, "LE Path Loss Monitoring"				},
@@ -3399,86 +3406,11 @@ static void print_uuid128_list(const char *label, const void *data,
 	}
 }
 
-static void *iov_pull(struct iovec *iov, size_t len)
+static void print_ltv(const char *str, void *user_data)
 {
-	void *data;
+	const char *label = user_data;
 
-	if (iov->iov_len < len)
-		return NULL;
-
-	data = iov->iov_base;
-	iov->iov_base += len;
-	iov->iov_len -= len;
-
-	return data;
-}
-
-static struct packet_ltv_decoder*
-get_ltv_decoder(struct packet_ltv_decoder *decoder, size_t num, uint8_t type)
-{
-	size_t i;
-
-	if (!decoder || !num)
-		return NULL;
-
-	for (i = 0; i < num; i++) {
-		struct packet_ltv_decoder *dec = &decoder[i];
-
-		if (dec->type == type)
-			return dec;
-	}
-
-	return NULL;
-}
-
-static void print_ltv(const char *label, const uint8_t *data, uint8_t len,
-			struct packet_ltv_decoder *decoder, size_t num)
-{
-	struct iovec iov;
-	int i;
-
-	iov.iov_base = (void *) data;
-	iov.iov_len = len;
-
-	for (i = 0; iov.iov_len; i++) {
-		uint8_t l, t, *v;
-		struct packet_ltv_decoder *dec;
-
-		l = get_u8(iov_pull(&iov, sizeof(l)));
-		if (!l) {
-			print_field("%s #%d: len 0x%02x", label, i, l);
-			break;
-		}
-
-		v = iov_pull(&iov, sizeof(*v));
-		if (!v)
-			break;
-
-		t = get_u8(v);
-
-		print_field("%s #%d: len 0x%02x type 0x%02x", label, i, l, t);
-
-		l -= 1;
-
-		v = iov_pull(&iov, l);
-		if (!v)
-			break;
-
-		dec = get_ltv_decoder(decoder, num, t);
-		if (dec)
-			dec->func(v, l);
-		else
-			print_hex_field(label, v, l);
-	}
-
-	if (iov.iov_len)
-		print_hex_field(label, iov.iov_base, iov.iov_len);
-}
-
-void packet_print_ltv(const char *label, const uint8_t *data, uint8_t len,
-			struct packet_ltv_decoder *decoder, size_t decoder_len)
-{
-	print_ltv(label, data, len, decoder, decoder_len);
+	print_field("%s: %s", label, str);
 }
 
 static void print_base_annoucement(const uint8_t *data, uint8_t data_len)
@@ -3490,7 +3422,7 @@ static void print_base_annoucement(const uint8_t *data, uint8_t data_len)
 	iov.iov_base = (void *) data;
 	iov.iov_len = data_len;
 
-	base_data = iov_pull(&iov, sizeof(*base_data));
+	base_data = util_iov_pull_mem(&iov, sizeof(*base_data));
 	if (!base_data)
 		goto done;
 
@@ -3504,10 +3436,11 @@ static void print_base_annoucement(const uint8_t *data, uint8_t data_len)
 		struct bt_hci_lv_data *codec_cfg;
 		struct bt_hci_lv_data *metadata;
 		uint8_t j;
+		const char *label;
 
 		print_field("    Subgroup #%u:", i);
 
-		subgroup = iov_pull(&iov, sizeof(*subgroup));
+		subgroup = util_iov_pull_mem(&iov, sizeof(*subgroup));
 		if (!subgroup)
 			goto done;
 
@@ -3524,26 +3457,31 @@ static void print_base_annoucement(const uint8_t *data, uint8_t data_len)
 						subgroup->codec.vid);
 		}
 
-		codec_cfg = iov_pull(&iov, sizeof(*codec_cfg));
+		codec_cfg = util_iov_pull_mem(&iov, sizeof(*codec_cfg));
 		if (!codec_cfg)
 			goto done;
 
-		if (!iov_pull(&iov, codec_cfg->len))
+		if (!util_iov_pull_mem(&iov, codec_cfg->len))
 			goto done;
 
-		print_ltv("    Codec Specific Configuration",
-					codec_cfg->data, codec_cfg->len,
-					NULL, 0);
+		label = "    Codec Specific Configuration";
 
-		metadata = iov_pull(&iov, sizeof(*metadata));
+		bt_bap_debug_config(codec_cfg->data, codec_cfg->len,
+					print_ltv, (void *)label);
+
+		metadata = util_iov_pull_mem(&iov, sizeof(*metadata));
 		if (!metadata)
 			goto done;
 
-		if (!iov_pull(&iov, metadata->len))
+		if (!util_iov_pull(&iov, metadata->len))
 			goto done;
 
-		print_ltv("    Metadata", metadata->data, metadata->len,
-					NULL, 0);
+		label = "    Metadata";
+
+		bt_bap_debug_metadata(metadata->data, metadata->len,
+					print_ltv, (void *)label);
+
+		label = "      Codec Specific Configuration";
 
 		/* Level 3 - BIS(s)*/
 		for (j = 0; j < subgroup->num_bis; j++) {
@@ -3551,21 +3489,21 @@ static void print_base_annoucement(const uint8_t *data, uint8_t data_len)
 
 			print_field("      BIS #%u:", j);
 
-			bis = iov_pull(&iov, sizeof(*bis));
+			bis = util_iov_pull_mem(&iov, sizeof(*bis));
 			if (!bis)
 				goto done;
 
 			print_field("      Index: %u", bis->index);
 
-			codec_cfg = iov_pull(&iov, sizeof(*codec_cfg));
+			codec_cfg = util_iov_pull_mem(&iov, sizeof(*codec_cfg));
 			if (!codec_cfg)
 				goto done;
 
-			if (!iov_pull(&iov, codec_cfg->len))
+			if (!util_iov_pull(&iov, codec_cfg->len))
 				goto done;
 
-			print_hex_field("      Codec Specific Configuration",
-					codec_cfg->data, codec_cfg->len);
+			bt_bap_debug_config(codec_cfg->data, codec_cfg->len,
+					print_ltv, (void *)label);
 		}
 	}
 
@@ -10473,11 +10411,14 @@ static void packet_dequeue_tx(struct timeval *tv, uint16_t handle)
 
 	packet_latency_add(&conn->tx_l, &delta);
 
-	print_field("#%zu: len %zu (%lld Kb/s)", frame->num, frame->len,
-					frame->len * 8 / TV_MSEC(delta));
-	print_field("Latency: %lld msec (%lld-%lld msec ~%lld msec)",
-			TV_MSEC(delta), TV_MSEC(conn->tx_l.min),
-			TV_MSEC(conn->tx_l.max), TV_MSEC(conn->tx_l.med));
+	if (TV_MSEC(delta)) {
+		print_field("#%zu: len %zu (%lld Kb/s)", frame->num, frame->len,
+				frame->len * 8 / TV_MSEC(delta));
+		print_field("Latency: %lld msec (%lld-%lld msec ~%lld msec)",
+				TV_MSEC(delta), TV_MSEC(conn->tx_l.min),
+				TV_MSEC(conn->tx_l.max),
+				TV_MSEC(conn->tx_l.med));
+	}
 
 	l2cap_dequeue_frame(&delta, conn);
 
@@ -10491,7 +10432,7 @@ static void num_completed_packets_evt(struct timeval *tv, uint16_t index,
 	const struct bt_hci_evt_num_completed_packets *evt = data;
 	int i;
 
-	iov_pull(&iov, 1);
+	util_iov_pull(&iov, 1);
 
 	print_field("Num handles: %d", evt->num_handles);
 
