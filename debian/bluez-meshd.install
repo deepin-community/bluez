@@ -1,5 +1,5 @@
 usr/share/dbus-1/system.d/bluetooth-mesh.conf
-lib/systemd/system/bluetooth-mesh.service
+${env:deb_systemdsystemunitdir}/bluetooth-mesh.service
 usr/bin/mesh-cfgclient
 usr/bin/mesh-cfgtest
 usr/bin/meshctl

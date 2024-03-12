@@ -7,7 +7,7 @@ usr/bin/bluemoon
 usr/bin/btattach
 usr/bin/btmon
 usr/bin/hciattach
-usr/bin/hciconfig bin/
+usr/bin/hciconfig
 usr/bin/hcitool
 usr/bin/sdptool
 usr/bin/rctest
@@ -20,12 +20,11 @@ usr/bin/rctest
 usr/bin/mpris-proxy
 tools/btmgmt usr/bin
 tools/obexctl usr/bin
-lib/udev/hid2hci
-lib/udev/rules.d/97-hid2hci.rules
+${env:deb_udevdir}/hid2hci
+${env:deb_udevdir}/rules.d/97-hid2hci.rules
 attrib/gatttool usr/bin
 #-- for systemd
-lib/systemd/system/bluetooth.service
+${env:deb_systemdsystemunitdir}/bluetooth.service
 usr/share/dbus-1/system.d/bluetooth.conf
 usr/share/dbus-1/system-services/org.bluez.service
 usr/share/zsh/site-functions/_bluetoothctl
-usr/libexec/bluetooth/bluetoothd.sh

@@ -190,14 +190,7 @@ static gboolean receive_btdev(GIOChannel *channel, GIOCondition condition,
 	if (len < 1)
 		return FALSE;
 
-	switch (buf[0]) {
-	case BT_H4_CMD_PKT:
-	case BT_H4_ACL_PKT:
-	case BT_H4_SCO_PKT:
-	case BT_H4_ISO_PKT:
-		btdev_receive_h4(btdev, buf, len);
-		break;
-	}
+	btdev_receive_h4(btdev, buf, len);
 
 	return TRUE;
 }
@@ -555,6 +548,15 @@ const uint8_t *hciemu_client_bdaddr(struct hciemu_client *client)
 		return NULL;
 
 	return btdev_get_bdaddr(client->dev);
+}
+
+bool hciemu_set_client_bdaddr(struct hciemu_client *client,
+				const uint8_t *bdaddr)
+{
+	if (!client)
+		return NULL;
+
+	return btdev_set_bdaddr(client->dev, bdaddr);
 }
 
 const uint8_t *hciemu_get_client_bdaddr(struct hciemu *hciemu)

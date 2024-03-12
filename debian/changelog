@@ -1,14 +1,41 @@
-bluez (5.69-1deepin3) unstable; urgency=medium
+bluez (5.71-1) unstable; urgency=medium
 
-  * Disable auto enable.
+  * Update to 5.71.
+  * d/patches: Drop input.conf-Change-default-of-ClassicBondedOnly.patch.
+  * Update d/bluez.manpages.
 
- -- Wang Yixue <wangyixue@deepin.org>  Wed, 28 Feb 2024 15:58:21 +0800
+ -- Nobuhiro Iwamatsu <iwamatsu@debian.org>  Wed, 03 Jan 2024 02:43:51 +0900
 
-bluez (5.69-1deepin2) unstable; urgency=medium
+bluez (5.70-1.1) unstable; urgency=medium
 
-  * Add support for huawei haisi
+  * Non-maintainer upload.
+  * Upload to unstable.
 
- -- xiangzelong <xiangzelong@deepin.org>  Tue, 19 Sep 2023 16:59:11 +0800
+ -- Salvatore Bonaccorso <carnil@debian.org>  Fri, 15 Dec 2023 20:57:14 +0100
+
+bluez (5.70-1.1~exp0) experimental; urgency=medium
+
+  * Non-maintainer upload.
+
+  [ Helmut Grohne ]
+  * Fix FTBFS when systemd.pc changes systemdsystemunitdir (Closes: #1052983)
+
+  [ Chris Hofstaedtler ]
+  * Defer udev file placement to udev's pkg-config data (Closes: #1056996)
+  * Install hciconfig into /usr/bin instead of /bin
+
+  [ Salvatore Bonaccorso ]
+  * input.conf: Change default of ClassicBondedOnly (CVE-2023-45866)
+    (Closes: #1057914)
+
+ -- Salvatore Bonaccorso <carnil@debian.org>  Thu, 14 Dec 2023 22:32:44 +0100
+
+bluez (5.70-1) unstable; urgency=medium
+
+  * Update to 5.70.
+  * d/clean: Add debian/tmp-source. (Closes: #1044111)
+
+ -- Nobuhiro Iwamatsu <iwamatsu@debian.org>  Tue, 24 Oct 2023 15:17:00 +0900
 
 bluez (5.69-1) unstable; urgency=medium
 
