@@ -1,3 +1,9 @@
+bluez (5.71-1deepin1) unstable; urgency=medium
+
+  * disable auto enable
+
+ -- zsien <quezhiyong@deepin.org>  Tue, 07 May 2024 13:20:49 +0800
+
 bluez (5.71-1) unstable; urgency=medium
 
   * Update to 5.71.
