@@ -1,0 +1,26 @@
+Index: bluez/src/bluetooth.service.in
+===================================================================
+--- bluez.orig/src/bluetooth.service.in	2024-12-05 13:28:18.622440269 +0800
++++ bluez/src/bluetooth.service.in	2024-12-05 13:39:51.869101411 +0800
+@@ -6,7 +6,7 @@
+ [Service]
+ Type=dbus
+ BusName=org.bluez
+-ExecStart=@pkglibexecdir@/bluetoothd
++ExecStart=@pkglibexecdir@/bluetoothd.sh
+ NotifyAccess=main
+ #WatchdogSec=10
+ #Restart=on-failure
+Index: bluez/src/bluetoothd.sh
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ bluez/src/bluetoothd.sh	2024-12-05 13:44:31.355795718 +0800
+@@ -0,0 +1,7 @@
++#! /bin/sh
++
++if [ -d /usr/share/bluetooth ];then
++        tmp=$(grep -wi OParameter /usr/share/bluetooth/bluetoothd.conf)
++        param=${tmp#*=}
++fi
++/usr/lib/bluetooth/bluetoothd $param
+new file mode 100755

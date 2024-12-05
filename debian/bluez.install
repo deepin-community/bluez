@@ -2,6 +2,7 @@ src/main.conf etc/bluetooth
 profiles/input/input.conf etc/bluetooth
 profiles/network/network.conf etc/bluetooth
 usr/libexec/bluetooth/bluetoothd
+usr/libexec/bluetooth/bluetoothd.sh
 usr/bin/bluetoothctl
 usr/bin/bluemoon
 usr/bin/btattach

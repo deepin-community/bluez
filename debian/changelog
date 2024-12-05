@@ -1,3 +1,9 @@
+bluez (5.71-1deepin2) unstable; urgency=medium
+
+  * Change the service startup program to use a shell script.
+
+ -- xinpeng.wang <wangxinpeng@uniontech.com>  Thu, 05 Dec 2024 16:57:59 +0800
+
 bluez (5.71-1deepin1) unstable; urgency=medium
 
   * disable auto enable

@@ -1,0 +1,133 @@
+Index: bluez/src/bluetoothd.sh
+===================================================================
+--- bluez.orig/src/bluetoothd.sh	2024-12-05 16:38:27.000000000 +0800
++++ bluez/src/bluetoothd.sh	2024-12-05 16:38:27.000000000 +0800
+@@ -1,7 +1,37 @@
+-#! /bin/sh
++#! /bin/bash
++set -e
+ 
+-if [ -d /usr/share/bluetooth ];then
+-        tmp=$(grep -wi OParameter /usr/share/bluetooth/bluetoothd.conf)
+-        param=${tmp#*=}
++read_config() {
++    local CONFIG_FILE key default_value value
++    CONFIG_FILE=$1
++    key=$2
++    default_value=$3
++    if [ ! -f "$CONFIG_FILE" ]; then
++        echo "$default_value"
++        return
++    fi
++    value=$(grep -wi "$key" "$CONFIG_FILE" 2>/dev/null  || true)
++    if [[ -z "$value" ]]; then
++        echo "$default_value"
++    else
++        value="${value#*=}"
++        echo "$value"
++    fi
++}
++
++readonly CUSTOM_CONFIG_FILE="/usr/share/bluetooth/bluetoothd.conf"
++readonly DEBUG_CONFIG_FILE="/etc/deepin/deepin-debug-config/deepin-bluetoothd.conf"
++
++param=$(read_config $CUSTOM_CONFIG_FILE "OParameter" "")
++param2=$(read_config $DEBUG_CONFIG_FILE "OParameter" "")
++
++env_var=$(read_config $DEBUG_CONFIG_FILE "OEnv" "")
++if [ -n "$env_var" ]; then
++    IFS=' ' read -ra env_vars <<< "$env_var"
++    for var in "${env_vars[@]}"; do
++        export ${var?}
++    done
+ fi
+-/usr/lib/bluetooth/bluetoothd $param
++
++SCRIPT_DIR=$(dirname "$0")
++exec "${SCRIPT_DIR}"/bluetoothd $param $param2
+Index: bluez/obexd/src/obexd.sh
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ bluez/obexd/src/obexd.sh	2024-12-05 16:38:27.000000000 +0800
+@@ -0,0 +1,35 @@
++#! /bin/bash
++set -e
++
++read_config() {
++    local CONFIG_FILE key default_value value
++    CONFIG_FILE=$1
++    key=$2
++    default_value=$3
++    if [ ! -f "$CONFIG_FILE" ]; then
++        echo "$default_value"
++        return
++    fi
++    value=$(grep -wi "$key" "$CONFIG_FILE" 2>/dev/null  || true)
++    if [[ -z "$value" ]]; then
++        echo "$default_value"
++    else
++        value="${value#*=}"
++        echo "$value"
++    fi
++}
++
++readonly DEBUG_CONFIG_FILE="/etc/deepin/deepin-debug-config/deepin-obexd.conf"
++
++param2=$(read_config $DEBUG_CONFIG_FILE "OParameter" "")
++
++env_var=$(read_config $DEBUG_CONFIG_FILE "OEnv" "")
++if [ -n "$env_var" ]; then
++    IFS=' ' read -ra env_vars <<< "$env_var"
++    for var in "${env_vars[@]}"; do
++        export ${var?}
++    done
++fi
++
++SCRIPT_DIR=$(dirname "$0")
++exec "${SCRIPT_DIR}"/obexd $param $param2
+Index: bluez/Makefile.am
+===================================================================
+--- bluez.orig/Makefile.am	2024-12-05 16:38:27.000000000 +0800
++++ bluez/Makefile.am	2024-12-05 16:38:27.000000000 +0800
+@@ -20,6 +20,8 @@
+ 
+ pkglibexec_PROGRAMS =
+ 
++pkglibexec_SCRIPTS =
++
+ pkgincludedir = $(includedir)/bluetooth
+ 
+ pkginclude_HEADERS =
+@@ -302,6 +304,7 @@
+ endif
+ 
+ pkglibexec_PROGRAMS += src/bluetoothd
++pkglibexec_SCRIPTS += src/bluetoothd.sh
+ 
+ src_bluetoothd_SOURCES = $(builtin_sources) \
+ 			$(attrib_sources) $(btio_sources) \
+Index: bluez/Makefile.obexd
+===================================================================
+--- bluez.orig/Makefile.obexd	2024-12-05 16:38:27.000000000 +0800
++++ bluez/Makefile.obexd	2024-12-05 16:38:27.000000000 +0800
+@@ -55,6 +55,7 @@
+ 				obexd/client/map-event.h
+ 
+ pkglibexec_PROGRAMS += obexd/src/obexd
++pkglibexec_SCRIPTS += obexd/src/obexd.sh
+ 
+ obexd_src_obexd_SOURCES = $(btio_sources) $(gobex_sources) \
+ 			$(obexd_builtin_sources) \
+Index: bluez/obexd/src/obex.service.in
+===================================================================
+--- bluez.orig/obexd/src/obex.service.in	2024-12-05 13:28:18.618440103 +0800
++++ bluez/obexd/src/obex.service.in	2024-12-05 16:38:52.417682623 +0800
+@@ -4,7 +4,7 @@
+ [Service]
+ Type=dbus
+ BusName=org.bluez.obex
+-ExecStart=@pkglibexecdir@/obexd
++ExecStart=@pkglibexecdir@/obexd.sh
+ 
+ [Install]
+ Alias=dbus-org.bluez.obex.service
