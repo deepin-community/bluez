@@ -14,3 +14,6 @@ Change-shebang-from-usr-bin-python-to-usr-bin-python.patch
 Add-HCI_TO_STR-macro-for-FIRMWARE_DIR.patch
 uniontech-add-custom-config-for-huawei.patch
 uniontech-add-sh-for-debug.patch
+deepin-bug282163-Fix-airpods-pairing.patch
+deepin-bug282163-Fix-main-conf-for-connection.patch
+
