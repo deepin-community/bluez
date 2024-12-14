@@ -1,0 +1,34 @@
+From e4b8fb410768d505ebb79e7f26bfc037337ea2f6 Mon Sep 17 00:00:00 2001
+From: Chengyi Zhao <zhaochengyi@uniontech.com>
+Date: Sat, 14 Dec 2024 15:57:06 +0800
+Subject: [PATCH] fix: Fix main conf for connection
+
+---
+ src/main.conf | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/main.conf b/src/main.conf
+index 35dccce..d0d54cb 100644
+--- a/src/main.conf
++++ b/src/main.conf
+@@ -12,7 +12,7 @@
+ # How long to stay in discoverable mode before going back to non-discoverable
+ # The value is in seconds. Default is 180, i.e. 3 minutes.
+ # 0 = disable timer, i.e. stay discoverable forever
+-#DiscoverableTimeout = 0
++DiscoverableTimeout = 0
+ 
+ # Always allow pairing even if there are no agent registered
+ # Possible values: true, false
+@@ -68,7 +68,7 @@
+ # however the tradeoff is increased power consumptions. This feature
+ # will fully work only on kernel version 4.1 and newer. Defaults to
+ # 'false'.
+-#FastConnectable = false
++FastConnectable = true
+ 
+ # Default privacy setting.
+ # Enables use of private address.
+-- 
+2.20.1
+
