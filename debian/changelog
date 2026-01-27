@@ -1,3 +1,10 @@
+bluez (5.85-3deepin1) unstable; urgency=medium
+
+  * Remove libebook1.2-dev dependency from bluez
+  * 
+
+ -- tunaichao <tunaichao@uniontech.com>  Tue, 27 Jan 2026 11:29:33 +0800
+
 bluez (5.85-3) unstable; urgency=medium
 
   * Team upload
