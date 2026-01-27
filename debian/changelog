@@ -1,3 +1,10 @@
+bluez (5.85-3deepin5) unstable; urgency=medium
+
+  * fix: Fix main conf for connection.
+  *      Fix airpods pairing.
+
+ -- tunaichao <tunaichao@uniontech.com>  Tue, 27 Jan 2026 20:40:42 +0800
+
 bluez (5.85-3deepin4) unstable; urgency=medium
 
   * Change the service startup program to use a shell script.
