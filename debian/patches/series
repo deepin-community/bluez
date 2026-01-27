@@ -9,3 +9,4 @@ lp1759836.patch
 raspi-bcm43xx-load-firmware.patch
 raspi-bcm43xx-3wire.patch
 ubuntu_error_restart.patch
+main.conf.patch
