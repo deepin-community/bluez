@@ -1,3 +1,9 @@
+bluez (5.85-3deepin3) unstable; urgency=medium
+
+  * chore: disable auto enable
+
+ -- tunaichao <tunaichao@uniontech.com>  Tue, 27 Jan 2026 20:00:26 +0800
+
 bluez (5.85-3deepin2) unstable; urgency=medium
 
   * add libsystemd-dev dependency
