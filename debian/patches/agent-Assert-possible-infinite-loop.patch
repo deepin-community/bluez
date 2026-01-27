@@ -7,10 +7,10 @@ Subject: [PATCH 4/5] agent: Assert possible infinite loop
  1 file changed, 2 insertions(+)
 
 diff --git a/src/agent.c b/src/agent.c
-index bcba969..b292881 100644
+index 7d66cf5..beec3c8 100644
 --- a/src/agent.c
 +++ b/src/agent.c
-@@ -203,6 +203,8 @@ void agent_unref(struct agent *agent)
+@@ -205,6 +205,8 @@ void agent_unref(struct agent *agent)
  	if (agent->ref > 0)
  		return;
  
@@ -19,5 +19,3 @@ index bcba969..b292881 100644
  	if (agent->request) {
  		DBusError err;
  		agent_pincode_cb pincode_cb;
--- 
-1.8.4.2

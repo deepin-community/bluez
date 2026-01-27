@@ -1,0 +1,51 @@
+From: Simon Fels <simon.fels@canonical.com>
+Date: Mon, 12 Oct 2015 07:32:36 +0200
+Subject: [PATCH 2/4] hostname: handle chassis type handset
+
+This also corrects the link to the definition of the base class of
+device field.
+---
+ plugins/hostname.c | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/plugins/hostname.c b/plugins/hostname.c
+index 51707f0..b343c5a 100644
+--- a/plugins/hostname.c
++++ b/plugins/hostname.c
+@@ -29,10 +29,11 @@
+ #include "src/adapter.h"
+ #include "src/log.h"
+ 
+-/* http://www.bluetooth.org/Technical/AssignedNumbers/baseband.htm */
++/* https://www.bluetooth.org/en-us/specification/assigned-numbers/baseband */
+ 
+ #define MAJOR_CLASS_MISCELLANEOUS	0x00
+ #define MAJOR_CLASS_COMPUTER		0x01
++#define MAJOR_CLASS_PHONE		0x02
+ 
+ #define MINOR_CLASS_UNCATEGORIZED	0x00
+ #define MINOR_CLASS_DESKTOP		0x01
+@@ -43,6 +44,8 @@
+ #define MINOR_CLASS_WEARABLE		0x06
+ #define MINOR_CLASS_TABLET		0x07
+ 
++#define MINOR_CLASS_SMARTPHONE		0x3
++
+ static uint8_t major_class = MAJOR_CLASS_MISCELLANEOUS;
+ static uint8_t minor_class = MINOR_CLASS_UNCATEGORIZED;
+ 
+@@ -117,8 +120,14 @@ static const struct {
+ 	{ "desktop",  MAJOR_CLASS_COMPUTER, MINOR_CLASS_DESKTOP  },
+ 	{ "server",   MAJOR_CLASS_COMPUTER, MINOR_CLASS_SERVER   },
+ 	{ "laptop",   MAJOR_CLASS_COMPUTER, MINOR_CLASS_LAPTOP   },
++#if 0
++	// NOTE: Until we have support for more chassis types in
++	// hostnamed like 'phone' we keep handset separated and
++	// take it for the phone role.
+ 	{ "handset",  MAJOR_CLASS_COMPUTER, MINOR_CLASS_HANDHELD },
++#endif
+ 	{ "tablet",   MAJOR_CLASS_COMPUTER, MINOR_CLASS_TABLET   },
++	{ "handset",  MAJOR_CLASS_PHONE, MINOR_CLASS_SMARTPHONE  },
+ 	{ }
+ };
+ 

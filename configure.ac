@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 AC_PREREQ(2.60)
-AC_INIT(bluez, 5.71)
+AC_INIT(bluez, 5.85)
 
 AM_INIT_AUTOMAKE([foreign subdir-objects color-tests silent-rules
 					tar-pax no-dist-gzip dist-xz])
@@ -70,25 +70,20 @@ AC_CHECK_LIB(pthread, pthread_create, dummy=yes,
 AC_CHECK_LIB(dl, dlopen, dummy=yes,
 			AC_MSG_ERROR(dynamic linking loader is required))
 
-AC_CHECK_HEADERS(linux/types.h linux/if_alg.h linux/uinput.h linux/uhid.h sys/random.h)
+AC_CHECK_HEADERS(stdarg.h stdio.h string.h linux/types.h linux/if_alg.h \
+			linux/uinput.h linux/uhid.h sys/random.h)
 
-PKG_CHECK_MODULES(GLIB, glib-2.0 >= 2.28, dummy=yes,
-				AC_MSG_ERROR(GLib >= 2.28 is required))
-AC_SUBST(GLIB_CFLAGS)
-AC_SUBST(GLIB_LIBS)
+# basename may be only available in libgen.h with the POSIX behavior,
+# not desired here
+AC_CHECK_DECLS([basename], [],
+				AC_MSG_WARN([GNU basename extension not found]),
+				[#define _GNU_SOURCE 1
+				 #include <string.h>
+				 ])
 
-if (test "${enable_threads}" = "yes"); then
-	AC_DEFINE(NEED_THREADS, 1, [Define if threading support is required])
-	PKG_CHECK_MODULES(GTHREAD, gthread-2.0 >= 2.16, dummy=yes,
-				AC_MSG_ERROR(GThread >= 2.16 is required))
-	GLIB_CFLAGS="$GLIB_CFLAGS $GTHREAD_CFLAGS"
-	GLIB_LIBS="$GLIB_LIBS $GTHREAD_LIBS"
-fi
 
-PKG_CHECK_MODULES(DBUS, dbus-1 >= 1.10, dummy=yes,
-				AC_MSG_ERROR(D-Bus >= 1.10 is required))
-AC_SUBST(DBUS_CFLAGS)
-AC_SUBST(DBUS_LIBS)
+PKG_CHECK_MODULES(GLIB, glib-2.0 >= 2.36)
+PKG_CHECK_MODULES(DBUS, dbus-1 >= 1.10)
 
 AC_ARG_WITH([dbusconfdir], AS_HELP_STRING([--with-dbusconfdir=DIR],
 				[path to D-Bus configuration directory]),
@@ -164,7 +159,7 @@ AC_ARG_ENABLE(test, AS_HELP_STRING([--enable-test],
 AM_CONDITIONAL(TEST, test "${enable_test}" = "yes")
 
 AC_ARG_ENABLE(nfc, AS_HELP_STRING([--enable-nfc],
-		[enable NFC paring]), [enable_nfc=${enableval}])
+		[enable NFC pairing]), [enable_nfc=${enableval}])
 AM_CONDITIONAL(NFC, test "${enable_nfc}" = "yes")
 
 AC_ARG_ENABLE(sap, AS_HELP_STRING([--enable-sap],
@@ -174,10 +169,16 @@ AM_CONDITIONAL(SAP, test "${enable_sap}" = "yes")
 AC_ARG_ENABLE(a2dp, AS_HELP_STRING([--disable-a2dp],
 		[disable A2DP profile]), [enable_a2dp=${enableval}])
 AM_CONDITIONAL(A2DP, test "${enable_a2dp}" != "no")
+if test "${enable_a2dp}" != "no"; then
+	AC_DEFINE(HAVE_A2DP, 1, [Define to 1 if you have A2DP support.])
+fi
 
 AC_ARG_ENABLE(avrcp, AS_HELP_STRING([--disable-avrcp],
 		[disable AVRCP profile]), [enable_avrcp=${enableval}])
 AM_CONDITIONAL(AVRCP, test "${enable_avrcp}" != "no")
+if test "${enable_avrcp}" != "no"; then
+	AC_DEFINE(HAVE_AVRCP, 1, [Define to 1 if you have AVRCP support.])
+fi
 
 AC_ARG_ENABLE(network, AS_HELP_STRING([--disable-network],
 		[disable network profiles]), [enable_network=${enableval}])
@@ -207,9 +208,16 @@ AC_ARG_ENABLE(mcp, AS_HELP_STRING([--disable-mcp],
         [disable MCP profile]), [enable_mcp=${enableval}])
 AM_CONDITIONAL(MCP, test "${enable_mcp}" != "no")
 
+AC_ARG_ENABLE(ccp, AS_HELP_STRING([--disable-ccp],
+        [disable CCP profile]), [enable_ccp=${enableval}])
+AM_CONDITIONAL(CCP, test "${enable_ccp}" != "no")
+
 AC_ARG_ENABLE(vcp, AS_HELP_STRING([--disable-vcp],
 		[disable VCP profile]), [enable_vcp=${enableval}])
 AM_CONDITIONAL(VCP, test "${enable_vcp}" != "no")
+if test "${enable_vcp}" != "no"; then
+	AC_DEFINE(HAVE_VCP, 1, [Define to 1 if you have VCP support.])
+fi
 
 AC_ARG_ENABLE(micp, AS_HELP_STRING([--disable-micp],
 		[disable MICP profile]), [enable_micp=${enableval}])
@@ -218,6 +226,13 @@ AM_CONDITIONAL(MICP, test "${enable_micp}" != "no")
 AC_ARG_ENABLE(csip, AS_HELP_STRING([--disable-csip],
 		[disable CSIP profile]), [enable_csip=${enableval}])
 AM_CONDITIONAL(CSIP, test "${enable_csip}" != "no")
+
+AC_ARG_ENABLE(asha, AS_HELP_STRING([--disable-asha],
+		[disable ASHA support]), [enable_asha=${enableval}])
+AM_CONDITIONAL(ASHA, test "${enable_asha}" != "no")
+if test "${enable_asha}" != "no"; then
+	AC_DEFINE(HAVE_ASHA, 1, [Define to 1 if you have ASHA support.])
+fi
 
 AC_ARG_ENABLE(tools, AS_HELP_STRING([--disable-tools],
 		[disable Bluetooth tools]), [enable_tools=${enableval}])
@@ -229,16 +244,10 @@ AM_CONDITIONAL(MONITOR, test "${enable_monitor}" != "no")
 
 AC_ARG_ENABLE(udev, AS_HELP_STRING([--disable-udev],
 		[disable udev device support]), [enable_udev=${enableval}])
-if (test "${enable_tools}" != "no" && test "${enable_udev}" != "no"); then
-	PKG_CHECK_MODULES(UDEV, libudev >= 172, dummy=yes,
-				AC_MSG_ERROR(libudev >= 172 is required))
-	AC_SUBST(UDEV_CFLAGS)
-	AC_SUBST(UDEV_LIBS)
-	AC_CHECK_LIB(udev, udev_hwdb_new,
-		AC_DEFINE(HAVE_UDEV_HWDB_NEW, 1,
-			[Define to 1 if you have the udev_hwdb_new() function.]))
+if (test "${enable_udev}" != "no"); then
+	PKG_CHECK_MODULES(UDEV, libudev >= 196)
+	AC_DEFINE(HAVE_UDEV, 1, [Define to 1 if udev is required])
 fi
-AM_CONDITIONAL(UDEV, test "${enable_udev}" != "no")
 
 AC_ARG_WITH([udevdir], AS_HELP_STRING([--with-udevdir=DIR],
 			[path to udev directory]), [path_udevdir=${withval}])
@@ -255,16 +264,22 @@ AC_SUBST(UDEV_DIR, [${path_udevdir}])
 AC_ARG_ENABLE(cups, AS_HELP_STRING([--disable-cups],
                 [disable CUPS printer support]), [enable_cups=${enableval}])
 AM_CONDITIONAL(CUPS, test "${enable_cups}" != "no")
+if (test "${enable_cups}" != "no"); then
+	AC_MSG_CHECKING([cups directory])
+	cups_serverbin=`$PKG_CONFIG cups --variable=cups_serverbin`
+	AC_MSG_RESULT([${cups_serverbin}])
+fi
+AM_CONDITIONAL(CUPS_SERVERBIN, test "${cups_serverbin}" != "")
+AS_IF([test "${cups_serverbin}" != ""],[
+	AC_SUBST(CUPS_SERVERBIN, ${cups_serverbin})
+])
 
 AC_ARG_ENABLE(mesh, AS_HELP_STRING([--enable-mesh],
 		[enable Mesh profile support]), [enable_mesh=${enableval}])
 AM_CONDITIONAL(MESH, test "${enable_mesh}" = "yes")
 
 if (test "${enable_mesh}" = "yes"); then
-	PKG_CHECK_MODULES(JSONC, json-c >= 0.13, dummy=yes,
-				AC_MSG_ERROR(json-c >= 0.13 is required))
-	AC_SUBST(JSON_CFLAGS)
-	AC_SUBST(JSON_LIBS)
+	PKG_CHECK_MODULES(JSONC, json-c >= 0.13)
 fi
 
 AC_ARG_ENABLE(midi, AS_HELP_STRING([--enable-midi],
@@ -272,19 +287,13 @@ AC_ARG_ENABLE(midi, AS_HELP_STRING([--enable-midi],
 AM_CONDITIONAL(MIDI, test "${enable_midi}" = "yes")
 
 if (test "${enable_midi}" = "yes"); then
-	PKG_CHECK_MODULES(ALSA, alsa, dummy=yes,
-			AC_MSG_ERROR(ALSA lib is required for MIDI support))
-	AC_SUBST(ALSA_CFLAGS)
-	AC_SUBST(ALSA_LIBS)
+	PKG_CHECK_MODULES(ALSA, alsa)
 fi
 
 AC_ARG_ENABLE(obex, AS_HELP_STRING([--disable-obex],
 		[disable OBEX profile support]), [enable_obex=${enableval}])
 if (test "${enable_obex}" != "no"); then
-	PKG_CHECK_MODULES(ICAL, libical, dummy=yes,
-					AC_MSG_ERROR(libical is required))
-	AC_SUBST(ICAL_CFLAGS)
-	AC_SUBST(ICAL_LIBS)
+	PKG_CHECK_MODULES(ICAL, libical)
 fi
 AM_CONDITIONAL(OBEX, test "${enable_obex}" != "no")
 
@@ -296,10 +305,7 @@ AC_ARG_ENABLE([external_ell], AS_HELP_STRING([--enable-external-ell],
 				[enable external Embedded Linux library]),
 					[enable_external_ell=${enableval}])
 if (test "${enable_external_ell}" = "yes"); then
-	PKG_CHECK_MODULES(ELL, ell >= 0.39, dummy=yes,
-		AC_MSG_ERROR(Embedded Linux library >= 0.39 is required))
-	AC_SUBST(ELL_CFLAGS)
-	AC_SUBST(ELL_LIBS)
+	PKG_CHECK_MODULES(ELL, ell >= 0.39)
 fi
 if (test "${enable_external_ell}" != "yes" &&
 		(test "${enable_btpclient}" = "yes" || test "${enable_mesh}" = "yes")); then
@@ -379,6 +385,13 @@ AC_ARG_ENABLE(testing, AS_HELP_STRING([--enable-testing],
 					[enable_testing=${enableval}])
 AM_CONDITIONAL(TESTING, test "${enable_testing}" = "yes")
 
+if (test "${enable_testing}" = "yes"); then
+   AC_CHECK_DECLS([SOF_TIMESTAMPING_TX_COMPLETION, SCM_TSTAMP_COMPLETION],
+	[], [], [[#include <time.h>
+		#include <linux/errqueue.h>
+		#include <linux/net_tstamp.h>]])
+fi
+
 AC_ARG_ENABLE(experimental, AS_HELP_STRING([--enable-experimental],
 			[enable experimental tools]),
 					[enable_experimental=${enableval}])
@@ -388,6 +401,16 @@ AC_ARG_ENABLE(deprecated, AS_HELP_STRING([--enable-deprecated],
 			[enable deprecated tools]),
 					[enable_deprecated=${enableval}])
 AM_CONDITIONAL(DEPRECATED, test "${enable_deprecated}" = "yes")
+
+AC_ARG_ENABLE(external-plugins, AS_HELP_STRING([--enable-external-plugins],
+			[enable support for external plugins]),
+					[enable_external_plugins=${enableval}])
+AM_CONDITIONAL(EXTERNAL_PLUGINS, test "${enable_external_plugins}" = "yes")
+if (test "${enable_external_plugins}" = "yes"); then
+	AC_DEFINE(EXTERNAL_PLUGINS, 1, [Define if external plugin support is required])
+else
+	AC_DEFINE(EXTERNAL_PLUGINS, 0, [Define if external plugin support is required])
+fi
 
 AC_ARG_ENABLE(sixaxis, AS_HELP_STRING([--enable-sixaxis],
 		[enable sixaxis plugin]), [enable_sixaxis=${enableval}])
@@ -416,6 +439,32 @@ if (test "${prefix}" = "NONE"); then
 	prefix="${ac_default_prefix}"
 fi
 
+if (test "${exec_prefix}" = "NONE"); then
+	# exec_prefix defaults to prefix, although our manual handling of the
+	# latter (above) confuses autoconf. Manually set the exec_prefix.
+	exec_prefix="${prefix}"
+fi
+
+# Expand any variables containing relative references like ${prefix} and co.
+#
+# Otherwise we'll end up with literal references in the final binaries or
+# manuals, which is not something we really want.
+#
+pkgbindir="${bindir}"
+if (test "$bindir" = '${exec_prefix}/bin'); then
+	pkgbindir="${exec_prefix}/bin"
+else
+	pkgbindir="${bindir}"
+fi
+AC_SUBST(PKGBINDIR, "${pkgbindir}")
+
+if (test "$libexecdir" = '${exec_prefix}/libexec'); then
+	pkglibexecdir="${exec_prefix}/libexec/bluetooth"
+else
+	pkglibexecdir="${libexecdir}/bluetooth"
+fi
+AC_SUBST(PKGLIBEXECDIR, "${pkglibexecdir}")
+
 if (test "$localstatedir" = '${prefix}/var'); then
 	storagedir="${prefix}/var/lib/bluetooth"
 else
@@ -437,28 +486,6 @@ AC_DEFINE_UNQUOTED(MESH_STORAGEDIR, "${storagedir}/mesh",
 			[Directory for the mesh daemon storage files])
 AC_SUBST(MESH_STORAGEDIR, "${storagedir}/mesh")
 
-AC_ARG_ENABLE(android, AS_HELP_STRING([--enable-android],
-			[enable BlueZ for Android]),
-					[enable_android=${enableval}])
-AM_CONDITIONAL(ANDROID, test "${enable_android}" = "yes")
-
-if (test "${enable_android}" = "yes"); then
-	PKG_CHECK_MODULES(SBC, sbc >= 1.2, dummy=yes,
-			AC_MSG_ERROR(SBC library >= 1.2 is required))
-	AC_SUBST(SBC_CFLAGS)
-	AC_SUBST(SBC_LIBS)
-fi
-
-if (test "${enable_android}" = "yes"); then
-	PKG_CHECK_MODULES(SPEEXDSP, speexdsp >= 1.2, dummy=yes,
-			AC_MSG_ERROR(SPEEXDSP library >= 1.2 is required))
-	AC_SUBST(SPEEXDSP_CFLAGS)
-	AC_SUBST(SPEEXDSP_LIBS)
-fi
-
-AC_DEFINE_UNQUOTED(ANDROID_STORAGEDIR, "${storagedir}/android",
-			[Directory for the Android daemon storage files])
-
 AC_ARG_WITH([phonebook], AS_HELP_STRING([--with-phonebook=PLUGIN],
 			[obexd phonebook plugin (default=dummy)]),
 			[plugin_phonebook=${withval}])
@@ -467,17 +494,21 @@ if (test -z "${plugin_phonebook}"); then
 fi
 
 if (test "${plugin_phonebook}" = "ebook"); then
-	PKG_CHECK_MODULES(LIBEBOOK, [libebook-1.2 >= 3.3], dummy=yes,
-			AC_MSG_ERROR(libebook >= 3.3 is required))
-	AC_SUBST(LIBEBOOK_CFLAGS)
-	AC_SUBST(LIBEBOOK_LIBS)
-	PKG_CHECK_MODULES(LIBEDATESERVER, [libedataserver-1.2 >= 3.3],
-			dummy=yes,
-			AC_MSG_ERROR(libedataserver >= 3.3 is required))
-	AC_SUBST(LIBEDATESERVER_CFLAGS)
-	AC_SUBST(LIBEDATESERVER_LIBS)
+	PKG_CHECK_MODULES(LIBEBOOK, libebook-1.2 >= 3.3)
+	PKG_CHECK_MODULES(LIBEDATESERVER, libedataserver-1.2 >= 3.3)
 fi
 AC_SUBST(PLUGIN_PHONEBOOK, [${plugin_phonebook}])
 
-AC_CONFIG_FILES(Makefile src/bluetoothd.rst lib/bluez.pc mesh/bluetooth-meshd.rst)
+AC_CONFIG_FILES(
+	lib/bluez.pc
+	Makefile
+	mesh/bluetooth-meshd.rst
+	mesh/bluetooth-mesh.service
+	obexd/src/obex.service
+	obexd/src/org.bluez.obex.service
+	src/bluetoothd.rst
+	src/bluetooth.service
+	tools/bluetooth-logger.service
+	tools/mpris-proxy.service
+)
 AC_OUTPUT

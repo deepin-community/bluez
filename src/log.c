@@ -25,8 +25,8 @@
 
 #include <glib.h>
 
-#include "lib/bluetooth.h"
-#include "lib/hci.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/hci.h"
 
 #include "src/shared/util.h"
 #include "src/shared/log.h"
@@ -123,7 +123,7 @@ extern struct btd_debug_desc __stop___debug[];
 
 static char **enabled = NULL;
 
-static gboolean is_enabled(struct btd_debug_desc *desc)
+static gboolean is_enabled(const struct btd_debug_desc *desc)
 {
 	int i;
 

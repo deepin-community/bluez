@@ -242,12 +242,25 @@ For a working system, certain configuration options need to be enabled:
 
 		Enable deprecated tools
 
-		By defauld all tools that are no longer maintained are
+		By default all tools that are no longer maintained are
 		disabled. This option can be used to enable them.
 
 		It is not recommended to enable this option for production
 		systems. The behavior of the deprecated tools may be unstable
 		or simply don't work anymore.
+
+	--enable-external-plugins
+
+		Enable support for external plugins
+
+		By default external plugins for bluetoothd and obexd are not
+		supported and thus disabled.
+
+		External plugins require access to internal, undocumented and
+		unversioned API in said daemons. As such they can break at any
+		time. If you have such plugins, enable this option and work
+		actively with the community to make said plugin part of the
+		upstream bluez project.
 
 	--enable-nfc
 

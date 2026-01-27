@@ -294,7 +294,7 @@ static int irmc_open_cc(struct irmc_session *irmc)
 
 static int irmc_open_cal(struct irmc_session *irmc)
 {
-	/* no suport yet. Just return an empty buffer. cal.vcs */
+	/* no support yet. Just return an empty buffer. cal.vcs */
 	DBG("unsupported, returning empty buffer");
 
 	if (!irmc->buffer)
@@ -305,7 +305,7 @@ static int irmc_open_cal(struct irmc_session *irmc)
 
 static int irmc_open_nt(struct irmc_session *irmc)
 {
-	/* no suport yet. Just return an empty buffer. nt.vnt */
+	/* no support yet. Just return an empty buffer. nt.vnt */
 	DBG("unsupported, returning empty buffer");
 
 	if (!irmc->buffer)
@@ -419,7 +419,7 @@ static ssize_t irmc_read(void *object, void *buf, size_t count)
 	return len;
 }
 
-static struct obex_mime_type_driver irmc_driver = {
+static const struct obex_mime_type_driver irmc_driver = {
 	.target = IRMC_TARGET,
 	.target_size = IRMC_TARGET_SIZE,
 	.open = irmc_open,
@@ -427,7 +427,7 @@ static struct obex_mime_type_driver irmc_driver = {
 	.read = irmc_read,
 };
 
-static struct obex_service_driver irmc = {
+static const struct obex_service_driver irmc = {
 	.name = "IRMC Sync server",
 	.service = OBEX_IRMC,
 	.target = IRMC_TARGET,

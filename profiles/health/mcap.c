@@ -22,7 +22,7 @@
 
 #include <glib.h>
 
-#include "lib/bluetooth.h"
+#include "bluetooth/bluetooth.h"
 #include "bluetooth/l2cap.h"
 #include "btio/btio.h"
 #include "src/log.h"
@@ -336,6 +336,9 @@ static void mcap_notify_error(struct mcap_mcl *mcl, GError *err)
 	case MCAP_MD_CREATE_MDL_REQ:
 		st = MDL_WAITING;
 		l = g_slist_find_custom(mcl->mdls, &st, cmp_mdl_state);
+		if (!l)
+			return;
+
 		mdl = l->data;
 		mcl->mdls = g_slist_remove(mcl->mdls, mdl);
 		mcap_mdl_unref(mdl);
@@ -345,6 +348,9 @@ static void mcap_notify_error(struct mcap_mcl *mcl, GError *err)
 	case MCAP_MD_ABORT_MDL_REQ:
 		st = MDL_WAITING;
 		l = g_slist_find_custom(mcl->mdls, &st, cmp_mdl_state);
+		if (!l)
+			return;
+
 		shutdown_mdl(l->data);
 		update_mcl_state(mcl);
 		con->cb.notify(err, con->user_data);
@@ -362,6 +368,9 @@ static void mcap_notify_error(struct mcap_mcl *mcl, GError *err)
 	case MCAP_MD_RECONNECT_MDL_REQ:
 		st = MDL_WAITING;
 		l = g_slist_find_custom(mcl->mdls, &st, cmp_mdl_state);
+		if (!l)
+			return;
+
 		shutdown_mdl(l->data);
 		update_mcl_state(mcl);
 		con->cb.op(NULL, err, con->user_data);
@@ -1907,6 +1916,7 @@ gboolean mcap_create_mcl(struct mcap_instance *mi,
 		set_default_cb(mcl);
 		if (util_getrandom(&val, sizeof(val), 0) < 0) {
 			mcap_instance_unref(mcl->mi);
+			g_free(mcl->cb);
 			g_free(mcl);
 			return FALSE;
 		}
@@ -2051,6 +2061,7 @@ static void connect_mcl_event_cb(GIOChannel *chan, GError *gerr,
 		set_default_cb(mcl);
 		if (util_getrandom(&val, sizeof(val), 0) < 0) {
 			mcap_instance_unref(mcl->mi);
+			g_free(mcl->cb);
 			g_free(mcl);
 			goto drop;
 		}
@@ -2405,7 +2416,7 @@ static gboolean read_btclock(struct mcap_mcl *mcl, uint32_t *btclock,
 	/*
 	 * FIXME: btd_adapter_read_clock(...) always return FALSE, current
 	 * code doesn't support CSP (Clock Synchronization Protocol). To avoid
-	 * build dependancy on struct 'btd_adapter', removing this code.
+	 * build dependency on struct 'btd_adapter', removing this code.
 	 */
 
 	return FALSE;
@@ -2495,7 +2506,7 @@ static gboolean initialize_caps(struct mcap_mcl *mcl)
 
 	_caps.ts_acc = 20; /* ppm, estimated */
 
-	/* A little exercise before measuing latency */
+	/* A little exercise before measuring latency */
 	clock_gettime(CLK, &t1);
 	read_btclock_retry(mcl, &btclock, &btaccuracy);
 
@@ -2867,7 +2878,7 @@ static void proc_sync_set_req(struct mcap_mcl *mcl, uint8_t *cmd, uint32_t len)
 			return;
 		}
 
-		/* Convert to miliseconds */
+		/* Convert to milliseconds */
 		phase2_delay = bt2ms(phase2_delay);
 
 		if (phase2_delay > 61*1000) {
@@ -2950,12 +2961,12 @@ static void proc_sync_cap_rsp(struct mcap_mcl *mcl, uint8_t *cmd, uint32_t len)
 	gpointer user_data;
 
 	if (mcl->csp->csp_req != MCAP_MD_SYNC_CAP_REQ) {
-		DBG("CSP: got unexpected cap respose");
+		DBG("CSP: got unexpected cap response");
 		return;
 	}
 
 	if (!mcl->csp->csp_priv_data) {
-		DBG("CSP: no priv data for cap respose");
+		DBG("CSP: no priv data for cap response");
 		return;
 	}
 
@@ -2968,7 +2979,7 @@ static void proc_sync_cap_rsp(struct mcap_mcl *mcl, uint8_t *cmd, uint32_t len)
 	mcl->csp->csp_req = 0;
 
 	if (len != sizeof(mcap_md_sync_cap_rsp)) {
-		DBG("CSP: got corrupted cap respose");
+		DBG("CSP: got corrupted cap response");
 		return;
 	}
 
@@ -2998,12 +3009,12 @@ static void proc_sync_set_rsp(struct mcap_mcl *mcl, uint8_t *cmd, uint32_t len)
 	gpointer user_data;
 
 	if (mcl->csp->csp_req != MCAP_MD_SYNC_SET_REQ) {
-		DBG("CSP: got unexpected set respose");
+		DBG("CSP: got unexpected set response");
 		return;
 	}
 
 	if (!mcl->csp->csp_priv_data) {
-		DBG("CSP: no priv data for set respose");
+		DBG("CSP: no priv data for set response");
 		return;
 	}
 
@@ -3016,7 +3027,7 @@ static void proc_sync_set_rsp(struct mcap_mcl *mcl, uint8_t *cmd, uint32_t len)
 	mcl->csp->csp_req = 0;
 
 	if (len != sizeof(mcap_md_sync_set_rsp)) {
-		DBG("CSP: got corrupted set respose");
+		DBG("CSP: got corrupted set response");
 		return;
 	}
 

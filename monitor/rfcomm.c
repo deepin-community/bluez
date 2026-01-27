@@ -20,8 +20,8 @@
 #include <ctype.h>
 #include <inttypes.h>
 
-#include "lib/bluetooth.h"
-#include "lib/uuid.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/uuid.h"
 
 #include "src/shared/util.h"
 #include "bt.h"
@@ -32,7 +32,7 @@
 #include "sdp.h"
 #include "rfcomm.h"
 
-static char *cr_str[] = {
+static const char *cr_str[] = {
 	"RSP",
 	"CMD"
 };

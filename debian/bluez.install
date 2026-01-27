@@ -1,31 +1,32 @@
-src/main.conf etc/bluetooth
-profiles/input/input.conf etc/bluetooth
-profiles/network/network.conf etc/bluetooth
-usr/libexec/bluetooth/bluetoothd
-usr/libexec/bluetooth/bluetoothd.sh
-usr/bin/bluetoothctl
-usr/bin/bluemoon
-usr/bin/btattach
-usr/bin/btmon
-usr/bin/hciattach
-usr/bin/hciconfig
-usr/bin/hcitool
-usr/bin/sdptool
-usr/bin/rctest
-usr/bin/ciptool
-usr/bin/hex2hcd
-usr/bin/l2ping
-usr/bin/l2test
-usr/bin/rfcomm
-usr/bin/rctest
-usr/bin/mpris-proxy
-tools/btmgmt usr/bin
-tools/obexctl usr/bin
+#-- for systemd
+${env:deb_systemdsystemunitdir}/bluetooth.service
 ${env:deb_udevdir}/hid2hci
 ${env:deb_udevdir}/rules.d/97-hid2hci.rules
 attrib/gatttool usr/bin
-#-- for systemd
-${env:deb_systemdsystemunitdir}/bluetooth.service
-usr/share/dbus-1/system.d/bluetooth.conf
+debian/source_bluez.py usr/share/apport/package-hooks
+etc/bluetooth/input.conf
+etc/bluetooth/main.conf
+etc/bluetooth/network.conf
+tools/btmgmt usr/bin
+tools/obexctl usr/bin
+usr/bin/bluemoon
+usr/bin/bluetoothctl
+usr/bin/btattach
+usr/bin/btmon
+usr/bin/ciptool
+usr/bin/hciattach
+usr/bin/hciconfig
+usr/bin/hcitool
+usr/bin/hex2hcd
+usr/bin/l2ping
+usr/bin/l2test
+usr/bin/mpris-proxy
+usr/bin/rctest
+usr/bin/rctest
+usr/bin/rfcomm
+usr/bin/sdptool
+usr/lib/systemd/user/mpris-proxy.service
+usr/libexec/bluetooth/bluetoothd
 usr/share/dbus-1/system-services/org.bluez.service
+usr/share/dbus-1/system.d/bluetooth.conf
 usr/share/zsh/site-functions/_bluetoothctl

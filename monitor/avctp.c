@@ -20,8 +20,8 @@
 #include <ctype.h>
 #include <inttypes.h>
 
-#include "lib/bluetooth.h"
-#include "lib/uuid.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/uuid.h"
 
 #include "src/shared/util.h"
 #include "bt.h"
@@ -156,6 +156,7 @@
 #define AVRCP_MEDIA_ATTRIBUTE_TOTAL	0x05
 #define AVRCP_MEDIA_ATTRIBUTE_GENRE	0x06
 #define AVRCP_MEDIA_ATTRIBUTE_DURATION	0x07
+#define AVRCP_MEDIA_ATTRIBUTE_IMG_HANDLE	0x08
 
 /* play status */
 #define AVRCP_PLAY_STATUS_STOPPED	0x00
@@ -582,6 +583,8 @@ static const char *mediattr2str(uint32_t attr)
 		return "Genre";
 	case AVRCP_MEDIA_ATTRIBUTE_DURATION:
 		return "Track duration";
+	case AVRCP_MEDIA_ATTRIBUTE_IMG_HANDLE:
+		return "Imaging handle";
 	default:
 		return "Reserved";
 	}
@@ -1314,13 +1317,13 @@ static bool avrcp_get_play_status(struct avctp_frame *avctp_frame,
 	if (!l2cap_frame_get_be32(frame, &interval))
 		return false;
 
-	print_field("%*cSongLength: 0x%08x (%u miliseconds)",
+	print_field("%*cSongLength: 0x%08x (%u milliseconds)",
 					(indent - 8), ' ', interval, interval);
 
 	if (!l2cap_frame_get_be32(frame, &interval))
 		return false;
 
-	print_field("%*cSongPosition: 0x%08x (%u miliseconds)",
+	print_field("%*cSongPosition: 0x%08x (%u milliseconds)",
 					(indent - 8), ' ', interval, interval);
 
 	if (!l2cap_frame_get_u8(frame, &status))
@@ -1385,7 +1388,7 @@ response:
 		if (!l2cap_frame_get_be32(frame, &interval))
 			return false;
 
-		print_field("%*cPosition: 0x%08x (%u miliseconds)",
+		print_field("%*cPosition: 0x%08x (%u milliseconds)",
 					(indent - 8), ' ', interval, interval);
 		break;
 	case AVRCP_EVENT_BATT_STATUS_CHANGED:
@@ -1802,7 +1805,7 @@ response:
 }
 
 
-static struct {
+static const struct {
 	const char *str;
 	bool reserved;
 } features_table[] = {

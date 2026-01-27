@@ -18,12 +18,23 @@
 #include <errno.h>
 #include <inttypes.h>
 
+#include <time.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <linux/errqueue.h>
+#include <linux/net_tstamp.h>
+#include <linux/ethtool.h>
+#include <linux/sockios.h>
+#include <net/if.h>
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+
 #include <glib.h>
 
-#include "lib/bluetooth.h"
-#include "lib/sdp.h"
-#include "lib/uuid.h"
-#include "lib/mgmt.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/sdp.h"
+#include "bluetooth/uuid.h"
+#include "bluetooth/mgmt.h"
 
 #include "gdbus/gdbus.h"
 
@@ -38,6 +49,7 @@
 #include "src/log.h"
 #include "src/error.h"
 #include "src/gatt-database.h"
+#include "src/shared/asha.h"
 #include "src/shared/util.h"
 #include "src/shared/queue.h"
 #include "src/shared/att.h"
@@ -48,7 +60,10 @@
 #include "media.h"
 #include "transport.h"
 #include "a2dp.h"
+
+#ifdef HAVE_AVRCP
 #include "avrcp.h"
+#endif
 
 #define MEDIA_INTERFACE "org.bluez.Media1"
 #define MEDIA_ENDPOINT_INTERFACE "org.bluez.MediaEndpoint1"
@@ -64,7 +79,9 @@ struct media_app {
 	char			*path;		/* Application object path */
 	struct queue		*proxies;	/* Application proxies */
 	struct queue		*endpoints;	/* Application endpoints */
+#ifdef HAVE_AVRCP
 	struct queue		*players;	/* Application players */
+#endif
 	int			err;
 };
 
@@ -72,7 +89,10 @@ struct media_adapter {
 	struct btd_adapter	*btd_adapter;
 	struct queue		*apps;		/* Application list */
 	GSList			*endpoints;	/* Endpoints list */
+#ifdef HAVE_AVRCP
 	GSList			*players;	/* Players list */
+#endif
+	int			so_timestamping;
 };
 
 struct endpoint_request {
@@ -88,6 +108,7 @@ struct endpoint_request {
 struct media_endpoint {
 	struct a2dp_sep		*sep;
 	struct bt_bap_pac	*pac;
+	struct bt_asha_device	*asha;
 	char			*sender;	/* Endpoint DBus bus id */
 	char			*path;		/* Endpoint object path */
 	char			*uuid;		/* Endpoint property UUID */
@@ -121,7 +142,6 @@ struct media_player {
 	char			*status;
 	uint32_t		position;
 	uint32_t		duration;
-	int8_t			volume;
 	GTimer			*timer;
 	bool			play;
 	bool			pause;
@@ -148,6 +168,11 @@ static void endpoint_request_free(struct endpoint_request *request)
 static void media_endpoint_cancel(struct endpoint_request *request)
 {
 	struct media_endpoint *endpoint = request->endpoint;
+
+	DBG("Canceling %s: name = %s path = %s",
+			dbus_message_get_member(request->msg),
+			dbus_message_get_destination(request->msg),
+			dbus_message_get_path(request->msg));
 
 	if (request->call)
 		dbus_pending_call_cancel(request->call);
@@ -308,7 +333,7 @@ static void endpoint_reply(DBusPendingCall *call, void *user_data)
 	DBusMessage *reply;
 	DBusMessageIter args, props;
 	DBusError err;
-	gboolean value;
+	uint8_t error_code;
 	void *ret = NULL;
 	int size = -1;
 
@@ -331,8 +356,12 @@ static void endpoint_reply(DBusPendingCall *call, void *user_data)
 
 		if (dbus_message_is_method_call(request->msg,
 					MEDIA_ENDPOINT_INTERFACE,
-					"SetConfiguration"))
+					"SetConfiguration")) {
 			endpoint_remove_transport(endpoint, request->transport);
+			error_code = a2dp_parse_config_error(err.name);
+			ret = &error_code;
+			size = 1;
+		}
 
 		dbus_error_free(&err);
 		goto done;
@@ -365,8 +394,8 @@ static void endpoint_reply(DBusPendingCall *call, void *user_data)
 	}
 
 	size = 1;
-	value = TRUE;
-	ret = &value;
+	error_code = 0;
+	ret = &error_code;
 
 done:
 	dbus_message_unref(reply);
@@ -473,35 +502,6 @@ struct a2dp_config_data {
 	a2dp_endpoint_config_t cb;
 };
 
-int8_t media_player_get_device_volume(struct btd_device *device)
-{
-	struct avrcp_player *target_player;
-	struct media_adapter *adapter;
-	GSList *l;
-
-	if (!device)
-		return -1;
-
-	target_player = avrcp_get_target_player_by_device(device);
-	if (!target_player)
-		goto done;
-
-	adapter = find_adapter(device);
-	if (!adapter)
-		goto done;
-
-	for (l = adapter->players; l; l = l->next) {
-		struct media_player *mp = l->data;
-
-		if (mp->player == target_player)
-			return mp->volume;
-	}
-
-done:
-	/* If media_player doesn't exists use device_volume */
-	return btd_device_get_volume(device);
-}
-
 static gboolean set_configuration(struct media_endpoint *endpoint,
 					uint8_t *configuration, size_t size,
 					media_endpoint_cb_t cb,
@@ -528,7 +528,7 @@ static gboolean set_configuration(struct media_endpoint *endpoint,
 	if (transport == NULL)
 		return FALSE;
 
-	init_volume = media_player_get_device_volume(device);
+	init_volume = btd_device_get_volume(device);
 	media_transport_update_volume(transport, init_volume);
 
 	msg = dbus_message_new_method_call(endpoint->sender, endpoint->path,
@@ -638,9 +638,9 @@ static void config_cb(struct media_endpoint *endpoint, void *ret, int size,
 							void *user_data)
 {
 	struct a2dp_config_data *data = user_data;
-	gboolean *ret_value = ret;
+	uint8_t *ret_value = ret;
 
-	data->cb(data->setup, ret_value ? *ret_value : FALSE);
+	data->cb(data->setup, ret_value ? *ret_value : 1);
 }
 
 static int set_config(struct a2dp_sep *sep, uint8_t *configuration,
@@ -664,11 +664,22 @@ static int set_config(struct a2dp_sep *sep, uint8_t *configuration,
 	return -ENOMEM;
 }
 
-static void clear_config(struct a2dp_sep *sep, void *user_data)
+static void clear_config(struct a2dp_sep *sep, struct btd_device *device,
+				void *user_data)
 {
 	struct media_endpoint *endpoint = user_data;
+	struct media_transport *transport;
 
-	clear_endpoint(endpoint);
+	if (!device) {
+		clear_endpoint(endpoint);
+		return;
+	}
+
+	transport = find_device_transport(endpoint, device);
+	if (!transport)
+		return;
+
+	clear_configuration(endpoint, transport);
 }
 
 static void set_delay(struct a2dp_sep *sep, uint16_t delay, void *user_data)
@@ -921,7 +932,7 @@ done:
 }
 
 static int pac_select(struct bt_bap_pac *lpac, struct bt_bap_pac *rpac,
-			struct bt_bap_pac_qos *qos,
+			uint32_t location, struct bt_bap_pac_qos *qos,
 			bt_bap_pac_select_t cb, void *cb_data, void *user_data)
 {
 	struct media_endpoint *endpoint = user_data;
@@ -968,6 +979,10 @@ static int pac_select(struct bt_bap_pac *lpac, struct bt_bap_pac *rpac,
 	if (loc)
 		g_dbus_dict_append_entry(&dict, "Locations", DBUS_TYPE_UINT32,
 									&loc);
+
+	if (location)
+		g_dbus_dict_append_entry(&dict, "ChannelAllocation",
+					DBUS_TYPE_UINT32, &location);
 
 	if (metadata) {
 		key = "Metadata";
@@ -1020,8 +1035,38 @@ static int pac_select(struct bt_bap_pac *lpac, struct bt_bap_pac *rpac,
 
 	dbus_message_iter_close_container(&iter, &dict);
 
-	return media_endpoint_async_call(msg, endpoint, NULL, pac_select_cb,
-								data, free);
+	if (!media_endpoint_async_call(msg, endpoint, NULL, pac_select_cb,
+								data, free))
+		return -EIO;
+
+	return 0;
+}
+
+static void pac_cancel_select(struct bt_bap_pac *lpac, bt_bap_pac_select_t cb,
+						void *cb_data, void *user_data)
+{
+	struct media_endpoint *endpoint = user_data;
+	GSList *l = endpoint->requests;
+
+	while (l) {
+		struct endpoint_request *req = l->data;
+		struct pac_select_data *data;
+
+		if (req->cb != pac_select_cb) {
+			l = g_slist_next(l);
+			continue;
+		}
+
+		data = req->user_data;
+		if (data->pac != lpac || data->cb != cb ||
+						data->user_data != cb_data) {
+			l = g_slist_next(l);
+			continue;
+		}
+
+		media_endpoint_cancel(req);
+		l = endpoint->requests;
+	}
 }
 
 struct pac_config_data {
@@ -1057,7 +1102,7 @@ static void pac_config_cb(struct media_endpoint *endpoint, void *ret, int size,
 							void *user_data)
 {
 	struct pac_config_data *data = user_data;
-	gboolean *ret_value = ret;
+	uint8_t *error_code = ret;
 	struct media_transport *transport;
 
 	/* If transport was cleared, configuration was cancelled */
@@ -1065,7 +1110,7 @@ static void pac_config_cb(struct media_endpoint *endpoint, void *ret, int size,
 	if (!transport)
 		return;
 
-	data->cb(data->stream, ret_value ? 0 : -EINVAL);
+	data->cb(data->stream, (error_code && *error_code == 0) ? 0 : -EINVAL);
 }
 
 static struct media_transport *pac_ucast_config(struct bt_bap_stream *stream,
@@ -1135,22 +1180,25 @@ static int pac_config(struct bt_bap_stream *stream, struct iovec *cfg,
 	DBG("endpoint %p stream %p", endpoint, stream);
 
 	transport = find_transport(endpoint, stream);
-	if (!transport) {
-		switch (bt_bap_stream_get_type(stream)) {
-		case BT_BAP_STREAM_TYPE_UCAST:
-			transport = pac_ucast_config(stream, cfg, endpoint);
-			break;
-		case BT_BAP_STREAM_TYPE_BCAST:
-			transport = pac_bcast_config(stream, cfg, endpoint);
-			break;
-		}
+	if (transport)
+		clear_configuration(endpoint, transport);
 
-		if (!transport)
-			return -EINVAL;
-
-		endpoint->transports = g_slist_append(endpoint->transports,
-								transport);
+	switch (bt_bap_stream_get_type(stream)) {
+	case BT_BAP_STREAM_TYPE_UCAST:
+		transport = pac_ucast_config(stream, cfg, endpoint);
+		break;
+	case BT_BAP_STREAM_TYPE_BCAST:
+		transport = pac_bcast_config(stream, cfg, endpoint);
+		break;
+	default:
+		transport = NULL;
+		break;
 	}
+
+	if (!transport)
+		return -EINVAL;
+
+	endpoint->transports = g_slist_append(endpoint->transports, transport);
 
 	msg = dbus_message_new_method_call(endpoint->sender, endpoint->path,
 						MEDIA_ENDPOINT_INTERFACE,
@@ -1158,7 +1206,7 @@ static int pac_config(struct bt_bap_stream *stream, struct iovec *cfg,
 	if (msg == NULL) {
 		error("Couldn't allocate D-Bus message");
 		endpoint_remove_transport(endpoint, transport);
-		return FALSE;
+		return -ENOMEM;
 	}
 
 	data = new0(struct pac_config_data, 1);
@@ -1173,8 +1221,11 @@ static int pac_config(struct bt_bap_stream *stream, struct iovec *cfg,
 
 	g_dbus_get_properties(conn, path, "org.bluez.MediaTransport1", &iter);
 
-	return media_endpoint_async_call(msg, endpoint, transport,
-					pac_config_cb, data, free);
+	if (!media_endpoint_async_call(msg, endpoint, transport,
+						pac_config_cb, data, free))
+		return -EIO;
+
+	return 0;
 }
 
 static void pac_clear(struct bt_bap_stream *stream, void *user_data)
@@ -1191,6 +1242,7 @@ static void pac_clear(struct bt_bap_stream *stream, void *user_data)
 
 static struct bt_bap_pac_ops pac_ops = {
 	.select = pac_select,
+	.cancel_select = pac_cancel_select,
 	.config = pac_config,
 	.clear = pac_clear,
 };
@@ -1210,7 +1262,7 @@ static bool endpoint_init_pac(struct media_endpoint *endpoint, uint8_t type,
 	char *name;
 
 	if (!(g_dbus_get_flags() & G_DBUS_FLAG_ENABLE_EXPERIMENTAL)) {
-		warn("D-Bus experimental not enabled");
+		DBG("D-Bus experimental not enabled");
 		*err = -ENOTSUP;
 		return false;
 	}
@@ -1241,6 +1293,7 @@ static bool endpoint_init_pac(struct media_endpoint *endpoint, uint8_t type,
 	if (asprintf(&name, "%s:%s", endpoint->sender, endpoint->path) < 0) {
 		error("Could not allocate name for pac %s:%s",
 				endpoint->sender, endpoint->path);
+		free(name);
 		return false;
 	}
 
@@ -1256,6 +1309,7 @@ static bool endpoint_init_pac(struct media_endpoint *endpoint, uint8_t type,
 				&data, metadata);
 	if (!endpoint->pac) {
 		error("Unable to create PAC");
+		free(name);
 		free(metadata);
 		return false;
 	}
@@ -1290,6 +1344,12 @@ static bool endpoint_init_broadcast_sink(struct media_endpoint *endpoint,
 						int *err)
 {
 	return endpoint_init_pac(endpoint, BT_BAP_BCAST_SINK, err);
+}
+
+static bool endpoint_init_asha(struct media_endpoint *endpoint,
+						int *err)
+{
+	return true;
 }
 
 static bool endpoint_properties_exists(const char *uuid,
@@ -1416,7 +1476,12 @@ static bool experimental_bcast_sink_ep_supported(struct btd_adapter *adapter)
 	return g_dbus_get_flags() & G_DBUS_FLAG_ENABLE_EXPERIMENTAL;
 }
 
-static struct media_endpoint_init {
+static bool experimental_asha_supported(struct btd_adapter *adapter)
+{
+	return g_dbus_get_flags() & G_DBUS_FLAG_ENABLE_EXPERIMENTAL;
+}
+
+static const struct media_endpoint_init {
 	const char *uuid;
 	bool (*func)(struct media_endpoint *endpoint, int *err);
 	bool (*supported)(struct btd_adapter *adapter);
@@ -1433,6 +1498,8 @@ static struct media_endpoint_init {
 			experimental_broadcaster_ep_supported },
 	{ BAA_SERVICE_UUID, endpoint_init_broadcast_sink,
 			experimental_bcast_sink_ep_supported },
+	{ ASHA_PROFILE_UUID, endpoint_init_asha,
+			experimental_asha_supported },
 };
 
 static struct media_endpoint *
@@ -1452,7 +1519,7 @@ media_endpoint_create(struct media_adapter *adapter,
 						int *err)
 {
 	struct media_endpoint *endpoint;
-	struct media_endpoint_init *init;
+	const struct media_endpoint_init *init;
 	size_t i;
 	bool succeeded = false;
 
@@ -1706,6 +1773,7 @@ static DBusMessage *unregister_endpoint(DBusConnection *conn, DBusMessage *msg,
 	return g_dbus_create_reply(msg, DBUS_TYPE_INVALID);
 }
 
+#ifdef HAVE_AVRCP
 static struct media_player *media_adapter_find_player(
 						struct media_adapter *adapter,
 						const char *sender,
@@ -1980,17 +2048,6 @@ static uint32_t media_player_get_duration(void *user_data)
 	return mp->duration;
 }
 
-static void media_player_set_volume(int8_t volume, struct btd_device *dev,
-				    void *user_data)
-{
-	struct media_player *mp = user_data;
-
-	if (mp->volume == volume)
-		return;
-
-	mp->volume = volume;
-}
-
 static bool media_player_send(struct media_player *mp, const char *name)
 {
 	DBusMessage *msg;
@@ -2078,7 +2135,6 @@ static struct avrcp_player_cb player_cb = {
 	.get_duration = media_player_get_duration,
 	.get_status = media_player_get_status,
 	.get_name = media_player_get_player_name,
-	.set_volume = media_player_set_volume,
 	.play = media_player_play,
 	.stop = media_player_stop,
 	.pause = media_player_pause,
@@ -2561,7 +2617,6 @@ static struct media_player *media_player_create(struct media_adapter *adapter,
 	mp->sender = g_strdup(sender);
 	mp->path = g_strdup(path);
 	mp->timer = g_timer_new();
-	mp->volume = -1;
 
 	mp->watch = g_dbus_add_disconnect_watch(conn, sender,
 						media_player_exit, mp,
@@ -2595,10 +2650,12 @@ static struct media_player *media_player_create(struct media_adapter *adapter,
 
 	return mp;
 }
+#endif /* HAVE_AVRCP */
 
 static DBusMessage *register_player(DBusConnection *conn, DBusMessage *msg,
 					void *data)
 {
+#ifdef HAVE_AVRCP
 	struct media_adapter *adapter = data;
 	struct media_player *mp;
 	DBusMessageIter args;
@@ -2629,11 +2686,15 @@ static DBusMessage *register_player(DBusConnection *conn, DBusMessage *msg,
 	}
 
 	return g_dbus_create_reply(msg, DBUS_TYPE_INVALID);
+#else
+	return btd_error_not_supported(msg);
+#endif
 }
 
 static DBusMessage *unregister_player(DBusConnection *conn, DBusMessage *msg,
 					void *data)
 {
+#ifdef HAVE_AVRCP
 	struct media_adapter *adapter = data;
 	struct media_player *player;
 	const char *sender, *path;
@@ -2652,6 +2713,9 @@ static DBusMessage *unregister_player(DBusConnection *conn, DBusMessage *msg,
 	media_player_remove(player);
 
 	return g_dbus_create_reply(msg, DBUS_TYPE_INVALID);
+#else
+	return btd_error_not_supported(msg);
+#endif
 }
 
 static void app_free(void *data)
@@ -2660,7 +2724,9 @@ static void app_free(void *data)
 
 	queue_destroy(app->proxies, NULL);
 	queue_destroy(app->endpoints, media_endpoint_remove);
+#ifdef HAVE_AVRCP
 	queue_destroy(app->players, media_player_remove);
+#endif
 
 	if (app->client) {
 		g_dbus_client_set_disconnect_watch(app->client, NULL, NULL);
@@ -2859,6 +2925,7 @@ fail:
 
 static void app_register_player(void *data, void *user_data)
 {
+#ifdef HAVE_AVRCP
 	struct media_app *app = user_data;
 	GDBusProxy *proxy = data;
 	const char *iface = g_dbus_proxy_get_interface(proxy);
@@ -2940,6 +3007,7 @@ fail:
 	error("Unable to register player %s:%s: %s", app->sender, path,
 							strerror(-app->err));
 	media_player_destroy(player);
+#endif /* HAVE_AVRCP */
 }
 
 static void remove_app(void *data)
@@ -2988,7 +3056,11 @@ static void client_ready_cb(GDBusClient *client, void *user_data)
 		goto reply;
 	}
 
+#ifdef HAVE_AVRCP
 	if ((queue_isempty(app->endpoints) && queue_isempty(app->players))) {
+#else
+	if (queue_isempty(app->endpoints)) {
+#endif
 		error("No valid external Media objects found");
 		fail = true;
 		reply = btd_error_failed(app->reg,
@@ -3037,6 +3109,7 @@ static bool match_endpoint_by_path(const void *a, const void *b)
 	return !strcmp(endpoint->path, path);
 }
 
+#ifdef HAVE_AVRCP
 static bool match_player_by_path(const void *a, const void *b)
 {
 	const struct media_player *player = a;
@@ -3044,12 +3117,12 @@ static bool match_player_by_path(const void *a, const void *b)
 
 	return !strcmp(player->path, path);
 }
+#endif
 
 static void proxy_removed_cb(GDBusProxy *proxy, void *user_data)
 {
 	struct media_app *app = user_data;
 	struct media_endpoint *endpoint;
-	struct media_player *player;
 	const char *iface, *path;
 
 	iface = g_dbus_proxy_get_interface(proxy);
@@ -3068,7 +3141,10 @@ static void proxy_removed_cb(GDBusProxy *proxy, void *user_data)
 		DBG("Proxy removed - removing endpoint: %s", endpoint->path);
 
 		media_endpoint_remove(endpoint);
+#ifdef HAVE_AVRCP
 	} else if (!strcmp(iface, MEDIA_PLAYER_INTERFACE)) {
+		struct media_player *player;
+
 		player = queue_remove_if(app->players, match_player_by_path,
 						(void *) path);
 		if (!player)
@@ -3080,6 +3156,7 @@ static void proxy_removed_cb(GDBusProxy *proxy, void *user_data)
 		DBG("Proxy removed - removing player: %s", player->path);
 
 		media_player_remove(player);
+#endif
 	}
 }
 
@@ -3108,7 +3185,9 @@ static struct media_app *create_app(DBusConnection *conn, DBusMessage *msg,
 
 	app->proxies = queue_new();
 	app->endpoints = queue_new();
+#ifdef HAVE_AVRCP
 	app->players = queue_new();
+#endif
 	app->reg = dbus_message_ref(msg);
 
 	g_dbus_client_set_disconnect_watch(app->client, client_disconnect_cb,
@@ -3240,7 +3319,7 @@ static gboolean supported_uuids(const GDBusPropertyTable *property,
 				DBUS_TYPE_STRING_AS_STRING, &entry);
 
 	for (i = 0; i < ARRAY_SIZE(init_table); i++) {
-		struct media_endpoint_init *init = &init_table[i];
+		const struct media_endpoint_init *init = &init_table[i];
 
 		if (init->supported(adapter->btd_adapter))
 			dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING,
@@ -3252,8 +3331,78 @@ static gboolean supported_uuids(const GDBusPropertyTable *property,
 	return TRUE;
 }
 
+static bool probe_tx_timestamping(struct media_adapter *adapter)
+{
+	struct ifreq ifr = {};
+	struct ethtool_ts_info cmd = {};
+	int sk = -1;
+
+	/* TX timestamping requires support from BlueZ in order to not mistake
+	 * errqueue for socket errors in media stream sockets. This is always
+	 * enabled (io_glib_add_err_watch), so need only check kernel side here.
+	 */
+
+	if (adapter->so_timestamping != -1)
+		goto done;
+
+	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "hci%u",
+				btd_adapter_get_index(adapter->btd_adapter));
+	ifr.ifr_data = (void *)&cmd;
+	cmd.cmd = ETHTOOL_GET_TS_INFO;
+
+	/* Check kernel reports some support for TX timestamping for L2CAP. If
+	 * yes then kernel version is new enough to have TX timestamping
+	 * available for other socket types too.
+	 */
+	sk = socket(PF_BLUETOOTH, SOCK_SEQPACKET, BTPROTO_L2CAP);
+	if (sk < 0)
+		goto error;
+	if (ioctl(sk, SIOCETHTOOL, &ifr))
+		goto error;
+	close(sk);
+
+	adapter->so_timestamping = cmd.so_timestamping;
+
+done:
+	return adapter->so_timestamping & SOF_TIMESTAMPING_TX_SOFTWARE;
+
+error:
+	if (sk >= 0)
+		close(sk);
+	adapter->so_timestamping = 0;
+	return false;
+}
+
+static const struct {
+	const char *name;
+	bool (*probe)(struct media_adapter *adapter);
+} features[] = {
+	{ "tx-timestamping", probe_tx_timestamping },
+};
+
+static gboolean supported_features(const GDBusPropertyTable *property,
+					DBusMessageIter *iter, void *data)
+{
+	struct media_adapter *adapter = data;
+	DBusMessageIter entry;
+	size_t i;
+
+	dbus_message_iter_open_container(iter, DBUS_TYPE_ARRAY,
+				DBUS_TYPE_STRING_AS_STRING, &entry);
+
+	for (i = 0; i < ARRAY_SIZE(features); ++i)
+		if (features[i].probe(adapter))
+			dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING,
+							&features[i].name);
+
+	dbus_message_iter_close_container(iter, &entry);
+
+	return TRUE;
+}
+
 static const GDBusPropertyTable media_properties[] = {
 	{ "SupportedUUIDs", "as", supported_uuids },
+	{ "SupportedFeatures", "as", supported_features },
 	{ }
 };
 
@@ -3272,6 +3421,7 @@ static void path_free(void *data)
 		release_endpoint(endpoint);
 	}
 
+#ifdef HAVE_AVRCP
 	for (l = adapter->players; l;) {
 		struct media_player *mp = l->data;
 
@@ -3279,6 +3429,7 @@ static void path_free(void *data)
 
 		media_player_destroy(mp);
 	}
+#endif
 
 	adapters = g_slist_remove(adapters, adapter);
 
@@ -3293,6 +3444,7 @@ int media_register(struct btd_adapter *btd_adapter)
 	adapter = g_new0(struct media_adapter, 1);
 	adapter->btd_adapter = btd_adapter_ref(btd_adapter);
 	adapter->apps = queue_new();
+	adapter->so_timestamping = -1;
 
 	if (!g_dbus_register_interface(btd_get_dbus_connection(),
 					adapter_get_path(btd_adapter),
@@ -3336,6 +3488,11 @@ const char *media_endpoint_get_uuid(struct media_endpoint *endpoint)
 	return endpoint->uuid;
 }
 
+bool media_endpoint_get_delay_reporting(struct media_endpoint *endpoint)
+{
+	return endpoint->delay_reporting;
+}
+
 uint8_t media_endpoint_get_codec(struct media_endpoint *endpoint)
 {
 	return endpoint->codec;
@@ -3354,4 +3511,19 @@ bool media_endpoint_is_broadcast(struct media_endpoint *endpoint)
 		return true;
 
 	return false;
+}
+
+const struct media_endpoint *media_endpoint_get_asha(void)
+{
+	/*
+	 * Because ASHA does not require the application to register an
+	 * endpoint, we need a minimal media_endpoint for transport creation to
+	 * work, so let's create one
+	 */
+	static struct media_endpoint asha_endpoint =  {
+		.uuid = ASHA_PROFILE_UUID,
+		.codec = 0x2, /* Currently on G.722 is defined by the spec */
+	};
+
+	return &asha_endpoint;
 }

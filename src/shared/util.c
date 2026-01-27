@@ -4,7 +4,7 @@
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2012-2014  Intel Corporation. All rights reserved.
- *  Copyright 2023 NXP
+ *  Copyright 2023-2024 NXP
  *
  *
  */
@@ -29,7 +29,7 @@
 #include <sys/random.h>
 #endif
 
-#include <lib/bluetooth.h>
+#include <bluetooth/bluetooth.h>
 
 /* define MAX_INPUT for musl */
 #ifndef MAX_INPUT
@@ -173,6 +173,58 @@ ltv_debugger(const struct util_ltv_debugger *debugger, size_t num, uint8_t type)
 	}
 
 	return NULL;
+}
+
+/* Helper to itertate over LTV entries */
+bool util_ltv_foreach(const uint8_t *data, uint8_t len, uint8_t *type,
+			util_ltv_func_t func, void *user_data)
+{
+	struct iovec iov;
+	int i;
+
+	if (!func || !data)
+		return false;
+
+	iov.iov_base = (void *) data;
+	iov.iov_len = len;
+
+	for (i = 0; iov.iov_len; i++) {
+		uint8_t l, t, *v;
+
+		if (!util_iov_pull_u8(&iov, &l))
+			return false;
+
+		if (!l) {
+			func(i, l, 0, NULL, user_data);
+			continue;
+		}
+
+		if (!util_iov_pull_u8(&iov, &t))
+			return false;
+
+		l--;
+
+		if (l) {
+			v = util_iov_pull_mem(&iov, l);
+			if (!v)
+				return false;
+		} else
+			v = NULL;
+
+		if (!type || *type == t)
+			func(i, l, t, v, user_data);
+	}
+
+	return true;
+}
+
+/* Helper to add l,t,v data in an iovec struct */
+void util_ltv_push(struct iovec *output, uint8_t l, uint8_t t, void *v)
+{
+	output->iov_base = realloc(output->iov_base, output->iov_len + l + 2);
+	util_iov_push_u8(output, l + 1);
+	util_iov_push_u8(output, t);
+	util_iov_push_mem(output, l, v);
 }
 
 /* Helper to print debug information of LTV entries */
@@ -484,6 +536,22 @@ void *util_iov_push_u8(struct iovec *iov, uint8_t val)
 	return p;
 }
 
+void *util_iov_append(struct iovec *iov, const void *data, size_t len)
+{
+	iov->iov_base = realloc(iov->iov_base, iov->iov_len + len);
+	return util_iov_push_mem(iov, len, data);
+}
+
+struct iovec *util_iov_new(void *data, size_t len)
+{
+	struct iovec *iov;
+
+	iov = new0(struct iovec, 1);
+	util_iov_append(iov, data, len);
+
+	return iov;
+}
+
 void *util_iov_pull(struct iovec *iov, size_t len)
 {
 	if (!iov)
@@ -673,7 +741,7 @@ static const struct {
 	{ 0x111d, "Imaging Referenced Objects"			},
 	{ 0x111e, "Handsfree"					},
 	{ 0x111f, "Handsfree Audio Gateway"			},
-	{ 0x1120, "Direct Printing Refrence Objects Service"	},
+	{ 0x1120, "Direct Printing Reference Objects Service"	},
 	{ 0x1121, "Reflected UI"				},
 	{ 0x1122, "Basic Printing"				},
 	{ 0x1123, "Printing Status"				},
@@ -787,7 +855,7 @@ static const struct {
 	{ 0x2902, "Client Characteristic Configuration"		},
 	{ 0x2903, "Server Characteristic Configuration"		},
 	{ 0x2904, "Characteristic Format"			},
-	{ 0x2905, "Characteristic Aggregate Formate"		},
+	{ 0x2905, "Characteristic Aggregate Format"		},
 	{ 0x2906, "Valid Range"					},
 	{ 0x2907, "External Report Reference"			},
 	{ 0x2908, "Report Reference"				},
@@ -1508,9 +1576,23 @@ static const struct {
 	{ 0xfd60, "Sercomm Corporation"				},
 	{ 0xfd5f, "Oculus VR, LLC"				},
 	/* SDO defined */
-	{ 0xfffc, "AirFuel Alliance"				},
-	{ 0xfffe, "Alliance for Wireless Power (A4WP)"		},
-	{ 0xfffd, "Fast IDentity Online Alliance (FIDO)"	},
+	{ 0xfccc, "Wi-Fi Easy Connect Specification"		},
+	{ 0xffef, "Wi-Fi Direct Specification"			},
+	{ 0xfff0, "Public Key Open Credential (PKOC)"		},
+	{ 0xfff1, "ICCE Digital Key"				},
+	{ 0xfff2, "Aliro"					},
+	{ 0xfff3, "FiRa Consortium"				},
+	{ 0xfff4, "FiRa Consortium"				},
+	{ 0xfff5, "Car Connectivity Consortium, LLC"		},
+	{ 0xfff6, "Matter Profile ID"				},
+	{ 0xfff7, "Zigbee Direct"				},
+	{ 0xfff8, "Mopria Alliance BLE"				},
+	{ 0xfff9, "FIDO2 Secure Client-To-Authenticator Transport" },
+	{ 0xfffa, "ASTM Remote ID"				},
+	{ 0xfffb, "Direct Thread Commissioning"			},
+	{ 0xfffc, "Wireless Power Transfer (WPT)"		},
+	{ 0xfffd, "Universal Second Factor Authenticator"	},
+	{ 0xfffe, "Wireless Power Transfer"			},
 	{ }
 };
 
@@ -1825,7 +1907,8 @@ char *strstrip(char *str)
 	return str;
 }
 
-bool strisutf8(const char *str, size_t len)
+size_t strnlenutf8(const char *str, size_t len)
+
 {
 	size_t i = 0;
 
@@ -1846,20 +1929,51 @@ bool strisutf8(const char *str, size_t len)
 			size = 4;
 		else
 			/* Invalid UTF-8 sequence */
-			return false;
+			goto done;
 
 		/* Check the following bytes to ensure they have the correct
 		 * format.
 		 */
 		for (size_t j = 1; j < size; ++j) {
-			if (i + j > len || (str[i + j] & 0xC0) != 0x80)
+			if (i + j >= len || (str[i + j] & 0xC0) != 0x80)
 				/* Invalid UTF-8 sequence */
-				return false;
+				goto done;
 		}
 
 		/* Move to the next character */
 		i += size;
 	}
 
+done:
+	return i;
+}
+
+bool strisutf8(const char *str, size_t len)
+{
+	return strnlenutf8(str, len) == len;
+}
+
+bool argsisutf8(int argc, char *argv[])
+{
+	for (int i = 0; i < argc; i++) {
+		if (!strisutf8(argv[i], strlen(argv[i]))) {
+			printf("Invalid character in string: %s\n", argv[i]);
+			return false;
+		}
+	}
+
 	return true;
+}
+
+char *strtoutf8(char *str, size_t len)
+{
+	size_t i = 0;
+
+	i = strnlenutf8(str, len);
+	if (i == len)
+		return str;
+
+	/* Truncate to the longest valid UTF-8 string */
+	memset(str + i, 0, len - i);
+	return str;
 }

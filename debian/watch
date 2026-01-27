@@ -1,2 +1,3 @@
 version=4
-https://www.kernel.org/pub/linux/bluetooth/ .*bluez-([.\d]+)\.tar\.xz
+opts="pgpsigurlmangle=s%.gz$%.sign%, decompress" \
+	https://www.kernel.org/pub/linux/bluetooth/bluez-@ANY_VERSION@\.tar\.gz

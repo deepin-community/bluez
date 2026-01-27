@@ -22,6 +22,7 @@
 #include <string.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <limits.h>
 #include <sys/signalfd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -30,8 +31,8 @@
 
 #include <dbus/dbus.h>
 
-#include "lib/bluetooth.h"
-#include "lib/sdp.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/sdp.h"
 
 #include "gdbus/gdbus.h"
 #include "btio/btio.h"
@@ -44,7 +45,7 @@
 #include "shared/timeout.h"
 #include "shared/queue.h"
 #include "shared/crypto.h"
-#include "lib/uuid.h"
+#include "bluetooth/uuid.h"
 #include "shared/util.h"
 #include "btd.h"
 #include "sdpd.h"
@@ -87,8 +88,10 @@ static const char *supported_options[] = {
 	"TemporaryTimeout",
 	"RefreshDiscovery",
 	"Experimental",
+	"Testing",
 	"KernelExperimental",
 	"RemoteNameRequestRetryDelay",
+	"FilterDiscoverable",
 	NULL
 };
 
@@ -107,6 +110,7 @@ static const char *br_options[] = {
 };
 
 static const char *le_options[] = {
+	"CentralAddressResolution",
 	"MinAdvertisementInterval",
 	"MaxAdvertisementInterval",
 	"MultiAdvertisementRotationInterval",
@@ -145,6 +149,8 @@ static const char *gatt_options[] = {
 	"KeySize",
 	"ExchangeMTU",
 	"Channels",
+	"Client",
+	"ExportClaimedServices",
 	NULL
 };
 
@@ -159,6 +165,12 @@ static const char *csip_options[] = {
 static const char *avdtp_options[] = {
 	"SessionMode",
 	"StreamMode",
+	NULL
+};
+
+static const char *avrcp_options[] = {
+	"VolumeWithoutTarget",
+	"VolumeCategory",
 	NULL
 };
 
@@ -178,6 +190,7 @@ static const struct group_table {
 	{ "GATT",	gatt_options },
 	{ "CSIS",	csip_options },
 	{ "AVDTP",	avdtp_options },
+	{ "AVRCP",	avrcp_options },
 	{ "AdvMon",	advmon_options },
 	{ }
 };
@@ -452,21 +465,25 @@ static bool parse_config_int(GKeyFile *config, const char *group,
 	tmp = strtol(str, &endptr, 0);
 	if (!endptr || *endptr != '\0') {
 		error("%s.%s = %s is not integer", group, key, str);
+		g_free(str);
 		return false;
 	}
 
 	if (tmp < min) {
+		g_free(str);
 		warn("%s.%s = %zu is out of range (< %zu)", group, key, tmp,
 									min);
 		return false;
 	}
 
 	if (tmp > max) {
+		g_free(str);
 		warn("%s.%s = %zu is out of range (> %zu)", group, key, tmp,
 									max);
 		return false;
 	}
 
+	g_free(str);
 	if (val)
 		*val = tmp;
 
@@ -485,7 +502,7 @@ static void parse_mode_config(GKeyFile *config, const char *group,
 				const struct config_param *params,
 				size_t params_len)
 {
-	uint16_t i;
+	size_t i;
 
 	if (!config)
 		return;
@@ -567,6 +584,11 @@ static void parse_br_config(GKeyFile *config)
 static void parse_le_config(GKeyFile *config)
 {
 	static const struct config_param params[] = {
+		{ "CentralAddressResolution",
+		  &btd_opts.defaults.le.addr_resolution,
+		  sizeof(btd_opts.defaults.le.addr_resolution),
+		  0,
+		  1},
 		{ "MinAdvertisementInterval",
 		  &btd_opts.defaults.le.min_adv_interval,
 		  sizeof(btd_opts.defaults.le.min_adv_interval),
@@ -694,9 +716,12 @@ static bool match_experimental(const void *data, const void *match_data)
 bool btd_kernel_experimental_enabled(const char *uuid)
 {
 	if (!btd_opts.kernel)
-		false;
+		return false;
 
-	return queue_find(btd_opts.kernel, match_experimental, uuid);
+	if (queue_find(btd_opts.kernel, match_experimental, uuid))
+		return true;
+
+	return false;
 }
 
 static const char *valid_uuids[] = {
@@ -1032,10 +1057,14 @@ static void parse_general(GKeyFile *config)
 	parse_secure_conns(config);
 	parse_config_bool(config, "General", "Experimental",
 						&btd_opts.experimental);
+	parse_config_bool(config, "General", "Testing",
+						&btd_opts.testing);
 	parse_kernel_exp(config);
 	parse_config_u32(config, "General", "RemoteNameRequestRetryDelay",
 					&btd_opts.name_request_retry_delay,
 					0, UINT32_MAX);
+	parse_config_bool(config, "General", "FilterDiscoverable",
+						&btd_opts.filter_discoverable);
 }
 
 static void parse_gatt_cache(GKeyFile *config)
@@ -1050,6 +1079,33 @@ static void parse_gatt_cache(GKeyFile *config)
 	g_free(str);
 }
 
+static enum bt_gatt_export_t parse_gatt_export_str(const char *str)
+{
+	if (!strcmp(str, "no") || !strcmp(str, "false") ||
+				!strcmp(str, "off")) {
+		return BT_GATT_EXPORT_OFF;
+	} else if (!strcmp(str, "read-only")) {
+		return BT_GATT_EXPORT_READ_ONLY;
+	} else if (!strcmp(str, "read-write")) {
+		return BT_GATT_EXPORT_READ_WRITE;
+	}
+
+	DBG("Invalid value for ExportClaimedServices=%s", str);
+	return BT_GATT_EXPORT_READ_ONLY;
+}
+
+static void parse_gatt_export(GKeyFile *config)
+{
+	char *str = NULL;
+
+	parse_config_string(config, "GATT", "ExportClaimedServices", &str);
+	if (!str)
+		return;
+
+	btd_opts.gatt_export = parse_gatt_export_str(str);
+	g_free(str);
+}
+
 static void parse_gatt(GKeyFile *config)
 {
 	parse_gatt_cache(config);
@@ -1057,7 +1113,9 @@ static void parse_gatt(GKeyFile *config)
 	parse_config_u16(config, "GATT", "ExchangeMTU", &btd_opts.gatt_mtu,
 				BT_ATT_DEFAULT_LE_MTU, BT_ATT_MAX_LE_MTU);
 	parse_config_u8(config, "GATT", "Channels", &btd_opts.gatt_channels,
-				1, 5);
+				1, 6);
+	parse_config_bool(config, "GATT", "Client", &btd_opts.gatt_client);
+	parse_gatt_export(config);
 }
 
 static void parse_csis_sirk(GKeyFile *config)
@@ -1130,6 +1188,16 @@ static void parse_avdtp(GKeyFile *config)
 	parse_avdtp_stream_mode(config);
 }
 
+static void parse_avrcp(GKeyFile *config)
+{
+	parse_config_bool(config, "AVRCP",
+		"VolumeWithoutTarget",
+		&btd_opts.avrcp.volume_without_target);
+	parse_config_bool(config, "AVRCP",
+		"VolumeCategory",
+		&btd_opts.avrcp.volume_category);
+}
+
 static void parse_advmon(GKeyFile *config)
 {
 	parse_config_u8(config, "AdvMon", "RSSISamplingPeriod",
@@ -1153,6 +1221,7 @@ static void parse_config(GKeyFile *config)
 	parse_gatt(config);
 	parse_csis(config);
 	parse_avdtp(config);
+	parse_avrcp(config);
 	parse_advmon(config);
 }
 
@@ -1173,10 +1242,12 @@ static void init_defaults(void)
 	btd_opts.refresh_discovery = TRUE;
 	btd_opts.name_request_retry_delay = DEFAULT_NAME_REQUEST_RETRY_DELAY;
 	btd_opts.secure_conn = SC_ON;
+	btd_opts.filter_discoverable = true;
 
 	btd_opts.defaults.num_entries = 0;
 	btd_opts.defaults.br.page_scan_type = 0xFFFF;
 	btd_opts.defaults.br.scan_type = 0xFFFF;
+	btd_opts.defaults.le.addr_resolution = 0x01;
 	btd_opts.defaults.le.enable_advmon_interleave_scan = 0xFF;
 
 	if (sscanf(VERSION, "%hhu.%hhu", &major, &minor) != 2)
@@ -1190,9 +1261,14 @@ static void init_defaults(void)
 	btd_opts.gatt_cache = BT_GATT_CACHE_ALWAYS;
 	btd_opts.gatt_mtu = BT_ATT_MAX_LE_MTU;
 	btd_opts.gatt_channels = 1;
+	btd_opts.gatt_client = true;
+	btd_opts.gatt_export = BT_GATT_EXPORT_READ_ONLY;
 
 	btd_opts.avdtp.session_mode = BT_IO_MODE_BASIC;
 	btd_opts.avdtp.stream_mode = BT_IO_MODE_BASIC;
+
+	btd_opts.avrcp.volume_without_target = false;
+	btd_opts.avrcp.volume_category = true;
 
 	btd_opts.advmon.rssi_sampling_period = 0xFF;
 	btd_opts.csis.encrypt = true;
@@ -1290,6 +1366,11 @@ static void disconnected_dbus(DBusConnection *conn, void *data)
 	mainloop_quit();
 }
 
+static void dbus_debug(const char *str, void *data)
+{
+	DBG_IDX(0xffff, "%s", str);
+}
+
 static int connect_dbus(void)
 {
 	DBusConnection *conn;
@@ -1311,6 +1392,7 @@ static int connect_dbus(void)
 
 	g_dbus_set_disconnect_function(conn, disconnected_dbus, NULL, NULL);
 	g_dbus_attach_object_manager(conn);
+	g_dbus_set_debug(dbus_debug, NULL, NULL);
 
 	return 0;
 }
@@ -1340,6 +1422,8 @@ static GOptionEntry options[] = {
 				"Provide deprecated command line interfaces" },
 	{ "experimental", 'E', 0, G_OPTION_ARG_NONE, &btd_opts.experimental,
 				"Enable experimental D-Bus interfaces" },
+	{ "testing", 'T', 0, G_OPTION_ARG_NONE, &btd_opts.testing,
+				"Enable testing D-Bus interfaces" },
 	{ "kernel", 'K', G_OPTION_FLAG_OPTIONAL_ARG, G_OPTION_ARG_CALLBACK,
 				parse_kernel_experimental,
 				"Enable kernel experimental features" },
@@ -1405,6 +1489,9 @@ int main(int argc, char *argv[])
 
 	if (btd_opts.experimental)
 		gdbus_flags = G_DBUS_FLAG_ENABLE_EXPERIMENTAL;
+
+	if (btd_opts.testing)
+		gdbus_flags |= G_DBUS_FLAG_ENABLE_TESTING;
 
 	g_dbus_set_flags(gdbus_flags);
 

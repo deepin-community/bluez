@@ -28,18 +28,20 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 
-#include "lib/bluetooth.h"
-#include "lib/hci.h"
-#include "lib/hci_lib.h"
-#include "lib/rfcomm.h"
-#include "lib/sdp.h"
-#include "lib/sdp_lib.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/hci.h"
+#include "bluetooth/hci_lib.h"
+#include "bluetooth/rfcomm.h"
+#include "bluetooth/sdp.h"
+#include "bluetooth/sdp_lib.h"
 
 #include "src/shared/util.h"
 
 #ifndef SIOCGSTAMP_OLD
 #define SIOCGSTAMP_OLD SIOCGSTAMP
 #endif
+
+#define MAX_DATA_SIZE 0x40000000
 
 /* Test modes */
 enum {
@@ -500,7 +502,7 @@ static void recv_mode(int sk)
 					timestamp = 0;
 					memset(ts, 0, sizeof(ts));
 				} else {
-					sprintf(ts, "[%lld.%lld] ",
+					snprintf(ts, sizeof(ts), "[%lld.%lld] ",
 							(long long)tv.tv_sec,
 							(long long)tv.tv_usec);
 				}
@@ -510,7 +512,8 @@ static void recv_mode(int sk)
 			/* Check sequence */
 			sq = btohl(*(uint32_t *) buf);
 			if (seq != sq) {
-				syslog(LOG_INFO, "seq missmatch: %d -> %d", seq, sq);
+				syslog(LOG_INFO, "seq mismatch: %d -> %d", seq,
+					sq);
 				seq = sq;
 			}
 			seq++;
@@ -518,14 +521,17 @@ static void recv_mode(int sk)
 			/* Check length */
 			l = btohs(*(uint16_t *) (buf + 4));
 			if (r != l) {
-				syslog(LOG_INFO, "size missmatch: %d -> %d", r, l);
+				syslog(LOG_INFO, "size mismatch: %d -> %d", r,
+					l);
 				continue;
 			}
 
 			/* Verify data */
 			for (i = 6; i < r; i++) {
 				if (buf[i] != 0x7f)
-					syslog(LOG_INFO, "data missmatch: byte %d 0x%2.2x", i, buf[i]);
+					syslog(LOG_INFO,
+					"data mismatch: byte %d 0x%2.2x", i,
+					buf[i]);
 			}
 #endif
 			total += r;
@@ -554,7 +560,8 @@ static void do_send(int sk)
 			exit(1);
 		}
 		len = read(fd, buf, data_size);
-		send(sk, buf, len, 0);
+		if (len > 0)
+			send(sk, buf, len, 0);
 		close(fd);
 		return;
 	} else {
@@ -739,6 +746,9 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'a':
+			if (!optarg)
+				break;
+
 			mode = AUTO;
 
 			if (!strncasecmp(optarg, "hci", 3))
@@ -748,10 +758,14 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'b':
-			data_size = atoi(optarg);
+			if (optarg && atoi(optarg) < MAX_DATA_SIZE)
+				data_size = atoi(optarg);
 			break;
 
 		case 'i':
+			if (!optarg)
+				break;
+
 			if (!strncasecmp(optarg, "hci", 3))
 				hci_devba(atoi(optarg + 3), &bdaddr);
 			else
@@ -759,10 +773,14 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'P':
-			channel = atoi(optarg);
+			if (optarg)
+				channel = atoi(optarg);
 			break;
 
 		case 'U':
+			if (!optarg)
+				break;
+
 			if (!strcasecmp(optarg, "spp"))
 				uuid = SERIAL_PORT_SVCLASS_ID;
 			else if (!strncasecmp(optarg, "0x", 2))
@@ -788,11 +806,13 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'L':
-			linger = atoi(optarg);
+			if (optarg)
+				linger = atoi(optarg);
 			break;
 
 		case 'W':
-			defer_setup = atoi(optarg);
+			if (optarg)
+				defer_setup = atoi(optarg);
 			break;
 
 		case 'B':
@@ -804,19 +824,23 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'N':
-			num_frames = atoi(optarg);
+			if (optarg)
+				num_frames = atoi(optarg);
 			break;
 
 		case 'C':
-			count = atoi(optarg);
+			if (optarg)
+				count = atoi(optarg);
 			break;
 
 		case 'D':
-			delay = atoi(optarg) * 1000;
+			if (optarg)
+				delay = atoi(optarg) * 1000;
 			break;
 
 		case 'Y':
-			priority = atoi(optarg);
+			if (optarg)
+				priority = atoi(optarg);
 			break;
 
 		case 'T':

@@ -7,10 +7,6 @@ Files: *
 Copyright: 2008-2015, Intel Corporation.
 License: GPL-2+
 
-Files: android/*
-Copyright: 2012-2016, Intel Corporation.
-License: LGPL-2.1+
-
 Files: test/*
 Copyright: 2010-2011, ST-Ericsson SA
 License: LGPL-2.1+
@@ -173,8 +169,8 @@ Files: gdbus/client.c
  gdbus/object.c
  gdbus/polkit.c
  gdbus/watch.c
- lib/cmtp.h
- lib/hidp.h
+ lib/bluetooth/cmtp.h
+ lib/bluetooth/hidp.h
  obexd/client/driver.c
  obexd/client/driver.h
  obexd/client/ftp.c
@@ -259,9 +255,7 @@ Files: gdbus/client.c
 Copyright: 2002-2012, Marcel Holtmann <marcel@holtmann.org>
 License: GPL-2+
 
-Files: android/log.c
- android/sco.c
- client/advertising.c
+Files: client/advertising.c
  client/advertising.h
  client/agent.c
  client/agent.h
@@ -304,7 +298,6 @@ Files: android/log.c
  tools/obex-client-tool.c
  tools/obex-server-tool.c
  tools/obexctl.c
- tools/parser/amp.c
  tools/parser/avrcp.c
  tools/parser/smp.c
  tools/rfcomm-tester.c
@@ -332,9 +325,7 @@ Files: android/log.c
 Copyright: 2008-2016, Intel Corporation.
 License: GPL-2+
 
-Files: emulator/amp.c
- emulator/amp.h
- emulator/btdev.c
+Files: emulator/btdev.c
  emulator/btdev.h
  emulator/bthost.c
  emulator/bthost.h
@@ -396,71 +387,7 @@ Copyright: 2002-2010, Marcel Holtmann <marcel@holtmann.org>
   2011-2014, Intel Corporation
 License: LGPL-2.1+
 
-Files: android/bluetoothd-wrapper.c
- android/client/haltest.c
- android/client/history.c
- android/client/history.h
- android/client/if-audio.c
- android/client/if-av-sink.c
- android/client/if-av.c
- android/client/if-bt.c
- android/client/if-gatt.c
- android/client/if-hf-client.c
- android/client/if-hf.c
- android/client/if-hh.c
- android/client/if-hl.c
- android/client/if-main.h
- android/client/if-mce.c
- android/client/if-pan.c
- android/client/if-rc-ctrl.c
- android/client/if-rc.c
- android/client/if-sco.c
- android/client/if-sock.c
- android/client/pollhandler.c
- android/client/pollhandler.h
- android/client/tabcompletion.c
- android/client/terminal.c
- android/client/terminal.h
- android/hal-a2dp-sink.c
- android/hal-a2dp.c
- android/hal-audio-sbc.c
- android/hal-audio.c
- android/hal-audio.h
- android/hal-avrcp-ctrl.c
- android/hal-avrcp.c
- android/hal-bluetooth.c
- android/hal-gatt.c
- android/hal-handsfree-client.c
- android/hal-handsfree.c
- android/hal-health.c
- android/hal-hidhost.c
- android/hal-ipc.c
- android/hal-ipc.h
- android/hal-log.h
- android/hal-map-client.c
- android/hal-pan.c
- android/hal-sco.c
- android/hal-socket.c
- android/hal-utils.c
- android/hal-utils.h
- android/hal.h
- android/tester-a2dp.c
- android/tester-avrcp.c
- android/tester-bluetooth.c
- android/tester-gatt.c
- android/tester-hdp.c
- android/tester-hidhost.c
- android/tester-main.c
- android/tester-map-client.c
- android/tester-pan.c
- android/tester-socket.c
-Copyright: 2013-2014, Intel Corporation
-License: Apache-2.0
-
-Files: android/avctp.h
- android/avdtp.c
- android/avdtp.h
- attrib/att.c
+Files: attrib/att.c
  attrib/att.h
  attrib/gatt.c
  attrib/gatt.h
@@ -469,9 +396,9 @@ Files: android/avctp.h
  attrib/gatttool.c
  btio/btio.c
  btio/btio.h
- lib/mgmt.h
- lib/uuid.c
- lib/uuid.h
+ lib/bluetooth/mgmt.h
+ lib/bluetooth/uuid.c
+ lib/bluetooth/uuid.h
  obexd/plugins/bluetooth.c
  obexd/plugins/ftp.c
  obexd/plugins/opp.c
@@ -517,9 +444,7 @@ Files: emulator/b1ee.c
  obexd/plugins/filesystem.c
  obexd/plugins/pbap.c
  obexd/plugins/phonebook-dummy.c
- obexd/plugins/syncevolution.c
  tools/advtest.c
- tools/amptest.c
  tools/btattach.c
  tools/btconfig.c
  tools/btinfo.c
@@ -534,31 +459,7 @@ Copyright: 2004-2010, Marcel Holtmann <marcel@holtmann.org>
   2007-2010, Marcel Holtmann <marcel@holtmann.org>
 License: GPL-2+
 
-Files: android/hardware/audio.h
- android/hardware/audio_effect.h
- android/hardware/bluetooth.h
- android/hardware/bt_av.h
- android/hardware/bt_gatt.h
- android/hardware/bt_gatt_client.h
- android/hardware/bt_gatt_server.h
- android/hardware/bt_gatt_types.h
- android/hardware/bt_hf.h
- android/hardware/bt_hf_client.h
- android/hardware/bt_hh.h
- android/hardware/bt_hl.h
- android/hardware/bt_mce.h
- android/hardware/bt_pan.h
- android/hardware/bt_rc.h
- android/hardware/bt_sock.h
- android/hardware/hardware.c
- android/hardware/hardware.h
- android/system/audio.h
-Copyright: 2008, The Android Open Source Project
-  2011-2014, The Android Open Source Project
-License: Apache-2.0
-
-Files: android/avdtptest.c
- obexd/client/bluetooth.c
+Files: obexd/client/bluetooth.c
  obexd/client/bluetooth.h
  obexd/client/opp.c
  obexd/client/opp.h
@@ -580,9 +481,9 @@ Copyright: 2011, Intel Corporation
   2012-2015, Intel Corporation
 License: GPL-2+
 
-Files: lib/bnep.h
- lib/rfcomm.h
- lib/sco.h
+Files: lib/bluetooth/bnep.h
+ lib/bluetooth/rfcomm.h
+ lib/bluetooth/sco.h
  tools/hcidump.c
  tools/hcisecfilter.c
  tools/parser/hci.c
@@ -597,11 +498,11 @@ Copyright: 2000-2002, Maxim Krasnyansky <maxk@qualcomm.com>
   2002-2011, Marcel Holtmann <marcel@holtmann.org>
 License: GPL-2+
 
-Files: lib/bluetooth.c
- lib/bluetooth.h
- lib/hci.c
- lib/hci.h
- lib/hci_lib.h
+Files: lib/bluetooth/bluetooth.c
+ lib/bluetooth/bluetooth.h
+ lib/bluetooth/hci.c
+ lib/bluetooth/hci.h
+ lib/bluetooth/hci_lib.h
  src/btd.h
  src/main.c
  tools/hciattach.c
@@ -634,7 +535,6 @@ Files: attrib/gatttool.h
  attrib/utils.c
  obexd/plugins/mas.c
  obexd/plugins/messages-dummy.c
- obexd/plugins/messages-tracker.c
  obexd/plugins/messages.h
  obexd/plugins/phonebook-tracker.c
  obexd/src/manager.h
@@ -668,9 +568,9 @@ Files: profiles/health/hdp.c
 Copyright: 2010, GSyC/LibreSoft, Universidad Rey Juan Carlos.
 License: GPL-2+
 
-Files: lib/sdp.c
- lib/sdp.h
- lib/sdp_lib.h
+Files: lib/bluetooth/sdp.c
+ lib/bluetooth/sdp.h
+ lib/bluetooth/sdp_lib.h
  src/sdpd-database.c
  src/sdpd-request.c
  src/sdpd-server.c
@@ -703,7 +603,7 @@ Copyright: 2012-2013, BMW Car IT GmbH.
   2013, BMW Car IT GmbH.
 License: GPL-2+
 
-Files: profiles/input/suspend-dummy.c
+Files:
  profiles/input/suspend-none.c
  profiles/input/suspend.h
  profiles/scanparam/scan.c
@@ -728,12 +628,6 @@ Copyright: 2015-2016, Felipe F. Tonello <eu@felipetonello.com>
   2016, ROLI Ltd.
 License: GPL-2+
 
-Files: android/compat/readline/history.h
- android/compat/readline/readline.h
-Copyright: 1987-2011, Free Software Foundation, Inc.
-  1989, 1991, Free Software Foundation, Inc.
-License: GPL-2+
-
 Files: client/adv_monitor.c
  client/adv_monitor.h
  src/battery.c
@@ -747,15 +641,6 @@ Files: profiles/sap/main.c
  tools/gatt-service.c
 Copyright: 2010, Instituto Nokia de Tecnologia - INdT
   2014, Instituto Nokia de Tecnologia - INdT
-License: GPL-2+
-
-Files: android/avctp.c
- profiles/audio/avctp.c
- profiles/audio/avrcp.c
- profiles/audio/control.c
-Copyright: 2004-2010, Marcel Holtmann <marcel@holtmann.org>
-  2006-2010, Nokia Corporation
-  2011, Texas Instruments, Inc.
 License: GPL-2+
 
 Files: src/shared/ecc.c
@@ -780,22 +665,12 @@ Files: monitor/a2dp.h
 Copyright: 2015, Andrzej Kaczmarek <andrzej.kaczmarek@codecoup.pl>
 License: LGPL-2.1+
 
-Files: android/compat/wordexp.h
-Copyright: 1991-2013, Free Software Foundation, Inc.
-License: LGPL-2.1+
-
 Files: plugins/admin.c
  src/adv_monitor.c
  src/adv_monitor.h
 Copyright: 2020, Google LLC
   2021, Google LLC
 License: LGPL-2.1+
-
-Files: android/audio_utils/resampler.c
- android/audio_utils/resampler.h
-Copyright: 2008, The Android Open-Source Project
-  2011, The Android Open-Source Project
-License: Apache-2.0
 
 Files: plugins/sixaxis.c
  profiles/input/sixaxis.h
@@ -808,13 +683,6 @@ License: GPL-2+
 Files: obexd/client/map.c
  obexd/client/map.h
 Copyright: 2011, Bartosz Szatkowski <bulislaw@linux.com> for Comarch
-License: GPL-2+
-
-Files: lib/a2mp.h
- lib/amp.h
-Copyright: 2010-2011, Code Aurora Forum.
-  2012, Code Aurora Forum.
-  2012, Intel Corporation.
 License: GPL-2+
 
 Files: src/error.c
@@ -891,10 +759,6 @@ Copyright: 2002-2010, Marcel Holtmann <marcel@holtmann.org>
   2011-2014, Intel Corporation
 License: LGPL-2.1+
 
-Files: android/hal-audio-aptx.c
-Copyright: 2014, Tieto Poland
-License: Apache-2.0
-
 Files: tools/parser/att.c
 Copyright: 2011, AndrÃ© Dieb Martins <andre.dieb@gmail.com>
 License: GPL-2+
@@ -908,7 +772,7 @@ Copyright: 2005-2010, Marcel Holtmann <marcel@holtmann.org>
   2010, Code Aurora Forum.
 License: GPL-2+
 
-Files: lib/l2cap.h
+Files: lib/bluetooth/l2cap.h
 Copyright: 2000-2001, Qualcomm Incorporated
   2002-2003, Maxim Krasnyansky <maxk@qualcomm.com>
   2002-2010, Marcel Holtmann <marcel@holtmann.org>
@@ -919,10 +783,6 @@ Files: tools/btmon-logger.c
 Copyright: 2002-2010, Marcel Holtmann <marcel@holtmann.org>
   2011-2014, Intel Corporation
   2017-2018, Codecoup
-License: GPL-2+
-
-Files: plugins/wiimote.c
-Copyright: 2011-2012, David Herrmann <dh.herrmann@googlemail.com>
 License: GPL-2+
 
 Files: obexd/plugins/phonebook-ebook.c
@@ -1040,11 +900,6 @@ License: GPL-2+
 Files: monitor/a2dp.c
 Copyright: 2015, Andrzej Kaczmarek <andrzej.kaczmarek@codecoup.pl>
   2018, Pali RohÃ¡r <pali.rohar@gmail.com>
-License: LGPL-2.1+
-
-Files: android/health.c
-Copyright: 2010, GSyC/LibreSoft, Universidad Rey Juan Carlos.
-  2014, Intel Corporation.
 License: LGPL-2.1+
 
 Files: profiles/audio/a2dp-codecs.h

@@ -12,9 +12,13 @@
 #include <config.h>
 #endif
 
+#include <time.h>
+
 #include <ell/ell.h>
 
+#include "mesh/crypto.h"
 #include "mesh/mesh.h"
+#include "mesh/provision.h"
 #include "mesh/error.h"
 #include "mesh/dbus.h"
 #include "mesh/agent.h"
@@ -61,7 +65,7 @@ struct oob_info {
 	uint16_t mask;
 };
 
-static struct prov_action cap_table[] = {
+static const struct prov_action cap_table[] = {
 	{"blink", 0x0001, 0x0000, 1},
 	{"beep", 0x0002, 0x0000, 1},
 	{"vibrate", 0x0004, 0x0000, 1},
@@ -73,7 +77,7 @@ static struct prov_action cap_table[] = {
 	{"in-alpha", 0x0000, 0x0008, 8}
 };
 
-static struct oob_info oob_table[] = {
+static const struct oob_info oob_table[] = {
 	{"other", 0x0001},
 	{"uri", 0x0002},
 	{"machine-code-2d", 0x0004},
@@ -166,10 +170,19 @@ static bool parse_properties(struct mesh_agent *agent,
 			if (!parse_prov_caps(&agent->caps, &variant))
 				return false;
 		} else if (!strcmp(key, "URI")) {
+			uint8_t salt[16];
+
 			if (!l_dbus_message_iter_get_variant(&variant, "s",
 								&uri_string))
 				return false;
-			/* TODO: compute hash */
+
+			mesh_crypto_s1(uri_string, strlen(uri_string), salt);
+			agent->caps.uri_hash =
+				salt[0] << 24 |
+				salt[1] << 16 |
+				salt[2] <<  8 |
+				salt[3] <<  0;
+			agent->caps.oob_info |= OOB_INFO_URI_HASH;
 		} else if (!strcmp(key, "OutOfBandInfo")) {
 			if (!parse_oob_info(&agent->caps, &variant))
 				return false;

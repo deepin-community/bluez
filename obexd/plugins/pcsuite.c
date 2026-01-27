@@ -231,7 +231,7 @@ static void pcsuite_disconnect(struct obex_session *os, void *user_data)
 	g_free(pcsuite);
 }
 
-static struct obex_service_driver pcsuite = {
+static const struct obex_service_driver pcsuite = {
 	.name = "Nokia OBEX PC Suite Services",
 	.service = OBEX_PCSUITE,
 	.channel = PCSUITE_CHANNEL,
@@ -322,7 +322,7 @@ static gboolean send_backup_dbus_message(const char *oper,
 
 	file_size = size ? *size : 0;
 
-	conn = g_dbus_setup_bus(DBUS_BUS_SESSION, NULL, NULL);
+	conn = obex_setup_dbus_connection(NULL, NULL);
 
 	if (conn == NULL)
 		return FALSE;
@@ -376,6 +376,7 @@ static void *backup_open(const char *name, int oflag, mode_t mode,
 	obj->error_code = 0;
 
 	if (send_backup_dbus_message("open", obj, size) == FALSE) {
+		g_free(obj->cmd);
 		g_free(obj);
 		obj = NULL;
 	}
@@ -446,7 +447,7 @@ static ssize_t backup_write(void *object, const void *buf, size_t count)
 	if (obj->fd != -1) {
 		ret = write(obj->fd, buf, count);
 
-		DBG("cmd = %s, WRITTING", obj->cmd);
+		DBG("cmd = %s, WRITING", obj->cmd);
 
 		if (ret < 0) {
 			error("backup: cmd = %s", obj->cmd);
@@ -467,7 +468,7 @@ static int backup_flush(void *object)
 	return 0;
 }
 
-static struct obex_mime_type_driver backup = {
+static const struct obex_mime_type_driver backup = {
 	.target = FTP_TARGET,
 	.target_size = TARGET_SIZE,
 	.mimetype = "application/vnd.nokia-backup",

@@ -87,6 +87,11 @@ skip_auth:
 
 	err = obex_put_stream_start(os, path);
 
+	if (err == 0 && obex_get_size(os) != OBJECT_SIZE_DELETE &&
+				obex_get_size(os) != OBJECT_SIZE_UNKNOWN) {
+		manager_emit_transfer_property(user_data, "Size");
+	}
+
 	g_free(path);
 
 	if (err < 0)
@@ -155,7 +160,7 @@ static void opp_reset(struct obex_session *os, void *user_data)
 	manager_emit_transfer_completed(user_data);
 }
 
-static struct obex_service_driver driver = {
+static const struct obex_service_driver driver = {
 	.name = "Object Push server",
 	.service = OBEX_OPP,
 	.connect = opp_connect,

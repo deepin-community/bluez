@@ -1,0 +1,21 @@
+From: Sebastien Bacher <seb128@ubuntu.com>
+Date: Fri, 3 Apr 2020 08:47:01 +0200
+Subject: restart the service on errors
+
+---
+ src/bluetooth.service.in | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/bluetooth.service.in b/src/bluetooth.service.in
+index 8ebe89b..add119e 100644
+--- a/src/bluetooth.service.in
++++ b/src/bluetooth.service.in
+@@ -9,7 +9,7 @@ BusName=org.bluez
+ ExecStart=@PKGLIBEXECDIR@/bluetoothd
+ NotifyAccess=main
+ #WatchdogSec=10
+-#Restart=on-failure
++Restart=on-failure
+ CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+ LimitNPROC=1
+ 

@@ -1,0 +1,27 @@
+From: Simon Long <simon@raspberrypi.org>
+Date: Wed, 5 Apr 2017 00:00:00 +0000
+Subject: Patches for loading the bcm43xx firmware
+
+Forwarded: https://patchwork.kernel.org/project/bluetooth/patch/20201218190609.107898-4-dave.jones@canonical.com/
+Last-Update: 2022-12-06
+
+Disables setting the UART interface speed *before* loading the firmware
+(a later call sets the speed of the interface as requested).
+---
+ tools/hciattach_bcm43xx.c | 3 ---
+ 1 file changed, 3 deletions(-)
+
+diff --git a/tools/hciattach_bcm43xx.c b/tools/hciattach_bcm43xx.c
+index 9df2468..acf5da0 100644
+--- a/tools/hciattach_bcm43xx.c
++++ b/tools/hciattach_bcm43xx.c
+@@ -352,9 +352,6 @@ int bcm43xx_init(int fd, int def_speed, int speed, struct termios *ti,
+ 	if (bcm43xx_locate_patch(HCI_TO_STR(FIRMWARE_DIR), chip_name, fw_path)) {
+ 		fprintf(stderr, "Patch not found, continue anyway\n");
+ 	} else {
+-		if (bcm43xx_set_speed(fd, ti, speed))
+-			return -1;
+-
+ 		if (bcm43xx_load_firmware(fd, fw_path))
+ 			return -1;
+ 

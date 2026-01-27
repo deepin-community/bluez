@@ -5,7 +5,7 @@
  *
  *  Copyright (C) 2006-2010  Nokia Corporation
  *  Copyright (C) 2004-2010  Marcel Holtmann <marcel@holtmann.org>
- *
+ *  Copyright 2024 NXP
  *
  */
 
@@ -22,15 +22,16 @@
 #include <errno.h>
 #include <dirent.h>
 #include <time.h>
+#include <limits.h>
 #include <sys/stat.h>
 
 #include <glib.h>
 #include <dbus/dbus.h>
 
-#include "lib/bluetooth.h"
-#include "lib/sdp.h"
-#include "lib/sdp_lib.h"
-#include "lib/uuid.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/sdp.h"
+#include "bluetooth/sdp_lib.h"
+#include "bluetooth/uuid.h"
 
 #include "gdbus/gdbus.h"
 
@@ -44,7 +45,7 @@
 #include "src/shared/ad.h"
 #include "src/shared/timeout.h"
 #include "btio/btio.h"
-#include "lib/mgmt.h"
+#include "bluetooth/mgmt.h"
 #include "attrib/att.h"
 #include "btd.h"
 #include "adapter.h"
@@ -65,6 +66,7 @@
 #include "eir.h"
 #include "settings.h"
 #include "set.h"
+#include "bearer.h"
 
 #define DISCONNECT_TIMER	2
 #define DISCOVERY_TIMER		1
@@ -151,6 +153,7 @@ struct svc_callback {
 
 /* Per-bearer (LE or BR/EDR) device state */
 struct bearer_state {
+	bool prefer;
 	bool paired;
 	bool bonded;
 	bool connected;
@@ -158,6 +161,7 @@ struct bearer_state {
 	bool initiator;
 	bool connectable;
 	time_t last_seen;
+	time_t last_used;
 };
 
 struct ltk_info {
@@ -169,6 +173,7 @@ struct ltk_info {
 struct csrk_info {
 	uint8_t key[16];
 	uint32_t counter;
+	bool auth;
 };
 
 struct sirk_info {
@@ -185,6 +190,13 @@ enum {
 	WAKE_FLAG_DISABLED,
 };
 
+enum {
+	PREFER_LAST_USED = 0,
+	PREFER_LE,
+	PREFER_BREDR,
+	PREFER_LAST_SEEN,
+};
+
 struct btd_device {
 	int ref_count;
 
@@ -192,10 +204,11 @@ struct btd_device {
 	uint8_t		conn_bdaddr_type;
 	bdaddr_t	bdaddr;
 	uint8_t		bdaddr_type;
-	bool		rpa;
+	bool		privacy;
+	uint8_t		*irk;
 	char		*path;
-	bool		bredr;
-	bool		le;
+	struct btd_bearer *bredr;
+	struct btd_bearer *le;
 	bool		pending_paired;		/* "Paired" waiting for SDP */
 	bool		svc_refreshed;
 	bool		refresh_discovery;
@@ -213,6 +226,7 @@ struct btd_device {
 	GDBusPendingPropertySet wake_id;
 
 	uint32_t	supported_flags;
+	uint32_t	pending_flags;
 	uint32_t	current_flags;
 	GSList		*svc_callbacks;
 	GSList		*eir_uuids;
@@ -235,12 +249,14 @@ struct btd_device {
 	GSList		*watches;		/* List of disconnect_data */
 	bool		temporary;
 	bool		connectable;
+	bool		cable_pairing;
 	unsigned int	disconn_timer;
 	unsigned int	discov_timer;
 	unsigned int	temporary_timer;	/* Temporary/disappear timer */
 	struct browse_req *browse;		/* service discover request */
 	struct bonding_req *bonding;
 	struct authentication_req *authr;	/* authentication request */
+	uint8_t		bonding_status;
 	GSList		*disconnects;		/* disconnects message */
 	DBusMessage	*connect;		/* connect message */
 	DBusMessage	*disconnect;		/* disconnect message */
@@ -263,6 +279,7 @@ struct btd_device {
 
 	struct btd_gatt_client *client_dbus;
 
+	uint8_t prefer_bearer;
 	struct bearer_state bredr_state;
 	struct bearer_state le_state;
 
@@ -316,6 +333,8 @@ bool btd_device_is_initiator(struct btd_device *dev)
 		return dev->le_state.initiator;
 	else if (dev->bredr_state.connected)
 		return dev->bredr_state.initiator;
+	else if (dev->bonding)
+		return true;
 
 	return dev->att_io ? true : false;
 }
@@ -364,10 +383,74 @@ static GSList *find_service_with_uuid(GSList *list, char *uuid)
 	return NULL;
 }
 
+static const char *device_prefer_bearer_str(struct btd_device *device)
+{
+	/* Check if both BR/EDR and LE bearer are supported */
+	if (!device->bredr || !device->le)
+		return NULL;
+
+	switch (device->prefer_bearer) {
+	case PREFER_LAST_USED:
+		return "last-used";
+	case PREFER_LE:
+		return "le";
+	case PREFER_BREDR:
+		return "bredr";
+	case PREFER_LAST_SEEN:
+		return "last-seen";
+	}
+
+	return NULL;
+}
+
+static bool device_set_prefer_bearer(struct btd_device *device, uint8_t bearer)
+{
+	switch (bearer) {
+	case PREFER_LAST_USED:
+		device->prefer_bearer = PREFER_LAST_USED;
+		return true;
+	case PREFER_LE:
+		device->prefer_bearer = PREFER_LE;
+		device->le_state.prefer = true;
+		device->bredr_state.prefer = false;
+		return true;
+	case PREFER_BREDR:
+		device->prefer_bearer = PREFER_BREDR;
+		device->bredr_state.prefer = true;
+		device->le_state.prefer = false;
+		return true;
+	case PREFER_LAST_SEEN:
+		device->prefer_bearer = PREFER_LAST_SEEN;
+		device->bredr_state.prefer = false;
+		device->le_state.prefer = false;
+		return true;
+	default:
+		error("Unknown preferred bearer: %d", bearer);
+		return false;
+	}
+}
+
+static bool device_set_prefer_bearer_str(struct btd_device *device,
+						const char *str)
+{
+	if (!strcmp(str, "last-used"))
+		return device_set_prefer_bearer(device, PREFER_LAST_USED);
+	else if (!strcmp(str, "le"))
+		return device_set_prefer_bearer(device, PREFER_LE);
+	else if (!strcmp(str, "bredr"))
+		return device_set_prefer_bearer(device, PREFER_BREDR);
+	else if (!strcmp(str, "last-seen"))
+		return device_set_prefer_bearer(device, PREFER_LAST_SEEN);
+
+	error("Unknown preferred bearer: %s", str);
+	return false;
+}
+
 static void update_technologies(GKeyFile *file, struct btd_device *dev)
 {
 	const char *list[2];
 	size_t len = 0;
+	const char *bearer;
 
 	if (dev->bredr)
 		list[len++] = "BR/EDR";
@@ -387,6 +470,18 @@ static void update_technologies(GKeyFile *file, struct btd_device *dev)
 
 	g_key_file_set_string_list(file, "General", "SupportedTechnologies",
 								list, len);
+
+	/* Store the PreferredBearer in case of dual-mode devices */
+	bearer = device_prefer_bearer_str(dev);
+	if (bearer) {
+		g_key_file_set_string(file, "General", "PreferredBearer",
+							bearer);
+		if (dev->prefer_bearer == PREFER_LAST_USED) {
+			g_key_file_set_string(file, "General", "LastUsedBearer",
+						dev->le_state.prefer ?
+						"le" : "bredr");
+		}
+	}
 }
 
 static void store_csrk(struct csrk_info *csrk, GKeyFile *key_file,
@@ -400,6 +495,7 @@ static void store_csrk(struct csrk_info *csrk, GKeyFile *key_file,
 
 	g_key_file_set_string(key_file, group, "Key", key);
 	g_key_file_set_integer(key_file, group, "Counter", csrk->counter);
+	g_key_file_set_boolean(key_file, group, "Authenticated", csrk->auth);
 }
 
 static void store_sirk(struct sirk_info *sirk, GKeyFile *key_file,
@@ -479,6 +575,9 @@ static gboolean store_device_info_cb(gpointer user_data)
 	g_key_file_set_boolean(key_file, "General", "Blocked",
 							device->blocked);
 
+	g_key_file_set_boolean(key_file, "General", "CablePairing",
+							device->cable_pairing);
+
 	if (device->wake_override != WAKE_FLAG_DEFAULT) {
 		g_key_file_set_boolean(key_file, "General", "WakeAllowed",
 				       device->wake_override ==
@@ -544,7 +643,7 @@ static gboolean store_device_info_cb(gpointer user_data)
 	return FALSE;
 }
 
-static bool device_address_is_private(struct btd_device *dev)
+bool device_address_is_private(struct btd_device *dev)
 {
 	if (dev->bdaddr_type != BDADDR_LE_RANDOM)
 		return false;
@@ -852,6 +951,9 @@ static void device_free(gpointer user_data)
 
 	queue_destroy(device->sirks, free);
 
+	btd_bearer_destroy(device->bredr);
+	btd_bearer_destroy(device->le);
+
 	g_free(device->local_csrk);
 	g_free(device->remote_csrk);
 	free(device->ltk);
@@ -878,6 +980,11 @@ bool device_is_bonded(struct btd_device *device, uint8_t bdaddr_type)
 bool btd_device_is_trusted(struct btd_device *device)
 {
 	return device->trusted;
+}
+
+bool device_is_cable_pairing(struct btd_device *device)
+{
+	return device->cable_pairing;
 }
 
 static gboolean dev_property_get_address(const GDBusPropertyTable *property,
@@ -1050,16 +1157,14 @@ static gboolean dev_property_get_appearance(const GDBusPropertyTable *property,
 	return TRUE;
 }
 
-static const char *get_icon(const GDBusPropertyTable *property, void *data)
+const char *btd_device_get_icon(struct btd_device *device)
 {
-	struct btd_device *device = data;
 	const char *icon = NULL;
-	uint16_t appearance;
 
 	if (device->class != 0)
 		icon = class_to_icon(device->class);
-	else if (get_appearance(property, data, &appearance))
-		icon = gap_appearance_to_icon(appearance);
+	else if (device->appearance != 0)
+		icon = gap_appearance_to_icon(device->appearance);
 
 	return icon;
 }
@@ -1067,7 +1172,7 @@ static const char *get_icon(const GDBusPropertyTable *property, void *data)
 static gboolean dev_property_exists_icon(
 			const GDBusPropertyTable *property, void *data)
 {
-	return get_icon(property, data) != NULL;
+	return btd_device_get_icon(data) != NULL;
 }
 
 static gboolean dev_property_get_icon(const GDBusPropertyTable *property,
@@ -1075,7 +1180,7 @@ static gboolean dev_property_get_icon(const GDBusPropertyTable *property,
 {
 	const char *icon;
 
-	icon = get_icon(property, data);
+	icon = btd_device_get_icon(data);
 	if (icon == NULL)
 		return FALSE;
 
@@ -1121,6 +1226,18 @@ static gboolean dev_property_get_legacy(const GDBusPropertyTable *property,
 {
 	struct btd_device *device = data;
 	dbus_bool_t val = device->legacy;
+
+	dbus_message_iter_append_basic(iter, DBUS_TYPE_BOOLEAN, &val);
+
+	return TRUE;
+}
+
+static gboolean
+dev_property_get_cable_pairing(const GDBusPropertyTable *property,
+					DBusMessageIter *iter, void *data)
+{
+	struct btd_device *device = data;
+	dbus_bool_t val = device->cable_pairing;
 
 	dbus_message_iter_append_basic(iter, DBUS_TYPE_BOOLEAN, &val);
 
@@ -1505,21 +1622,28 @@ static bool device_get_wake_support(struct btd_device *device)
 
 void device_set_wake_support(struct btd_device *device, bool wake_support)
 {
-	if (device->rpa && !btd_adapter_has_exp_feature(device->adapter,
-						EXP_FEAT_RPA_RESOLUTION)) {
-		warn("Unable to set wake_support without RPA resolution");
-		return;
-	}
-
 	device->wake_support = wake_support;
 
-	/* If wake configuration has not been made yet, set the initial
-	 * configuration.
+	if (device->wake_support)
+		device->supported_flags |= DEVICE_FLAG_REMOTE_WAKEUP;
+	else
+		device->supported_flags &= ~DEVICE_FLAG_REMOTE_WAKEUP;
+
+	/* If there is not override set, set the default the same as
+	 * support value.
 	 */
-	if (device->wake_override == WAKE_FLAG_DEFAULT) {
+	if (device->wake_override == WAKE_FLAG_DEFAULT)
 		device_set_wake_override(device, wake_support);
-		device_set_wake_allowed(device, wake_support, -1U);
-	}
+
+	/* Set wake_allowed according to the override value.
+	 * Limit this to bonded device to avoid trying to set it
+	 * to new devices that are simply in range.
+	 */
+	if (device_is_bonded(device, device->bdaddr_type))
+		device_set_wake_allowed(device,
+					device->wake_override ==
+					WAKE_FLAG_ENABLED,
+					-1U);
 }
 
 static bool device_get_wake_allowed(struct btd_device *device)
@@ -1529,13 +1653,10 @@ static bool device_get_wake_allowed(struct btd_device *device)
 
 void device_set_wake_override(struct btd_device *device, bool wake_override)
 {
-	if (wake_override) {
+	if (wake_override)
 		device->wake_override = WAKE_FLAG_ENABLED;
-		device->current_flags |= DEVICE_FLAG_REMOTE_WAKEUP;
-	} else {
+	else
 		device->wake_override = WAKE_FLAG_DISABLED;
-		device->current_flags &= ~DEVICE_FLAG_REMOTE_WAKEUP;
-	}
 }
 
 static void device_set_wake_allowed_complete(struct btd_device *device)
@@ -1561,6 +1682,14 @@ static void set_wake_allowed_complete(uint8_t status, uint16_t length,
 	if (status != MGMT_STATUS_SUCCESS) {
 		error("Set device flags return status: %s",
 					mgmt_errstr(status));
+		if (dev->wake_id != -1U) {
+			g_dbus_pending_property_error(dev->wake_id,
+						      ERROR_INTERFACE ".Failed",
+						      mgmt_errstr(status));
+			dev->wake_id = -1U;
+		}
+		dev->pending_wake_allowed = FALSE;
+		dev->pending_flags = 0;
 		return;
 	}
 
@@ -1569,7 +1698,7 @@ static void set_wake_allowed_complete(uint8_t status, uint16_t length,
 		return;
 	}
 
-	device_set_wake_allowed_complete(dev);
+	btd_device_flags_changed(dev, dev->supported_flags, dev->pending_flags);
 }
 
 void device_set_wake_allowed(struct btd_device *device, bool wake_allowed,
@@ -1581,13 +1710,20 @@ void device_set_wake_allowed(struct btd_device *device, bool wake_allowed,
 	 * progress. Only update wake allowed if pending value doesn't match the
 	 * new value.
 	 */
-	if (wake_allowed == device->pending_wake_allowed)
+	if (device->wake_id != -1U && id != -1U) {
+		g_dbus_pending_property_error(id, ERROR_INTERFACE ".Busy",
+						"Property change in progress");
 		return;
+	}
 
 	device->wake_id = id;
 	device->pending_wake_allowed = wake_allowed;
 
 	flags = device->current_flags;
+
+	/* Include the pending flags, or they may get overwritten. */
+	flags |= device->pending_flags;
+
 	if (wake_allowed)
 		flags |= DEVICE_FLAG_REMOTE_WAKEUP;
 	else
@@ -1595,6 +1731,56 @@ void device_set_wake_allowed(struct btd_device *device, bool wake_allowed,
 
 	adapter_set_device_flags(device->adapter, device, flags,
 					set_wake_allowed_complete, device);
+}
+
+static void set_past_complete(uint8_t status, uint16_t length,
+					 const void *param, void *user_data)
+{
+	const struct mgmt_rp_set_device_flags *rp = param;
+	struct btd_device *dev = user_data;
+
+	if (status != MGMT_STATUS_SUCCESS) {
+		error("Set device flags return status: %s",
+					mgmt_errstr(status));
+		return;
+	}
+
+	if (length < sizeof(*rp)) {
+		error("Too small Set Device Flags complete event: %d", length);
+		return;
+	}
+
+	btd_device_flags_changed(dev, dev->supported_flags, dev->pending_flags);
+}
+
+void device_set_past_support(struct btd_device *device, bool value)
+{
+	uint32_t flags;
+	int err;
+
+	if (!device)
+		return;
+
+	if (btd_device_flags_enabled(device, DEVICE_FLAG_PAST) == value)
+		return;
+
+	DBG("value %s", value ? "true" : "false");
+
+	flags = device->current_flags;
+
+	/* Include the pending flags, or they may get overwritten. */
+	flags |= device->pending_flags;
+
+	if (value)
+		flags |= DEVICE_FLAG_PAST;
+	else
+		flags &= ~DEVICE_FLAG_PAST;
+
+	err = adapter_set_device_flags(device->adapter, device, flags,
+					set_past_complete, device);
+
+	if (err)
+		error("Failed to set past support: %s", strerror(-err));
 }
 
 static gboolean
@@ -1851,10 +2037,17 @@ void device_request_disconnect(struct btd_device *device, DBusMessage *msg)
 	}
 
 	if (device->connect) {
-		DBusMessage *reply = btd_error_failed(device->connect,
-						ERR_BREDR_CONN_CANCELED);
+		const char *err_str;
+		DBusMessage *reply;
+
+		if (device->bonding_status == MGMT_STATUS_AUTH_FAILED)
+			err_str = ERR_BREDR_CONN_KEY_MISSING;
+		else
+			err_str = ERR_BREDR_CONN_CANCELED;
+		reply = btd_error_failed(device->connect, err_str);
 		g_dbus_send_message(dbus_conn, reply);
 		dbus_message_unref(device->connect);
+		device->bonding_status = 0;
 		device->connect = NULL;
 	}
 
@@ -1955,6 +2148,52 @@ bool btd_device_get_ltk(struct btd_device *device, uint8_t key[16],
 	return true;
 }
 
+void device_set_csrk(struct btd_device *device, const uint8_t val[16],
+				uint32_t counter, uint8_t type,
+				bool store_hint)
+{
+	struct csrk_info **handle;
+	struct csrk_info *csrk;
+	bool auth;
+
+	switch (type) {
+	case 0x00:
+		handle = &device->local_csrk;
+		auth = FALSE;
+		break;
+	case 0x01:
+		handle = &device->remote_csrk;
+		auth = FALSE;
+		break;
+	case 0x02:
+		handle = &device->local_csrk;
+		auth = TRUE;
+		break;
+	case 0x03:
+		handle = &device->remote_csrk;
+		auth = TRUE;
+		break;
+	default:
+		warn("Unsupported CSRK type %u", type);
+		return;
+	}
+
+	if (!*handle)
+		*handle = g_new0(struct csrk_info, 1);
+
+	csrk = *handle;
+	memcpy(csrk->key, val, sizeof(csrk->key));
+	csrk->counter = counter;
+	csrk->auth = auth;
+
+	if (!store_hint)
+		return;
+
+	store_device_info(device);
+
+	btd_device_set_temporary(device, false);
+}
+
 static bool match_sirk(const void *data, const void *match_data)
 {
 	const struct sirk_info *sirk = data;
@@ -2015,8 +2254,9 @@ bool btd_device_add_set(struct btd_device *device, bool encrypted,
 static void device_set_auto_connect(struct btd_device *device, gboolean enable)
 {
 	char addr[18];
+	const char *bearer;
 
-	if (!device || !device->le || device_address_is_private(device))
+	if (!device || !device->le)
 		return;
 
 	ba2str(&device->bdaddr, addr);
@@ -2034,6 +2274,14 @@ static void device_set_auto_connect(struct btd_device *device, gboolean enable)
 		adapter_auto_connect_remove(device->adapter, device);
 		return;
 	}
+
+	if (device_address_is_private(device))
+		return;
+
+	/* Inhibit auto connect if BR/EDR bearer is preferred */
+	bearer = device_prefer_bearer_str(device);
+	if (bearer && !strcasecmp(bearer, "bredr"))
+		return;
 
 	/* Enabling auto connect */
 	adapter_auto_connect_add(device->adapter, device);
@@ -2150,8 +2398,7 @@ done:
 		}
 
 		g_dbus_send_message(dbus_conn,
-			btd_error_failed(dev->connect,
-					btd_error_bredr_conn_from_errno(err)));
+				btd_error_bredr_errno(dev->connect, err));
 	} else {
 		/* Start passive SDP discovery to update known services */
 		if (dev->bredr && !dev->svc_refreshed && dev->refresh_discovery)
@@ -2379,15 +2626,75 @@ static GSList *create_pending_list(struct btd_device *dev, const char *uuid)
 	return dev->pending;
 }
 
+#define NVAL_TIME ((time_t) -1)
+#define SEEN_TRESHHOLD 300
+
+static uint8_t select_conn_bearer(struct btd_device *dev)
+{
+	time_t bredr_last = NVAL_TIME, le_last = NVAL_TIME;
+	time_t current = time(NULL);
+
+	/* Use preferred bearer or bonded bearer in case only one is bonded */
+	if (dev->bredr_state.prefer ||
+			(dev->bredr_state.bonded && !dev->le_state.bonded))
+		return BDADDR_BREDR;
+	else if (dev->le_state.prefer ||
+			(!dev->bredr_state.bonded && dev->le_state.bonded))
+		return dev->bdaddr_type;
+
+	/* If the address is random it can only be connected over LE */
+	if (dev->bdaddr_type == BDADDR_LE_RANDOM)
+		return dev->bdaddr_type;
+
+	if (dev->bredr_state.connectable && dev->bredr_state.last_seen) {
+		bredr_last = current - dev->bredr_state.last_seen;
+		if (bredr_last > SEEN_TRESHHOLD)
+			bredr_last = NVAL_TIME;
+	}
+
+	if (dev->le_state.connectable && dev->le_state.last_seen) {
+		le_last = current - dev->le_state.last_seen;
+		if (le_last > SEEN_TRESHHOLD)
+			le_last = NVAL_TIME;
+	}
+
+	if (le_last == NVAL_TIME && bredr_last == NVAL_TIME)
+		return dev->bdaddr_type;
+
+	if (dev->bredr && (!dev->le || le_last == NVAL_TIME))
+		return BDADDR_BREDR;
+
+	if (dev->le && (!dev->bredr || bredr_last == NVAL_TIME))
+		return dev->bdaddr_type;
+
+	/*
+	 * Prefer BR/EDR if time is the same since it might be from an
+	 * advertisement with BR/EDR flag set.
+	 */
+	if (bredr_last <= le_last && btd_adapter_get_bredr(dev->adapter))
+		return BDADDR_BREDR;
+
+	return dev->bdaddr_type;
+}
+
 int btd_device_connect_services(struct btd_device *dev, GSList *services)
 {
 	GSList *l;
+	uint8_t bdaddr_type;
 
 	if (dev->pending || dev->connect || dev->browse)
 		return -EBUSY;
 
 	if (!btd_adapter_get_powered(dev->adapter))
 		return -ENETDOWN;
+
+	bdaddr_type = select_conn_bearer(dev);
+	if (bdaddr_type != BDADDR_BREDR) {
+		if (dev->le_state.connected)
+			return -EALREADY;
+
+		return device_connect_le(dev);
+	}
 
 	if (!dev->bredr_state.svc_resolved)
 		return -ENOENT;
@@ -2436,8 +2743,7 @@ static DBusMessage *connect_profiles(struct btd_device *dev, uint8_t bdaddr_type
 						BTD_SERVICE_STATE_CONNECTED)) {
 				return dbus_message_new_method_return(msg);
 			} else {
-				return btd_error_not_available_str(msg,
-					ERR_BREDR_CONN_PROFILE_UNAVAILABLE);
+				return btd_error_profile_unavailable(msg);
 			}
 		}
 
@@ -2448,8 +2754,7 @@ static DBusMessage *connect_profiles(struct btd_device *dev, uint8_t bdaddr_type
 	if (err < 0) {
 		if (err == -EALREADY)
 			return dbus_message_new_method_return(msg);
-		return btd_error_failed(msg,
-					btd_error_bredr_conn_from_errno(err));
+		return btd_error_bredr_errno(msg, err);
 	}
 
 	dev->connect = dbus_message_ref(msg);
@@ -2471,60 +2776,14 @@ resolve_services:
 	return NULL;
 }
 
-#define NVAL_TIME ((time_t) -1)
-#define SEEN_TRESHHOLD 300
-
-static uint8_t select_conn_bearer(struct btd_device *dev)
-{
-	time_t bredr_last = NVAL_TIME, le_last = NVAL_TIME;
-	time_t current = time(NULL);
-
-	/* Prefer bonded bearer in case only one is bonded */
-	if (dev->bredr_state.bonded && !dev->le_state.bonded )
-		return BDADDR_BREDR;
-	else if (!dev->bredr_state.bonded && dev->le_state.bonded)
-		return dev->bdaddr_type;
-
-	/* If the address is random it can only be connected over LE */
-	if (dev->bdaddr_type == BDADDR_LE_RANDOM)
-		return dev->bdaddr_type;
-
-	if (dev->bredr_state.last_seen) {
-		bredr_last = current - dev->bredr_state.last_seen;
-		if (bredr_last > SEEN_TRESHHOLD)
-			bredr_last = NVAL_TIME;
-	}
-
-	if (dev->le_state.last_seen) {
-		le_last = current - dev->le_state.last_seen;
-		if (le_last > SEEN_TRESHHOLD)
-			le_last = NVAL_TIME;
-	}
-
-	if (le_last == NVAL_TIME && bredr_last == NVAL_TIME)
-		return dev->bdaddr_type;
-
-	if (dev->bredr && (!dev->le || le_last == NVAL_TIME))
-		return BDADDR_BREDR;
-
-	if (dev->le && (!dev->bredr || bredr_last == NVAL_TIME))
-		return dev->bdaddr_type;
-
-	/*
-	 * Prefer BR/EDR if time is the same since it might be from an
-	 * advertisement with BR/EDR flag set.
-	 */
-	if (bredr_last <= le_last && btd_adapter_get_bredr(dev->adapter))
-		return BDADDR_BREDR;
-
-	return dev->bdaddr_type;
-}
-
 static DBusMessage *dev_connect(DBusConnection *conn, DBusMessage *msg,
 							void *user_data)
 {
 	struct btd_device *dev = user_data;
 	uint8_t bdaddr_type;
+
+	if (dev->bonding)
+		return btd_error_in_progress(msg);
 
 	if (dev->bredr_state.connected) {
 		/*
@@ -2544,6 +2803,9 @@ static DBusMessage *dev_connect(DBusConnection *conn, DBusMessage *msg,
 
 	if (bdaddr_type != BDADDR_BREDR) {
 		int err;
+
+		if (dev->connect)
+			return btd_error_in_progress(msg);
 
 		if (dev->le_state.connected)
 			return dbus_message_new_method_return(msg);
@@ -2582,6 +2844,10 @@ static DBusMessage *connect_profile(DBusConnection *conn, DBusMessage *msg,
 	}
 
 	uuid = bt_name2string(pattern);
+	if (uuid == NULL)
+		return btd_error_invalid_args_str(msg,
+					ERR_BREDR_CONN_INVALID_ARGUMENTS);
+
 	reply = connect_profiles(dev, BDADDR_BREDR, msg, uuid);
 	free(uuid);
 
@@ -2773,6 +3039,11 @@ static void browse_request_complete(struct browse_req *req, uint8_t type,
 		}
 
 		if (dev->pending_paired) {
+			if (bdaddr_type == BDADDR_BREDR)
+				btd_bearer_paired(dev->bredr);
+			else
+				btd_bearer_paired(dev->le);
+
 			g_dbus_emit_property_changed(dbus_conn, dev->path,
 						DEVICE_INTERFACE, "Paired");
 			dev->pending_paired = false;
@@ -2791,10 +3062,12 @@ static void browse_request_complete(struct browse_req *req, uint8_t type,
 			if (err == 0)
 				goto done;
 		}
-		reply = btd_error_failed(req->msg,
-				bdaddr_type == BDADDR_BREDR ?
-				btd_error_bredr_conn_from_errno(err) :
-				btd_error_le_conn_from_errno(err));
+
+		if (bdaddr_type == BDADDR_BREDR)
+			reply = btd_error_bredr_errno(req->msg, err);
+		else
+			reply = btd_error_le_errno(req->msg, err);
+
 		goto done;
 	}
 
@@ -2862,6 +3135,11 @@ static void device_svc_resolved(struct btd_device *dev, uint8_t browse_type,
 	dev->eir_uuids = NULL;
 
 	if (dev->pending_paired) {
+		if (bdaddr_type == BDADDR_BREDR)
+			btd_bearer_paired(dev->bredr);
+		else
+			btd_bearer_paired(dev->le);
+
 		g_dbus_emit_property_changed(dbus_conn, dev->path,
 						DEVICE_INTERFACE, "Paired");
 		dev->pending_paired = false;
@@ -3026,15 +3304,28 @@ static DBusMessage *pair_device(DBusConnection *conn, DBusMessage *msg,
 	if (!dbus_message_get_args(msg, NULL, DBUS_TYPE_INVALID))
 		return btd_error_invalid_args(msg);
 
-	if (device->bonding)
+	if (device->bonding || device->connect)
 		return btd_error_in_progress(msg);
 
-	if (device->bredr_state.bonded)
+	/* Only use this selection algorithms when device is combo
+	 * chip. Otherwise, it will use the wrong bearer to establish
+	 * a connection if the device is already paired, which will
+	 * stall the pairing procedure. For example, for a BLE only
+	 * device, if the device is already paired, and upper layer
+	 * issue the pair device again, it will set bdaddr_type to
+	 * BDADDR_BREDR since LE is bonded, then it goes with BR/EDR
+	 * bearer.
+	 */
+	if (device->bredr && device->le) {
+		if (device->bredr_state.bonded)
+			bdaddr_type = device->bdaddr_type;
+		else if (device->le_state.bonded)
+			bdaddr_type = BDADDR_BREDR;
+		else
+			bdaddr_type = select_conn_bearer(device);
+	} else {
 		bdaddr_type = device->bdaddr_type;
-	else if (device->le_state.bonded)
-		bdaddr_type = BDADDR_BREDR;
-	else
-		bdaddr_type = select_conn_bearer(device);
+	}
 
 	state = get_state(device, bdaddr_type);
 
@@ -3067,12 +3358,20 @@ static DBusMessage *pair_device(DBusConnection *conn, DBusMessage *msg,
 	 * this in the ATT connect callback)
 	 */
 	if (bdaddr_type != BDADDR_BREDR) {
+		if (device->disable_auto_connect) {
+			device->disable_auto_connect = FALSE;
+			device_set_auto_connect(device, TRUE);
+		}
+
 		if (!state->connected && btd_le_connect_before_pairing())
 			err = device_connect_le(device);
-		else
+		else if (!state->connected || !bt_att_set_security(device->att,
+						BT_ATT_SECURITY_MEDIUM))
 			err = adapter_create_bonding(adapter, &device->bdaddr,
 							device->bdaddr_type,
 							io_cap);
+		else
+			err = 0;
 	} else {
 		err = adapter_create_bonding(adapter, &device->bdaddr,
 							BDADDR_BREDR, io_cap);
@@ -3163,6 +3462,86 @@ static DBusMessage *cancel_pairing(DBusConnection *conn, DBusMessage *msg,
 	return dbus_message_new_method_return(msg);
 }
 
+static sdp_list_t *read_device_records(struct btd_device *device);
+
+static DBusMessage *get_service_records(DBusConnection *conn, DBusMessage *msg,
+					void *data)
+{
+	DBusMessage *reply;
+	DBusMessageIter records_arr, record;
+	struct btd_device *device = data;
+	sdp_list_t *cur;
+
+	if (!btd_adapter_get_powered(device->adapter))
+		return btd_error_not_ready(msg);
+
+	if (!btd_device_is_connected(device))
+		return btd_error_not_connected(msg);
+
+	if (!device->bredr_state.svc_resolved)
+		return btd_error_not_ready(msg);
+
+	if (!device->tmp_records) {
+		device->tmp_records = read_device_records(device);
+		if (!device->tmp_records)
+			return btd_error_does_not_exist(msg);
+	}
+
+	reply = dbus_message_new_method_return(msg);
+	if (!reply)
+		return btd_error_failed(msg, "Could not create method reply");
+
+	dbus_message_iter_init_append(reply, &records_arr);
+	if (!dbus_message_iter_open_container(&records_arr, DBUS_TYPE_ARRAY,
+					      "ay", &record)) {
+		dbus_message_unref(reply);
+		return btd_error_failed(msg, "Could not initialize iterator");
+	}
+
+	for (cur = device->tmp_records; cur; cur = cur->next) {
+		DBusMessageIter record_bytes;
+		sdp_record_t *rec = cur->data;
+		sdp_buf_t buf;
+		int result;
+
+		result = sdp_gen_record_pdu(rec, &buf);
+		if (result) {
+			dbus_message_iter_abandon_container(&records_arr,
+							    &record);
+			dbus_message_unref(reply);
+			return btd_error_failed(
+				msg, "Could not marshal service record");
+		}
+		if (!dbus_message_iter_open_container(&record, DBUS_TYPE_ARRAY,
+						      "y", &record_bytes)) {
+			bt_free(buf.data);
+			dbus_message_iter_abandon_container(&records_arr,
+							    &record);
+			dbus_message_unref(reply);
+			return btd_error_failed(
+				msg, "Could not initialize iterator");
+		}
+		if (!dbus_message_iter_append_fixed_array(
+			    &record_bytes, DBUS_TYPE_BYTE, &buf.data,
+			    buf.data_size)) {
+			bt_free(buf.data);
+			dbus_message_iter_abandon_container(&record,
+							    &record_bytes);
+			dbus_message_iter_abandon_container(&records_arr,
+							    &record);
+			dbus_message_unref(reply);
+			return btd_error_failed(
+				msg, "Could not append record data to reply");
+		}
+		dbus_message_iter_close_container(&record, &record_bytes);
+		bt_free(buf.data);
+	}
+
+	dbus_message_iter_close_container(&records_arr, &record);
+
+	return reply;
+}
+
 static const GDBusMethodTable device_methods[] = {
 	{ GDBUS_ASYNC_METHOD("Disconnect", NULL, NULL, dev_disconnect) },
 	{ GDBUS_ASYNC_METHOD("Connect", NULL, NULL, dev_connect) },
@@ -3172,8 +3551,89 @@ static const GDBusMethodTable device_methods[] = {
 						NULL, disconnect_profile) },
 	{ GDBUS_ASYNC_METHOD("Pair", NULL, NULL, pair_device) },
 	{ GDBUS_METHOD("CancelPairing", NULL, NULL, cancel_pairing) },
+	{ GDBUS_EXPERIMENTAL_METHOD("GetServiceRecords", NULL,
+				    GDBUS_ARGS({ "Records", "aay" }),
+				    get_service_records) },
 	{ }
 };
+
+static const GDBusSignalTable device_signals[] = {
+	{ GDBUS_SIGNAL("Disconnected",
+			GDBUS_ARGS({ "name", "s" }, { "message", "s" })) },
+	{ }
+};
+
+static gboolean
+dev_property_get_prefer_bearer(const GDBusPropertyTable *property,
+				DBusMessageIter *iter, void *data)
+{
+	struct btd_device *device = data;
+	const char *str = device_prefer_bearer_str(device);
+
+	dbus_message_iter_append_basic(iter, DBUS_TYPE_STRING, &str);
+
+	return TRUE;
+}
+
+static void
+dev_property_set_prefer_bearer(const GDBusPropertyTable *property,
+					 DBusMessageIter *value,
+					 GDBusPendingPropertySet id, void *data)
+{
+	struct btd_device *device = data;
+	const char *str;
+
+	if (dbus_message_iter_get_arg_type(value) != DBUS_TYPE_STRING) {
+		g_dbus_pending_property_error(id,
+					ERROR_INTERFACE ".InvalidArguments",
+					"Invalid arguments in method call");
+		return;
+	}
+
+	dbus_message_iter_get_basic(value, &str);
+
+	/* Check if current preferred bearer is the same */
+	if (!strcasecmp(device_prefer_bearer_str(device), str))
+		goto done;
+
+	if (!device_set_prefer_bearer_str(device, str)) {
+		g_dbus_pending_property_error(id,
+					ERROR_INTERFACE ".InvalidArguments",
+					"Invalid arguments in method call");
+		return;
+	}
+
+	switch (device->prefer_bearer) {
+	case PREFER_BREDR:
+		/* Remove device from auto-connect list so the kernel does not
+		 * attempt to auto-connect to it in case it starts advertising.
+		 */
+		device_set_auto_connect(device, FALSE);
+		break;
+
+	case PREFER_LE:
+		/* Add device to auto-connect list */
+		device_set_auto_connect(device, TRUE);
+		break;
+	}
+
+	store_device_info(device);
+
+	g_dbus_emit_property_changed(dbus_conn, device->path,
+					DEVICE_INTERFACE, "PreferredBearer");
+
+done:
+	g_dbus_pending_property_success(id);
+}
+
+static gboolean
+dev_property_prefer_bearer_exists(const GDBusPropertyTable *property,
+						void *data)
+{
+	struct btd_device *device = data;
+
+	return device_prefer_bearer_str(device) != NULL;
+}
 
 static const GDBusPropertyTable device_properties[] = {
 	{ "Address", "s", dev_property_get_address },
@@ -3191,6 +3651,7 @@ static const GDBusPropertyTable device_properties[] = {
 	{ "Trusted", "b", dev_property_get_trusted, dev_property_set_trusted },
 	{ "Blocked", "b", dev_property_get_blocked, dev_property_set_blocked },
 	{ "LegacyPairing", "b", dev_property_get_legacy },
+	{ "CablePairing", "b", dev_property_get_cable_pairing },
 	{ "RSSI", "n", dev_property_get_rssi, NULL, dev_property_exists_rssi },
 	{ "Connected", "b", dev_property_get_connected },
 	{ "UUIDs", "as", dev_property_get_uuids },
@@ -3205,16 +3666,18 @@ static const GDBusPropertyTable device_properties[] = {
 					dev_property_exists_tx_power },
 	{ "ServicesResolved", "b", dev_property_get_svc_resolved, NULL, NULL },
 	{ "AdvertisingFlags", "ay", dev_property_get_flags, NULL,
-					dev_property_flags_exist,
-					G_DBUS_PROPERTY_FLAG_EXPERIMENTAL},
+					dev_property_flags_exist },
 	{ "AdvertisingData", "a{yv}", dev_property_get_advertising_data,
-				NULL, dev_property_advertising_data_exist,
-				G_DBUS_PROPERTY_FLAG_EXPERIMENTAL },
+				NULL, dev_property_advertising_data_exist },
 	{ "WakeAllowed", "b", dev_property_get_wake_allowed,
 				dev_property_set_wake_allowed,
 				dev_property_wake_allowed_exist },
 	{ "Sets", "a{oa{sv}}", dev_property_get_set, NULL,
 				dev_property_set_exists },
+	{ "PreferredBearer", "s", dev_property_get_prefer_bearer,
+				dev_property_set_prefer_bearer,
+				dev_property_prefer_bearer_exists,
+				G_DBUS_PROPERTY_FLAG_EXPERIMENTAL },
 	{ }
 };
 
@@ -3225,7 +3688,24 @@ uint8_t btd_device_get_bdaddr_type(struct btd_device *dev)
 
 bool btd_device_is_connected(struct btd_device *dev)
 {
+	if (btd_device_bearer_is_connected(dev))
+		return true;
+
+	return find_service_with_state(dev->services,
+						BTD_SERVICE_STATE_CONNECTED);
+}
+
+bool btd_device_bearer_is_connected(struct btd_device *dev)
+{
 	return dev->bredr_state.connected || dev->le_state.connected;
+}
+
+bool btd_device_bdaddr_type_connected(struct btd_device *dev, uint8_t type)
+{
+	if (type == BDADDR_BREDR)
+		return dev->bredr_state.connected;
+
+	return dev->le_state.connected;
 }
 
 static void clear_temporary_timer(struct btd_device *dev)
@@ -3236,12 +3716,44 @@ static void clear_temporary_timer(struct btd_device *dev)
 	}
 }
 
+static void device_update_last_used(struct btd_device *device,
+					uint8_t bdaddr_type)
+{
+	struct bearer_state *state;
+
+	state = get_state(device, bdaddr_type);
+	state->last_used = time(NULL);
+
+	if (device->prefer_bearer != PREFER_LAST_USED)
+		return;
+
+	/* If current policy is to prefer last used bearer update the state. */
+	state->prefer = true;
+	if (bdaddr_type == BDADDR_BREDR) {
+		if (device->le_state.prefer) {
+			device->le_state.prefer = false;
+			/* Remove device from auto-connect list so the kernel
+			 * does not attempt to auto-connect to it in case it
+			 * starts advertising.
+			 */
+			device_set_auto_connect(device, FALSE);
+		}
+	} else if (device->bredr_state.prefer) {
+		device->bredr_state.prefer = false;
+		/* Add device to auto-connect list */
+		device_set_auto_connect(device, TRUE);
+	}
+
+	store_device_info(device);
+}
+
 void device_add_connection(struct btd_device *dev, uint8_t bdaddr_type,
 							uint32_t flags)
 {
 	struct bearer_state *state = get_state(dev, bdaddr_type);
 
 	device_update_last_seen(dev, bdaddr_type, true);
+	device_update_last_used(dev, bdaddr_type);
 
 	if (state->connected) {
 		char addr[18];
@@ -3254,10 +3766,13 @@ void device_add_connection(struct btd_device *dev, uint8_t bdaddr_type,
 	dev->conn_bdaddr_type = dev->bdaddr_type;
 
 	/* If this is the first connection over this bearer */
-	if (bdaddr_type == BDADDR_BREDR)
+	if (bdaddr_type == BDADDR_BREDR) {
 		device_set_bredr_support(dev);
-	else
+		btd_bearer_connected(dev->bredr);
+	} else {
 		device_set_le_support(dev, bdaddr_type);
+		btd_bearer_connected(dev->le);
+	}
 
 	state->connected = true;
 	state->initiator = flags & BIT(3);
@@ -3272,9 +3787,25 @@ void device_add_connection(struct btd_device *dev, uint8_t bdaddr_type,
 								"Connected");
 }
 
+static bool device_service_connected(struct btd_device *dev)
+{
+	if (find_service_with_state(dev->services,
+					BTD_SERVICE_STATE_CONNECTING))
+		return true;
+
+	return find_service_with_state(dev->services,
+					BTD_SERVICE_STATE_CONNECTED);
+}
+
 static bool device_disappeared(gpointer user_data)
 {
 	struct btd_device *dev = user_data;
+
+	/* If there are services connected restart the timer to give more time
+	 * for the service to either complete the connection or disconnect.
+	 */
+	if (device_service_connected(dev))
+		return TRUE;
 
 	dev->temporary_timer = 0;
 
@@ -3294,8 +3825,52 @@ static void set_temporary_timer(struct btd_device *dev, unsigned int timeout)
 								dev, NULL);
 }
 
+static void device_disconnected(struct btd_device *device, uint8_t reason)
+{
+	const char *name;
+	const char *message;
+
+	switch (reason) {
+	case MGMT_DEV_DISCONN_UNKNOWN:
+		name = "org.bluez.Reason.Unknown";
+		message = "Unspecified";
+		break;
+	case MGMT_DEV_DISCONN_TIMEOUT:
+		name = "org.bluez.Reason.Timeout";
+		message = "Connection timeout";
+		break;
+	case MGMT_DEV_DISCONN_LOCAL_HOST:
+		name = "org.bluez.Reason.Local";
+		message = "Connection terminated by local host";
+		break;
+	case MGMT_DEV_DISCONN_REMOTE:
+		name = "org.bluez.Reason.Remote";
+		message = "Connection terminated by remote user";
+		break;
+	case MGMT_DEV_DISCONN_AUTH_FAILURE:
+		name = "org.bluez.Reason.Authentication";
+		message = "Connection terminated due to authentication failure";
+		break;
+	case MGMT_DEV_DISCONN_LOCAL_HOST_SUSPEND:
+		name = "org.bluez.Reason.Suspend";
+		message = "Connection terminated by local host for suspend";
+		break;
+	default:
+		warn("Unknown disconnection value: %u", reason);
+		name = "org.bluez.Reason.Unknown";
+		message = "Unspecified";
+	}
+
+	g_dbus_emit_signal(dbus_conn, device->path, DEVICE_INTERFACE,
+						"Disconnected",
+						DBUS_TYPE_STRING, &name,
+						DBUS_TYPE_STRING, &message,
+						DBUS_TYPE_INVALID);
+}
+
 void device_remove_connection(struct btd_device *device, uint8_t bdaddr_type,
-								bool *remove)
+								bool *remove,
+								uint8_t reason)
 {
 	struct bearer_state *state = get_state(device, bdaddr_type);
 	DBusMessage *reply;
@@ -3329,17 +3904,11 @@ void device_remove_connection(struct btd_device *device, uint8_t bdaddr_type,
 		device->connect = NULL;
 	}
 
-	while (device->disconnects) {
-		DBusMessage *msg = device->disconnects->data;
-
-		if (dbus_message_is_method_call(msg, ADAPTER_INTERFACE,
-								"RemoveDevice"))
-			remove_device = true;
-
-		g_dbus_send_reply(dbus_conn, msg, DBUS_TYPE_INVALID);
-		device->disconnects = g_slist_remove(device->disconnects, msg);
-		dbus_message_unref(msg);
-	}
+	/* Update bearer interface */
+	if (bdaddr_type == BDADDR_BREDR)
+		btd_bearer_disconnected(device->bredr, reason);
+	else
+		btd_bearer_disconnected(device->le, reason);
 
 	/* Check paired status of both bearers since it's possible to be
 	 * paired but not connected via link key to LTK conversion.
@@ -3351,6 +3920,7 @@ void device_remove_connection(struct btd_device *device, uint8_t bdaddr_type,
 						BDADDR_BREDR);
 		device->bredr_state.paired = false;
 		paired_status_updated = true;
+		btd_bearer_paired(device->bredr);
 	}
 
 	if (!device->le_state.connected && device->le_state.paired &&
@@ -3360,6 +3930,7 @@ void device_remove_connection(struct btd_device *device, uint8_t bdaddr_type,
 						device->bdaddr_type);
 		device->le_state.paired = false;
 		paired_status_updated = true;
+		btd_bearer_paired(device->le);
 	}
 
 	/* report change only if both bearers are unpaired */
@@ -3377,8 +3948,23 @@ void device_remove_connection(struct btd_device *device, uint8_t bdaddr_type,
 	g_slist_free_full(device->eir_uuids, g_free);
 	device->eir_uuids = NULL;
 
+	device_disconnected(device, reason);
+
 	g_dbus_emit_property_changed(dbus_conn, device->path,
 						DEVICE_INTERFACE, "Connected");
+
+	/* remove device only if both bearers are disconnected */
+	while (device->disconnects) {
+		DBusMessage *msg = device->disconnects->data;
+
+		if (dbus_message_is_method_call(msg, ADAPTER_INTERFACE,
+								"RemoveDevice"))
+			remove_device = true;
+
+		g_dbus_send_reply(dbus_conn, msg, DBUS_TYPE_INVALID);
+		device->disconnects = g_slist_remove(device->disconnects, msg);
+		dbus_message_unref(msg);
+	}
 
 	if (remove_device)
 		*remove = remove_device;
@@ -3684,9 +4270,9 @@ static void load_info(struct btd_device *device, const char *local,
 
 	for (t = techno; *t; t++) {
 		if (g_str_equal(*t, "BR/EDR"))
-			device->bredr = true;
+			device->bredr = btd_bearer_new(device, BDADDR_BREDR);
 		else if (g_str_equal(*t, "LE"))
-			device->le = true;
+			device->le = btd_bearer_new(device, BDADDR_LE_PUBLIC);
 		else
 			error("Unknown device technology");
 	}
@@ -3714,6 +4300,24 @@ static void load_info(struct btd_device *device, const char *local,
 
 	g_strfreev(techno);
 
+	/* Load preferred bearer */
+	str = g_key_file_get_string(key_file, "General", "PreferredBearer",
+								NULL);
+	if (str) {
+		device_set_prefer_bearer_str(device, str);
+		g_free(str);
+
+		/* Load last used bearer */
+		str = g_key_file_get_string(key_file, "General",
+						"LastUsedBearer", NULL);
+		if (str) {
+			device_update_last_used(device, !strcmp(str, "le") ?
+						device->bdaddr_type :
+						BDADDR_BREDR);
+			g_free(str);
+		}
+	}
+
 next:
 	/* Load trust */
 	device->trusted = g_key_file_get_boolean(key_file, "General",
@@ -3724,14 +4328,44 @@ next:
 	if (blocked)
 		device_block(device, FALSE);
 
+	device->cable_pairing = g_key_file_get_boolean(key_file, "General",
+							"CablePairing", NULL);
+
 	/* Load device profile list */
 	uuids = g_key_file_get_string_list(key_file, "General", "Services",
 						NULL, NULL);
 	if (uuids) {
+		char filename[PATH_MAX];
+		char device_addr[18];
+		struct stat st;
+		GKeyFile *key_file = g_key_file_new();
+		GError *gerr = NULL;
+
 		load_services(device, uuids);
 
-		/* Discovered services restored from storage */
-		device->bredr_state.svc_resolved = true;
+		ba2str(&device->bdaddr, device_addr);
+		create_filename(filename, PATH_MAX, "/%s/cache/%s",
+			btd_adapter_get_storage_dir(device->adapter),
+			device_addr);
+
+		/* Check if ServiceRecords cached group exists */
+		if (stat(filename, &st) < 0) {
+			DBG("Missing cache file for ServiceRecords");
+			device->bredr_state.svc_resolved = false;
+		} else if (!g_key_file_load_from_file(key_file, filename,
+							0, &gerr)) {
+			DBG("Unable to load key file from %s: (%s)", filename,
+								gerr->message);
+			g_clear_error(&gerr);
+			device->bredr_state.svc_resolved = false;
+		} else if (!g_key_file_has_group(key_file, "ServiceRecords")) {
+			DBG("Missing ServiceRecords from cache file");
+			device->bredr_state.svc_resolved = false;
+		} else {
+			/* Discovered services restored from storage */
+			device->bredr_state.svc_resolved = true;
+		}
+		g_key_file_free(key_file);
 	}
 
 	/* Load device id */
@@ -4145,7 +4779,7 @@ static void gatt_service_removed(struct gatt_db_attribute *attr,
 	if (l && !g_slist_find_custom(device->primaries, prim->uuid,
 							prim_uuid_cmp)) {
 		/*
-		 * If this happend since the db was cleared for a non-bonded
+		 * If this happened since the db was cleared for a non-bonded
 		 * device, then don't remove the btd_service just yet. We do
 		 * this so that we can avoid re-probing the profile if the same
 		 * GATT service is found on the device on re-connection.
@@ -4185,6 +4819,7 @@ static struct btd_device *device_new(struct btd_adapter *adapter,
 
 	device->tx_power = 127;
 	device->volume = -1;
+	device->wake_id = -1U;
 
 	device->db = gatt_db_new();
 	if (!device->db) {
@@ -4218,7 +4853,7 @@ static struct btd_device *device_new(struct btd_adapter *adapter,
 
 	if (g_dbus_register_interface(dbus_conn,
 					device->path, DEVICE_INTERFACE,
-					device_methods, NULL,
+					device_methods, device_signals,
 					device_properties, device,
 					device_free) == FALSE) {
 		error("Unable to register device interface for %s", address);
@@ -4278,9 +4913,9 @@ struct btd_device *device_create(struct btd_adapter *adapter,
 	device->bdaddr_type = bdaddr_type;
 
 	if (bdaddr_type == BDADDR_BREDR)
-		device->bredr = true;
+		device->bredr = btd_bearer_new(device, BDADDR_BREDR);
 	else
-		device->le = true;
+		device->le = btd_bearer_new(device, BDADDR_LE_PUBLIC);
 
 	storage_dir = btd_adapter_get_storage_dir(adapter);
 	str = load_cached_name(device, storage_dir, dst);
@@ -4411,17 +5046,33 @@ void device_set_class(struct btd_device *device, uint32_t class)
 						DEVICE_INTERFACE, "Icon");
 }
 
-void device_set_rpa(struct btd_device *device, bool value)
+void device_set_privacy(struct btd_device *device, bool value,
+					const uint8_t *irk)
 {
-	device->rpa = value;
+	device->privacy = value;
+
+	free(device->irk);
+
+	if (irk)
+		device->irk = util_memdup(irk, 16);
+	else
+		device->irk = NULL;
+}
+
+bool device_get_privacy(struct btd_device *device)
+{
+	if (device->privacy)
+		return true;
+
+	return device_address_is_private(device);
 }
 
 void device_update_addr(struct btd_device *device, const bdaddr_t *bdaddr,
-							uint8_t bdaddr_type)
+				uint8_t bdaddr_type, const uint8_t *irk)
 {
 	bool auto_connect = device->auto_connect;
 
-	device_set_rpa(device, true);
+	device_set_privacy(device, true, irk);
 
 	if (!bacmp(bdaddr, &device->bdaddr) &&
 					bdaddr_type == device->bdaddr_type)
@@ -4430,7 +5081,8 @@ void device_update_addr(struct btd_device *device, const bdaddr_t *bdaddr,
 	/* Since this function is only used for LE SMP Identity
 	 * Resolving purposes we can now assume LE is supported.
 	 */
-	device->le = true;
+	if (!device->le)
+		device->le = btd_bearer_new(device, BDADDR_LE_PUBLIC);
 
 	/* Remove old address from accept/auto-connect list since its address
 	 * will be changed.
@@ -4460,7 +5112,13 @@ void device_set_bredr_support(struct btd_device *device)
 	if (btd_opts.mode == BT_MODE_LE || device->bredr)
 		return;
 
-	device->bredr = true;
+	if (!device->bredr)
+		device->bredr = btd_bearer_new(device, BDADDR_BREDR);
+
+	if (device->le)
+		g_dbus_emit_property_changed(dbus_conn, device->path,
+					DEVICE_INTERFACE, "PreferredBearer");
+
 	store_device_info(device);
 }
 
@@ -4469,11 +5127,17 @@ void device_set_le_support(struct btd_device *device, uint8_t bdaddr_type)
 	if (btd_opts.mode == BT_MODE_BREDR || device->le)
 		return;
 
-	device->le = true;
+	if (!device->le)
+		device->le = btd_bearer_new(device, BDADDR_LE_PUBLIC);
+
 	device->bdaddr_type = bdaddr_type;
 
 	g_dbus_emit_property_changed(dbus_conn, device->path,
 					DEVICE_INTERFACE, "AddressType");
+
+	if (device->bredr)
+		g_dbus_emit_property_changed(dbus_conn, device->path,
+					DEVICE_INTERFACE, "PreferredBearer");
 
 	store_device_info(device);
 }
@@ -4495,11 +5159,16 @@ void device_update_last_seen(struct btd_device *device, uint8_t bdaddr_type,
 	set_temporary_timer(device, btd_opts.tmpto);
 }
 
+void btd_device_set_connectable(struct btd_device *device, bool connectable)
+{
+	device_update_last_seen(device, device->bdaddr_type, connectable);
+}
+
 /* It is possible that we have two device objects for the same device in
  * case it has first been discovered over BR/EDR and has a private
  * address when discovered over LE for the first time. In such a case we
  * need to inherit critical values from the duplicate so that we don't
- * ovewrite them when writing to storage. The next time bluetoothd
+ * overwrite them when writing to storage. The next time bluetoothd
  * starts the device will show up as a single instance.
  */
 void device_merge_duplicate(struct btd_device *dev, struct btd_device *dup)
@@ -4640,6 +5309,7 @@ static void device_remove_stored(struct btd_device *device)
 	}
 	g_key_file_remove_group(key_file, "ServiceRecords", NULL);
 	g_key_file_remove_group(key_file, "Attributes", NULL);
+	g_key_file_remove_group(key_file, "Endpoints", NULL);
 
 	data = g_key_file_to_data(key_file, &length, NULL);
 	if (length > 0) {
@@ -4736,6 +5406,39 @@ static bool addr_is_public(uint8_t addr_type)
 	return false;
 }
 
+static bool addr_is_resolvable(const bdaddr_t *bdaddr, uint8_t addr_type)
+{
+	if (addr_type != BDADDR_LE_RANDOM)
+		return false;
+
+	switch (bdaddr->b[5] >> 6) {
+	case 0x01:	/* Private resolvable */
+		return true;
+	default:
+		return false;
+	}
+}
+
+static int device_irk_cmp(const struct btd_device *device,
+				const struct device_addr_type *addr)
+{
+	struct bt_crypto *crypto;
+	uint8_t hash[3];
+
+	if (!device->irk)
+		return -1;
+
+	crypto = bt_crypto_new();
+	if (!crypto)
+		return -1;
+
+	bt_crypto_ah(crypto, device->irk, addr->bdaddr.b + 3, hash);
+
+	bt_crypto_unref(crypto);
+
+	return memcmp(addr, hash, 3);
+}
+
 int device_addr_type_cmp(gconstpointer a, gconstpointer b)
 {
 	const struct btd_device *dev = a;
@@ -4764,8 +5467,13 @@ int device_addr_type_cmp(gconstpointer a, gconstpointer b)
 		return -1;
 
 	if (addr->bdaddr_type != dev->bdaddr_type) {
+		if (dev->privacy && addr_is_resolvable(&addr->bdaddr,
+							addr->bdaddr_type))
+			return device_irk_cmp(dev, addr);
+
 		if (addr->bdaddr_type == dev->conn_bdaddr_type)
 			return bacmp(&dev->conn_bdaddr, &addr->bdaddr);
+
 		return -1;
 	}
 
@@ -5434,15 +6142,32 @@ static void gatt_debug(const char *str, void *user_data)
 
 static void gatt_client_init(struct btd_device *device)
 {
+	uint8_t features;
+
 	gatt_client_cleanup(device);
 
-	if (!device->connect && !btd_opts.reverse_discovery) {
+	if (!btd_device_is_initiator(device) && !btd_opts.reverse_discovery) {
 		DBG("Reverse service discovery disabled: skipping GATT client");
 		return;
 	}
 
+	if (!btd_device_is_initiator(device) && !btd_opts.gatt_client) {
+		DBG("GATT client disabled: skipping GATT client");
+		return;
+	}
+
+	features =  BT_GATT_CHRC_CLI_FEAT_ROBUST_CACHING
+				| BT_GATT_CHRC_CLI_FEAT_NFY_MULTI;
+	if (btd_opts.gatt_channels > 1)
+		features |= BT_GATT_CHRC_CLI_FEAT_EATT;
+
+	if (device->bonding) {
+		DBG("Elevating security level since bonding is in progress");
+		bt_att_set_security(device->att, BT_ATT_SECURITY_MEDIUM);
+	}
+
 	device->client = bt_gatt_client_new(device->db, device->att,
-							device->att_mtu, 0);
+						device->att_mtu, features);
 	if (!device->client) {
 		DBG("Failed to initialize");
 		return;
@@ -5481,7 +6206,7 @@ static void gatt_client_init(struct btd_device *device)
 	 * it shall be triggered only when ready to avoid possible clashes where
 	 * both sides attempt to connection at same time.
 	 */
-	if (device->connect)
+	if (btd_device_is_initiator(device))
 		btd_gatt_client_eatt_connect(device->client_dbus);
 }
 
@@ -5701,8 +6426,7 @@ done:
 
 	if (device->connect) {
 		if (err < 0)
-			reply = btd_error_failed(device->connect,
-					btd_error_le_conn_from_errno(err));
+			reply = btd_error_le_errno(device->connect, err);
 		else
 			reply = dbus_message_new_method_return(device->connect);
 
@@ -6026,6 +6750,11 @@ void device_set_bonded(struct btd_device *device, uint8_t bdaddr_type)
 
 	state->bonded = true;
 
+	if (bdaddr_type == BDADDR_BREDR)
+		btd_bearer_bonded(device->bredr);
+	else
+		btd_bearer_bonded(device->le);
+
 	btd_device_set_temporary(device, false);
 
 	/* If the other bearer state was already true we don't need to
@@ -6052,6 +6781,22 @@ void device_set_legacy(struct btd_device *device, bool legacy)
 
 	g_dbus_emit_property_changed(dbus_conn, device->path,
 					DEVICE_INTERFACE, "LegacyPairing");
+}
+
+void device_set_cable_pairing(struct btd_device *device, bool cable_pairing)
+{
+	if (!device)
+		return;
+
+	if (device->cable_pairing == cable_pairing)
+		return;
+
+	DBG("setting cable pairing %d", cable_pairing);
+
+	device->cable_pairing = cable_pairing;
+
+	g_dbus_emit_property_changed(dbus_conn, device->path,
+					DEVICE_INTERFACE, "CablePairing");
 }
 
 void device_store_svc_chng_ccc(struct btd_device *device, uint8_t bdaddr_type,
@@ -6260,6 +7005,11 @@ void device_set_paired(struct btd_device *dev, uint8_t bdaddr_type)
 
 	state->paired = true;
 
+	if (bdaddr_type == BDADDR_BREDR)
+		btd_bearer_paired(dev->bredr);
+	else
+		btd_bearer_paired(dev->le);
+
 	/* If the other bearer state was already true we don't need to
 	 * send any property signals.
 	 */
@@ -6283,6 +7033,11 @@ void device_set_unpaired(struct btd_device *dev, uint8_t bdaddr_type)
 		return;
 
 	state->paired = false;
+
+	if (bdaddr_type == BDADDR_BREDR)
+		btd_bearer_paired(dev->bredr);
+	else
+		btd_bearer_paired(dev->le);
 
 	/*
 	 * If the other bearer state is still true we don't need to
@@ -6339,6 +7094,10 @@ void device_bonding_complete(struct btd_device *device, uint8_t bdaddr_type,
 
 	DBG("bonding %p status 0x%02x", bonding, status);
 
+	device->bonding_status = status;
+	if (status == MGMT_STATUS_AUTH_FAILED)
+		device_request_disconnect(device, NULL);
+
 	if (auth && auth->agent)
 		agent_cancel(auth->agent);
 
@@ -6348,7 +7107,8 @@ void device_bonding_complete(struct btd_device *device, uint8_t bdaddr_type,
 		/* Put the device back to the temporary state so that it will be
 		 * treated as a newly discovered device.
 		 */
-		if (!device_is_paired(device, bdaddr_type) &&
+		if (!btd_device_bearer_is_connected(device) &&
+				!device_is_paired(device, bdaddr_type) &&
 				!btd_device_is_trusted(device))
 			btd_device_set_temporary(device, true);
 
@@ -6357,6 +7117,10 @@ void device_bonding_complete(struct btd_device *device, uint8_t bdaddr_type,
 	}
 
 	device_auth_req_free(device);
+
+	/* Enable the wake_allowed property if required */
+	if (device->wake_override == WAKE_FLAG_ENABLED)
+		device_set_wake_allowed(device, true, -1U);
 
 	/* If we're already paired nothing more is needed */
 	if (state->paired)
@@ -6368,7 +7132,7 @@ void device_bonding_complete(struct btd_device *device, uint8_t bdaddr_type,
 	 * request
 	 */
 	if (state->svc_resolved && bonding) {
-		/* Attept to store services for this device failed because it
+		/* Attempt to store services for this device failed because it
 		 * was not paired. Now that we're paired retry. */
 		store_gatt_db(device);
 
@@ -6444,8 +7208,10 @@ unsigned int device_wait_for_svc_complete(struct btd_device *dev,
 
 	if (state->svc_resolved || !btd_opts.reverse_discovery)
 		cb->idle_id = g_idle_add(svc_idle_cb, cb);
-	else if (dev->discov_timer > 0) {
-		timeout_remove(dev->discov_timer);
+	else {
+		if (dev->discov_timer > 0)
+			timeout_remove(dev->discov_timer);
+
 		dev->discov_timer = timeout_add_seconds(
 						0,
 						start_discovery,
@@ -6505,7 +7271,7 @@ static gboolean device_bonding_retry(gpointer data)
 	DBG("retrying bonding");
 	bonding->retry_timer = 0;
 
-	/* Restart the bonding timer to the begining of the pairing. If not
+	/* Restart the bonding timer to the beginning of the pairing. If not
 	 * pincode request/reply occurs during this retry,
 	 * device_bonding_last_duration() will return a consistent value from
 	 * this point. */
@@ -6869,6 +7635,9 @@ void device_cancel_authentication(struct btd_device *device, gboolean aborted)
 	struct authentication_req *auth = device->authr;
 	char addr[18];
 
+	if (device->adapter)
+		btd_adapter_cancel_service_auth(device->adapter, device);
+
 	if (!auth)
 		return;
 
@@ -6912,6 +7681,27 @@ struct gatt_db *btd_device_get_gatt_db(struct btd_device *device)
 		return NULL;
 
 	return device->db;
+}
+
+bool btd_device_set_gatt_db(struct btd_device *device, struct gatt_db *db)
+{
+	struct gatt_db *clone;
+
+	if (!device)
+		return false;
+
+	clone = gatt_db_clone(db);
+	if (clone)
+		return false;
+
+	gatt_db_unregister(device->db, device->db_id);
+	gatt_db_unref(device->db);
+
+	device->db = clone;
+	device->db_id = gatt_db_register(device->db, gatt_service_added,
+					gatt_service_removed, device, NULL);
+
+	return true;
 }
 
 struct bt_gatt_client *btd_device_get_gatt_client(struct btd_device *device)
@@ -7131,6 +7921,27 @@ void btd_device_set_pnpid(struct btd_device *device, uint16_t source,
 	store_device_info(device);
 }
 
+bool btd_device_flags_enabled(struct btd_device *dev, uint32_t flags)
+{
+	const char *ll_privacy = "15c0a148-c273-11ea-b3de-0242ac130004";
+
+	if (!dev)
+		return false;
+
+	if (dev->current_flags & flags)
+		return true;
+
+	/* For backward compatibility check for LL Privacy experimental UUID
+	 * since that shall be equivalent to DEVICE_FLAG_ADDRESS_RESOLUTION on
+	 * older kernels.
+	 */
+	if ((flags & DEVICE_FLAG_ADDRESS_RESOLUTION) &&
+			btd_kernel_experimental_enabled(ll_privacy))
+		return true;
+
+	return false;
+}
+
 uint32_t btd_device_get_current_flags(struct btd_device *dev)
 {
 	return dev->current_flags;
@@ -7139,6 +7950,22 @@ uint32_t btd_device_get_current_flags(struct btd_device *dev)
 uint32_t btd_device_get_supported_flags(struct btd_device *dev)
 {
 	return dev->supported_flags;
+}
+
+void btd_device_set_pending_flags(struct btd_device *dev, uint32_t flags)
+{
+	if (!dev)
+		return;
+
+	dev->pending_flags = flags;
+}
+
+uint32_t btd_device_get_pending_flags(struct btd_device *dev)
+{
+	if (!dev)
+		return 0;
+
+	return dev->pending_flags;
 }
 
 /* This event is sent immediately after add device on all mgmt sockets.
@@ -7153,11 +7980,12 @@ void btd_device_flags_changed(struct btd_device *dev, uint32_t supported_flags,
 
 	dev->supported_flags = supported_flags;
 	dev->current_flags = current_flags;
+	dev->pending_flags &= ~current_flags;
 
 	if (!changed_flags)
 		return;
 
-	if (changed_flags & DEVICE_FLAG_REMOTE_WAKEUP) {
+	if (changed_flags & DEVICE_FLAG_REMOTE_WAKEUP && dev->wake_support) {
 		flag_value = !!(current_flags & DEVICE_FLAG_REMOTE_WAKEUP);
 		dev->pending_wake_allowed = flag_value;
 
@@ -7239,4 +8067,24 @@ void btd_device_foreach_ad(struct btd_device *dev, bt_ad_func_t func,
 							void *data)
 {
 	bt_ad_foreach_data(dev->ad, func, data);
+}
+
+void btd_device_set_conn_param(struct btd_device *device, uint16_t min_interval,
+					uint16_t max_interval, uint16_t latency,
+					uint16_t timeout)
+{
+	/* Attempt to load the new connection parameters, in case it is
+	 * successful the MGMT_EV_NEW_CONN_PARAM will be generated which will
+	 * then trigger btd_adapter_store_conn_param.
+	 */
+	btd_adapter_load_conn_param(device->adapter, &device->bdaddr,
+					device->bdaddr_type, min_interval,
+					max_interval, latency,
+					timeout);
+}
+
+void btd_device_foreach_service_data(struct btd_device *dev, bt_ad_func_t func,
+							void *data)
+{
+	bt_ad_foreach_service_data(dev->ad, func, data);
 }

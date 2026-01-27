@@ -20,9 +20,9 @@
 #include "src/shared/queue.h"
 #include "src/shared/util.h"
 #include "src/shared/timeout.h"
-#include "lib/bluetooth.h"
-#include "lib/l2cap.h"
-#include "lib/uuid.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/l2cap.h"
+#include "bluetooth/uuid.h"
 #include "src/shared/att.h"
 #include "src/shared/crypto.h"
 
@@ -551,7 +551,7 @@ static bool can_write_data(struct io *io, void *user_data)
 	if (!op)
 		return false;
 
-	if (!bt_att_chan_write(chan, op->opcode, op->pdu, op->len)) {
+	if (bt_att_chan_write(chan, op->opcode, op->pdu, op->len) < 0) {
 		if (op->callback)
 			op->callback(BT_ATT_OP_ERROR_RSP, NULL, 0,
 							op->user_data);
@@ -669,7 +669,7 @@ static bool disconnect_cb(struct io *io, void *user_data)
 
 	DBG(att, "Channel %p disconnected: %s", chan, strerror(err));
 
-	/* Dettach channel */
+	/* Detach channel */
 	queue_remove(att->chans, chan);
 
 	if (chan->pending_req) {
@@ -731,6 +731,13 @@ static bool bt_att_chan_set_security(struct bt_att_chan *chan, int level)
 		chan->sec_level = level;
 		return true;
 	}
+
+	/* Check if security level has already been set, if the security level
+	 * is higher it shall satisfy the request since we never want to
+	 * downgrade security.
+	 */
+	if (level <= bt_att_chan_get_security(chan))
+		return true;
 
 	memset(&sec, 0, sizeof(sec));
 	sec.level = level;
@@ -1009,8 +1016,9 @@ static void handle_notify(struct bt_att_chan *chan, uint8_t *pdu,
 		found = true;
 
 		if (notify->callback)
-			notify->callback(chan, opcode, pdu + 1, pdu_len - 1,
-							notify->user_data);
+			notify->callback(chan, chan->mtu, opcode,
+						pdu + 1, pdu_len - 1,
+						notify->user_data);
 
 		/* callback could remove all entries from notify list */
 		if (queue_isempty(att->notify_list))
@@ -2041,4 +2049,30 @@ bool bt_att_has_crypto(struct bt_att *att)
 		return false;
 
 	return att->crypto ? true : false;
+}
+
+bool bt_att_set_retry(struct bt_att *att, unsigned int id, bool retry)
+{
+	struct att_send_op *op;
+
+	if (!id)
+		return false;
+
+	op = queue_find(att->req_queue, match_op_id, UINT_TO_PTR(id));
+	if (op)
+		goto done;
+
+	op = queue_find(att->ind_queue, match_op_id, UINT_TO_PTR(id));
+	if (op)
+		goto done;
+
+	op = queue_find(att->write_queue, match_op_id, UINT_TO_PTR(id));
+
+done:
+	if (!op)
+		return false;
+
+	op->retry = !retry;
+
+	return true;
 }

@@ -16,11 +16,13 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <unistd.h>
+#include <limits.h>
 
-#include "lib/bluetooth.h"
-#include "lib/sdp.h"
-#include "lib/sdp_lib.h"
-#include "lib/uuid.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/sdp.h"
+#include "bluetooth/sdp_lib.h"
+#include "bluetooth/uuid.h"
+#include "bluetooth/mgmt.h"
 #include "btio/btio.h"
 #include "gdbus/gdbus.h"
 #include "src/shared/util.h"
@@ -112,6 +114,7 @@ struct external_profile {
 
 struct client_io {
 	struct bt_att *att;
+	struct external_chrc *chrc;
 	unsigned int disconn_id;
 	struct io *io;
 };
@@ -205,6 +208,8 @@ struct device_info {
 	bdaddr_t bdaddr;
 	uint8_t bdaddr_type;
 };
+
+static struct queue *dbs = NULL;
 
 static void ccc_cb_free(void *data)
 {
@@ -736,9 +741,18 @@ static void gap_car_read_cb(struct gatt_db_attribute *attrib,
 					uint8_t opcode, struct bt_att *att,
 					void *user_data)
 {
-	uint8_t value = 0x01;
+	uint8_t value = 0x00;
 
 	DBG("GAP Central Address Resolution read request\n");
+
+	if (btd_opts.defaults.le.addr_resolution) {
+		struct btd_device *device;
+
+		device = btd_adapter_find_device_by_fd(bt_att_get_fd(att));
+		if (device)
+			value = btd_device_flags_enabled(device,
+						DEVICE_FLAG_ADDRESS_RESOLUTION);
+	}
 
 	gatt_db_attribute_read_result(attrib, id, 0, &value, sizeof(value));
 }
@@ -861,10 +875,13 @@ static void populate_gap_service(struct btd_gatt_database *database)
 {
 	bt_uuid_t uuid;
 	struct gatt_db_attribute *service, *attrib;
+	bool ll_privacy = btd_adapter_has_settings(database->adapter,
+						MGMT_SETTING_LL_PRIVACY);
 
 	/* Add the GAP service */
 	bt_uuid16_create(&uuid, UUID_GAP);
-	service = gatt_db_add_service(database->db, &uuid, true, 7);
+	service = gatt_db_add_service(database->db, &uuid, true,
+						ll_privacy ? 7 : 5);
 
 	/*
 	 * Device Name characteristic.
@@ -886,15 +903,19 @@ static void populate_gap_service(struct btd_gatt_database *database)
 							NULL, database);
 	gatt_db_attribute_set_fixed_length(attrib, 2);
 
-	/*
-	 * Central Address Resolution characteristic.
-	 */
-	bt_uuid16_create(&uuid, GATT_CHARAC_CAR);
-	attrib = gatt_db_service_add_characteristic(service, &uuid,
+	/* Only enable Central Address Resolution if LL Privacy is supported */
+	if (ll_privacy) {
+		/*
+		 * Central Address Resolution characteristic.
+		 */
+		bt_uuid16_create(&uuid, GATT_CHARAC_CAR);
+		attrib = gatt_db_service_add_characteristic(service, &uuid,
 							BT_ATT_PERM_READ,
 							BT_GATT_CHRC_PROP_READ,
 							gap_car_read_cb,
 							NULL, database);
+	}
+
 	gatt_db_attribute_set_fixed_length(attrib, 1);
 
 	gatt_db_service_set_active(service, true);
@@ -1233,7 +1254,8 @@ static void server_feat_read_cb(struct gatt_db_attribute *attrib,
 		goto done;
 	}
 
-	value |= BT_GATT_CHRC_SERVER_FEAT_EATT;
+	if (btd_opts.gatt_channels > 1)
+		value |= BT_GATT_CHRC_SERVER_FEAT_EATT;
 
 done:
 	gatt_db_attribute_read_result(attrib, id, ecode, &value, sizeof(value));
@@ -2247,6 +2269,9 @@ static uint8_t dbus_error_to_att_ecode(const char *name, const char *msg,
 	if (strcmp(name, ERROR_INTERFACE ".InProgress") == 0)
 		return BT_ERROR_ALREADY_IN_PROGRESS;
 
+	if (!strcmp(name, ERROR_INTERFACE ".ImproperlyConfigured"))
+		return BT_ERROR_CCC_IMPROPERLY_CONFIGURED;
+
 	if (strcmp(name, ERROR_INTERFACE ".NotPermitted") == 0)
 		return perm_err;
 
@@ -2586,23 +2611,59 @@ static bool sock_hup(struct io *io, void *user_data)
 	return false;
 }
 
+static bool sock_io_write(struct io *io, void *user_data)
+{
+	uint8_t buf[] = { 1 };
+	struct iovec iov = { buf, sizeof(buf) };
+
+	/* Send a 1 to the server as confirmation */
+	io_send(io, &iov, 1);
+
+	return false;
+}
+
+static void sock_io_conf(void *user_data)
+{
+	struct io *io = user_data;
+
+	io_set_write_handler(io, sock_io_write, NULL, NULL);
+}
+
 static bool sock_io_read(struct io *io, void *user_data)
 {
-	struct external_chrc *chrc = user_data;
+	struct client_io *client = user_data;
+	struct external_chrc *chrc = client->chrc;
 	uint8_t buf[512];
 	int fd = io_get_fd(io);
 	ssize_t bytes_read;
+	struct notify notify;
+	struct device_state *state;
+
+	if (fd < 0) {
+		error("io_get_fd() returned %d\n", fd);
+		return false;
+	}
 
 	bytes_read = read(fd, buf, sizeof(buf));
 	if (bytes_read <= 0)
 		return false;
 
-	send_notification_to_devices(chrc->service->app->database,
-				gatt_db_attribute_get_handle(chrc->attrib),
-				buf, bytes_read,
-				gatt_db_attribute_get_handle(chrc->ccc),
-				conf_cb,
-				chrc->proxy);
+	memset(&notify, 0, sizeof(notify));
+
+	notify.database = client->chrc->service->app->database;
+	notify.handle = gatt_db_attribute_get_handle(chrc->attrib);
+	notify.ccc_handle = gatt_db_attribute_get_handle(chrc->ccc);
+	notify.value = (void *) buf;
+	notify.len = bytes_read;
+	notify.conf = sock_io_conf;
+	notify.user_data = io;
+
+
+	state = find_device_state_by_att(notify.database, client->att);
+	if (!state)
+		return false;
+
+	send_notification_to_device(state, &notify);
 
 	return true;
 }
@@ -2624,6 +2685,7 @@ static int sock_io_send(struct io *io, const void *data, size_t len)
 {
 	struct msghdr msg;
 	struct iovec iov;
+	int fd;
 
 	iov.iov_base = (void *) data;
 	iov.iov_len = len;
@@ -2632,7 +2694,13 @@ static int sock_io_send(struct io *io, const void *data, size_t len)
 	msg.msg_iov = &iov;
 	msg.msg_iovlen = 1;
 
-	return sendmsg(io_get_fd(io), &msg, MSG_NOSIGNAL);
+	fd = io_get_fd(io);
+	if (fd < 0) {
+		error("io_get_fd() returned %d\n", fd);
+		return fd;
+	}
+
+	return sendmsg(fd, &msg, MSG_NOSIGNAL);
 }
 
 static void att_disconnect_cb(int err, void *user_data)
@@ -2652,6 +2720,7 @@ client_io_new(struct external_chrc *chrc, int fd, struct bt_att *att)
 
 	client = new0(struct client_io, 1);
 	client->att = bt_att_ref(att);
+	client->chrc = chrc;
 	client->disconn_id = bt_att_register_disconnect(att, att_disconnect_cb,
 							client, NULL);
 	client->io = sock_io_new(fd, chrc);
@@ -2721,6 +2790,7 @@ static void acquire_write_reply(DBusMessage *message, void *user_data)
 		if (ecode != BT_ATT_ERROR_UNLIKELY) {
 			gatt_db_attribute_write_result(op->attrib, op->id,
 								ecode);
+			pending_op_free(op);
 			return;
 		}
 
@@ -2809,7 +2879,7 @@ client_notify_io_get(struct external_chrc *chrc, int fd, struct bt_att *att)
 
 	client = client_io_new(chrc, fd, att);
 
-	io_set_read_handler(client->io, sock_io_read, chrc, NULL);
+	io_set_read_handler(client->io, sock_io_read, client, NULL);
 
 	if (!chrc->notify_ios)
 		chrc->notify_ios = queue_new();
@@ -3331,12 +3401,12 @@ static void database_add_includes(struct external_service *service)
 static bool database_add_chrc(struct external_service *service,
 						struct external_chrc *chrc)
 {
-	uint16_t handle;
+	uint16_t handle = 0, value_handle;
 	bt_uuid_t uuid;
 	char str[MAX_LEN_UUID_STR];
 	const struct queue_entry *entry;
 
-	if (!parse_handle(chrc->proxy, &handle)) {
+	if (!parse_handle(chrc->proxy, &value_handle)) {
 		error("Failed to read \"Handle\" property of characteristic");
 		return false;
 	}
@@ -3351,10 +3421,14 @@ static bool database_add_chrc(struct external_service *service,
 		return false;
 	}
 
+	if (value_handle)
+		handle = value_handle - 1;
+
 	chrc->attrib = gatt_db_service_insert_characteristic(service->attrib,
-						handle, &uuid, chrc->perm,
-						chrc->props, chrc_read_cb,
-						chrc_write_cb, chrc);
+						handle, value_handle, &uuid,
+						chrc->perm, chrc->props,
+						chrc_read_cb, chrc_write_cb,
+						chrc);
 	if (!chrc->attrib) {
 		error("Failed to create characteristic entry in database");
 		return false;
@@ -4021,16 +4095,18 @@ struct btd_gatt_database *btd_gatt_database_new(struct btd_adapter *adapter)
 
 bredr:
 	/* BR/EDR socket */
-	database->bredr_io = bt_io_listen(connect_cb, NULL, NULL, NULL, &gerr,
-					BT_IO_OPT_SOURCE_BDADDR, addr,
+	if (btd_adapter_get_bredr(adapter)) {
+		database->bredr_io = bt_io_listen(connect_cb, NULL, NULL, NULL,
+					&gerr, BT_IO_OPT_SOURCE_BDADDR, addr,
 					BT_IO_OPT_PSM, BT_ATT_PSM,
 					BT_IO_OPT_SEC_LEVEL, BT_IO_SEC_MEDIUM,
 					BT_IO_OPT_MTU, btd_opts.gatt_mtu,
 					BT_IO_OPT_INVALID);
-	if (database->bredr_io == NULL) {
-		error("Failed to start listening: %s", gerr->message);
-		g_error_free(gerr);
-		goto fail;
+		if (database->bredr_io == NULL) {
+			error("Failed to start listening: %s", gerr->message);
+			g_error_free(gerr);
+			goto fail;
+		}
 	}
 
 	if (g_dbus_register_interface(btd_get_dbus_connection(),
@@ -4048,6 +4124,11 @@ bredr:
 							database, NULL);
 	if (!database->db_id)
 		goto fail;
+
+	if (!dbs)
+		dbs = queue_new();
+
+	queue_push_tail(dbs, database);
 
 	return database;
 
@@ -4067,6 +4148,34 @@ void btd_gatt_database_destroy(struct btd_gatt_database *database)
 					GATT_MANAGER_IFACE);
 
 	gatt_database_free(database);
+}
+
+static bool match_db(const void *data, const void *user_data)
+{
+	const struct btd_gatt_database *database = data;
+	const struct gatt_db *db = user_data;
+
+	return database->db == db;
+}
+
+struct btd_gatt_database *btd_gatt_database_get(struct gatt_db *db)
+{
+	struct btd_gatt_database *database;
+
+	database = queue_find(dbs, match_db, db);
+	if (!database)
+		return NULL;
+
+	return database;
+}
+
+struct btd_adapter *
+btd_gatt_database_get_adapter(struct btd_gatt_database *database)
+{
+	if (!database)
+		return NULL;
+
+	return database->adapter;
 }
 
 struct gatt_db *btd_gatt_database_get_db(struct btd_gatt_database *database)

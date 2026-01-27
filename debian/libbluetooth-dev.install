@@ -2,4 +2,3 @@ usr/include/bluetooth
 usr/lib/*/libbluetooth.a
 usr/lib/*/libbluetooth.so
 usr/lib/*/pkgconfig
-usr/lib/*/bluetooth/plugins/sixaxis.a

@@ -17,8 +17,8 @@
 #include <stdio.h>
 #include <inttypes.h>
 
-#include "lib/bluetooth.h"
-#include "lib/hci.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/hci.h"
 
 #include "src/shared/util.h"
 #include "display.h"
@@ -171,33 +171,77 @@ struct intel_version_tlv {
 };
 
 static void print_version_tlv_u32(const struct intel_version_tlv *tlv,
-				  char *type_str)
+				  const char *type_str)
 {
 	print_field("%s(%u): 0x%8.8x", type_str, tlv->type, get_le32(tlv->val));
 }
 
 static void print_version_tlv_u16(const struct intel_version_tlv *tlv,
-				  char *type_str)
+				  const char *type_str)
 {
 	print_field("%s(%u): 0x%4.4x", type_str, tlv->type, get_le16(tlv->val));
 }
 
 static void print_version_tlv_u8(const struct intel_version_tlv *tlv,
-				 char *type_str)
+				 const char *type_str)
 {
 	print_field("%s(%u): 0x%2.2x", type_str, tlv->type, get_u8(tlv->val));
 }
 
 static void print_version_tlv_enabled(const struct intel_version_tlv *tlv,
-				      char *type_str)
+				      const char *type_str)
 {
 	print_field("%s(%u): %s(%u)", type_str, tlv->type,
 					tlv->val[0] ? "Enabled" : "Disabled",
 					tlv->val[0]);
 }
 
+static void print_version_tlv_cnvi_bt(const struct intel_version_tlv *tlv,
+				      const char *type_str)
+{
+	const char *str;
+	uint32_t cnvibt = get_le32(tlv->val);
+	uint8_t variant = (cnvibt >> 16) & 0x3f;
+
+	switch (variant) {
+	case 0x17:
+		str = "Typhoon Peak2";
+		break;
+	case 0x18:
+		str = "Solar";
+		break;
+	case 0x19:
+		str = "Solar F";
+		break;
+	case 0x1b:
+		str = "Magnetor";
+		break;
+	case 0x1c:
+		str = "Gale Peak2";
+		break;
+	case 0x1d:
+		str = "BlazarU";
+		break;
+	case 0x1e:
+		str = "BlazarI";
+		break;
+	case 0x1f:
+		str = "Scorpious Peak";
+		break;
+	case 0x22:
+		str = "BlazarIW";
+		break;
+	default:
+		str = "Unknown";
+		break;
+	}
+
+	print_field("%s(%u): 0x%8.8x - %s(0x%2.2x)", type_str, tlv->type,
+			cnvibt, str, variant);
+}
+
 static void print_version_tlv_img_type(const struct intel_version_tlv *tlv,
-				       char *type_str)
+				       const char *type_str)
 {
 	const char *str;
 
@@ -217,34 +261,34 @@ static void print_version_tlv_img_type(const struct intel_version_tlv *tlv,
 }
 
 static void print_version_tlv_timestamp(const struct intel_version_tlv *tlv,
-					char *type_str)
+					const char *type_str)
 {
 	print_field("%s(%u): %u-%u", type_str, tlv->type,
 				tlv->val[1], tlv->val[0]);
 }
 
 static void print_version_tlv_min_fw(const struct intel_version_tlv *tlv,
-				     char *type_str)
+				     const char *type_str)
 {
 	print_field("%s(%u): %u-%u.%u", type_str, tlv->type,
 				tlv->val[0], tlv->val[1], 2000 + tlv->val[2]);
 }
 
 static void print_version_tlv_otp_bdaddr(const struct intel_version_tlv *tlv,
-					 char *type_str)
+					 const char *type_str)
 {
 	packet_print_addr(type_str, tlv->val, 0x00);
 }
 
 static void print_version_tlv_unknown(const struct intel_version_tlv *tlv,
-				      char *type_str)
+				      const char *type_str)
 {
 	print_field("%s(%u): ", type_str, tlv->type);
 	packet_hexdump(tlv->val, tlv->len);
 }
 
 static void print_version_tlv_mfg(const struct intel_version_tlv *tlv,
-					 char *type_str)
+					 const char *type_str)
 {
 	uint16_t mfg_id = get_le16(tlv->val);
 
@@ -254,12 +298,12 @@ static void print_version_tlv_mfg(const struct intel_version_tlv *tlv,
 
 static const struct intel_version_tlv_desc {
 	uint8_t type;
-	char *type_str;
-	void (*func)(const struct intel_version_tlv *tlv, char *type_str);
+	const char *type_str;
+	void (*func)(const struct intel_version_tlv *tlv, const char *type_str);
 } intel_version_tlv_table[] = {
 	{ 16, "CNVi TOP", print_version_tlv_u32 },
 	{ 17, "CNVr TOP", print_version_tlv_u32 },
-	{ 18, "CNVi BT", print_version_tlv_u32 },
+	{ 18, "CNVi BT", print_version_tlv_cnvi_bt},
 	{ 19, "CNVr BT", print_version_tlv_u32 },
 	{ 20, "CNVi OTP", print_version_tlv_u16 },
 	{ 21, "CNVr OTP", print_version_tlv_u16 },
@@ -365,7 +409,7 @@ static void read_version_rsp(uint16_t index, const void *data, uint8_t size)
 
 static void read_version_cmd(uint16_t index, const void *data, uint8_t size)
 {
-	char *str;
+	const char *str;
 	uint8_t type;
 
 	/* This is the legacy read version command format and no further action
@@ -1798,7 +1842,7 @@ static const struct vendor_evt vendor_prefix_evt_table[] = {
 	{ }
 };
 
-const uint8_t intel_vendor_prefix[] = {0x87, 0x80};
+static const uint8_t intel_vendor_prefix[] = {0x87, 0x80};
 #define INTEL_VENDOR_PREFIX_SIZE sizeof(intel_vendor_prefix)
 
 /*

@@ -26,11 +26,12 @@
 #include <time.h>
 #include <sys/time.h>
 #include <sys/socket.h>
+#include <limits.h>
 
-#include "lib/bluetooth.h"
-#include "lib/uuid.h"
-#include "lib/hci.h"
-#include "lib/hci_lib.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/uuid.h"
+#include "bluetooth/hci.h"
+#include "bluetooth/hci_lib.h"
 
 #include "src/shared/util.h"
 #include "src/shared/btsnoop.h"
@@ -100,7 +101,7 @@
 #define UNKNOWN_MANUFACTURER 0xffff
 
 static time_t time_offset = ((time_t) -1);
-static int priority_level = BTSNOOP_PRIORITY_INFO;
+static int priority_level = BTSNOOP_PRIORITY_DEBUG;
 static unsigned long filter_mask = 0;
 static bool index_filter = false;
 static uint16_t index_current = 0;
@@ -120,6 +121,29 @@ struct ctrl_data {
 };
 
 static struct ctrl_data ctrl_list[MAX_CTRL];
+
+#define MAX_INDEX 16
+
+struct index_buf_pool {
+	uint8_t total;
+	uint8_t tx;
+};
+
+struct index_data {
+	uint8_t  type;
+	uint8_t  bdaddr[6];
+	uint16_t manufacturer;
+	uint16_t msft_opcode;
+	uint8_t  msft_evt_prefix[8];
+	uint8_t  msft_evt_len;
+	size_t   frame;
+	struct index_buf_pool acl;
+	struct index_buf_pool sco;
+	struct index_buf_pool le;
+	struct index_buf_pool iso;
+};
+
+static struct index_data index_list[MAX_INDEX];
 
 static void assign_ctrl(uint32_t cookie, uint16_t format, const char *name)
 {
@@ -189,43 +213,42 @@ static struct packet_conn_data *lookup_parent(uint16_t handle)
 	return NULL;
 }
 
-static void assign_handle(uint16_t index, uint16_t handle, uint8_t type,
-					uint8_t *dst, uint8_t dst_type)
+static struct index_buf_pool *get_pool(uint16_t index, uint8_t type)
 {
-	int i;
+	if (index >= MAX_INDEX)
+		return NULL;
 
-	for (i = 0; i < MAX_CONN; i++) {
-		if (conn_list[i].handle == 0xffff) {
-			hci_devba(index, (bdaddr_t *)conn_list[i].src);
-
-			conn_list[i].index = index;
-			conn_list[i].handle = handle;
-			conn_list[i].type = type;
-
-			if (!dst) {
-				struct packet_conn_data *p;
-
-				/* If destination is not set attempt to use the
-				 * parent one if that exists.
-				 */
-				p = lookup_parent(handle);
-				if (p) {
-					memcpy(conn_list[i].dst, p->dst,
-						sizeof(conn_list[i].dst));
-					conn_list[i].dst_type = p->dst_type;
-				}
-
-				break;
-			}
-
-			memcpy(conn_list[i].dst, dst, sizeof(conn_list[i].dst));
-			conn_list[i].dst_type = dst_type;
-			break;
-		}
+	switch (type) {
+	case 0x00:
+		if (index_list[index].acl.total)
+			return &index_list[index].acl;
+		break;
+	case 0x01:
+		if (index_list[index].le.total)
+			return &index_list[index].le;
+		break;
+	case 0x05:
+		if (index_list[index].iso.total)
+			return &index_list[index].iso;
+		break;
+	default:
+		if (index_list[index].sco.total)
+			return &index_list[index].sco;
+		break;
 	}
+
+	return NULL;
 }
 
-static void release_handle(uint16_t handle)
+static void print_unacked_frame(void *data, void *user_data)
+{
+	struct packet_frame *frame = data;
+	int *i = user_data;
+
+	print_field("[%d]#%zu unacked", (*i)++, frame->num);
+}
+
+static struct packet_conn_data *release_handle(uint16_t handle)
 {
 	int i;
 
@@ -233,15 +256,69 @@ static void release_handle(uint16_t handle)
 		struct packet_conn_data *conn = &conn_list[i];
 
 		if (conn->handle == handle) {
+			struct index_buf_pool *pool;
+
 			if (conn->destroy)
-				conn->destroy(conn->data);
+				conn->destroy(conn, conn->data);
+
+			pool = get_pool(conn->index, conn->type);
+			if (pool) {
+				int i = 0;
+
+				queue_foreach(conn->tx_q, print_unacked_frame,
+						&i);
+				pool->tx -= queue_length(conn->tx_q);
+			}
 
 			queue_destroy(conn->tx_q, free);
 			queue_destroy(conn->chan_q, free);
 			memset(conn, 0, sizeof(*conn));
 			conn->handle = 0xffff;
-			break;
+			return conn;
 		}
+	}
+
+	return NULL;
+}
+
+static void assign_handle(uint16_t index, uint16_t handle, uint8_t type,
+					uint8_t *dst, uint8_t dst_type)
+{
+	struct packet_conn_data *conn = release_handle(handle);
+	int i;
+
+	if (!conn) {
+		for (i = 0; i < MAX_CONN; i++) {
+			if (conn_list[i].handle == 0xffff) {
+				conn = &conn_list[i];
+				break;
+			}
+		}
+	}
+
+	if (!conn)
+		return;
+
+	hci_devba(index, (bdaddr_t *)conn->src);
+
+	conn->index = index;
+	conn->handle = handle;
+	conn->type = type;
+
+	if (!dst) {
+		struct packet_conn_data *p;
+
+		/* If destination is not set attempt to use the parent one if
+		 * that exists.
+		 */
+		p = lookup_parent(handle);
+		if (p) {
+			memcpy(conn->dst, p->dst, sizeof(conn->dst));
+			conn->dst_type = p->dst_type;
+		}
+	} else {
+		memcpy(conn->dst, dst, sizeof(conn->dst));
+		conn->dst_type = dst_type;
 	}
 }
 
@@ -313,20 +390,6 @@ void packet_select_index(uint16_t index)
 
 #define print_space(x) printf("%*c", (x), ' ');
 
-#define MAX_INDEX 16
-
-struct index_data {
-	uint8_t  type;
-	uint8_t  bdaddr[6];
-	uint16_t manufacturer;
-	uint16_t msft_opcode;
-	uint8_t  msft_evt_prefix[8];
-	uint8_t  msft_evt_len;
-	size_t   frame;
-};
-
-static struct index_data index_list[MAX_INDEX];
-
 void packet_set_fallback_manufacturer(uint16_t manufacturer)
 {
 	int i;
@@ -369,7 +432,7 @@ static void print_packet(struct timeval *tv, struct ucred *cred, char ident,
 					const char *text, const char *extra)
 {
 	int col = num_columns();
-	char line[256], ts_str[96], pid_str[140];
+	char line[LINE_MAX], ts_str[96], pid_str[140];
 	int n, ts_len = 0, ts_pos = 0, len = 0, pos = 0;
 	static size_t last_frame;
 
@@ -481,6 +544,14 @@ static void print_packet(struct timeval *tv, struct ucred *cred, char ident,
 	if (text) {
 		int extra_len = extra ? strlen(extra) : 0;
 		int max_len = col - len - extra_len - ts_len - 3;
+
+		/* Check if there is enough space for the text and the label, if
+		 * there isn't then discard extra text since it won't fit.
+		 */
+		if (max_len <= 0) {
+			extra = NULL;
+			max_len = col - len - ts_len - 3;
+		}
 
 		n = snprintf(line + pos, max_len + 1, "%s%s",
 						label ? ": " : "", text);
@@ -2455,6 +2526,9 @@ void packet_print_version(const char *label, uint8_t version,
 	case 0x0d:
 		str = "Bluetooth 5.4";
 		break;
+	case 0x0e:
+		str = "Bluetooth 6.0";
+		break;
 	default:
 		str = "Reserved";
 		break;
@@ -2694,7 +2768,7 @@ static const struct bitfield_data features_page2[] = {
 	{ }
 };
 
-static const struct bitfield_data features_le[] = {
+static const struct bitfield_data features_le_0[] = {
 	{  0, "LE Encryption"					},
 	{  1, "Connection Parameter Request Procedure"		},
 	{  2, "Extended Reject Indication"			},
@@ -2735,7 +2809,22 @@ static const struct bitfield_data features_le[] = {
 	{ 37, "Connection Subrating"				},
 	{ 38, "Connection Subrating (Host Support)"		},
 	{ 39, "Channel Classification"				},
+	{ 40, "Advertising Coding Selection"			},
+	{ 41, "Advertising Coding Selection (Host Support)"	},
+	{ 42, "Decision-Based Advertising Filtering"		},
+	{ 43, "Periodic Advertising with Responses - Advertiser"},
+	{ 44, "Periodic Advertising with Responses - Scanner"	},
+	{ 45, "Unsegmented Framed Mode"				},
+	{ 46, "Channel Sounding"				},
+	{ 47, "Channel Sounding (Host Support)"			},
+	{ 48, "Channel Sounding Tone Quality Indication"	},
+	{ 63, "LL Extended Feature Set"				},
 	{ }
+};
+
+static const struct bitfield_data features_le_1[] = {
+	{ 0, "Monitoring Advertisers"				},
+	{ 1, "Frame Space Update"				},
 };
 
 static const struct bitfield_data features_msft[] = {
@@ -2748,20 +2837,35 @@ static const struct bitfield_data features_msft[] = {
 	{ }
 };
 
+static void print_features_subpage(uint8_t page, uint8_t subpages,
+					const uint8_t *features_array,
+					uint64_t *features)
+{
+	int i, j;
+	char str[18];
+
+	for (i = 0; i < subpages; i++) {
+		for (j = 0; j < 8; j++)
+			features[i] |= ((uint64_t) features_array[i * 8 + j])
+					<< (j * 8);
+		sprintf(str, "Features[%u/%u]", page, i);
+		print_hex_field(str, &features_array[i * 8], 8);
+	}
+}
+
 static void print_features(uint8_t page, const uint8_t *features_array,
 								uint8_t type)
 {
 	const struct bitfield_data *features_table = NULL;
-	uint64_t mask, features = 0;
-	char str[41];
+	uint64_t mask, features[3] = {};
+	uint8_t subpages = 1;
 	int i;
 
-	for (i = 0; i < 8; i++) {
-		sprintf(str + (i * 5), " 0x%2.2x", features_array[i]);
-		features |= ((uint64_t) features_array[i]) << (i * 8);
-	}
+	/* LE pages 1-10 are 192 bits (24 octets) each */
+	if (type == 0x01 && page)
+		subpages = 3;
 
-	print_field("Features:%s", str);
+	print_features_subpage(page, subpages, features_array, features);
 
 	switch (type) {
 	case 0x00:
@@ -2780,8 +2884,10 @@ static void print_features(uint8_t page, const uint8_t *features_array,
 	case 0x01:
 		switch (page) {
 		case 0:
-			features_table = features_le;
+			features_table = features_le_0;
 			break;
+		case 1:
+			features_table = features_le_1;
 		}
 		break;
 	case 0xf0:
@@ -2796,10 +2902,13 @@ static void print_features(uint8_t page, const uint8_t *features_array,
 	if (!features_table)
 		return;
 
-	mask = print_bitfield(2, features, features_table);
-	if (mask)
-		print_text(COLOR_UNKNOWN_FEATURE_BIT, "  Unknown features "
-						"(0x%16.16" PRIx64 ")", mask);
+	for (i = 0; i < subpages; i++) {
+		mask = print_bitfield(2, features[i], features_table);
+		if (mask)
+			print_text(COLOR_UNKNOWN_FEATURE_BIT,
+				"  Unknown features (0x%16.16" PRIx64 ")",
+				mask);
+	}
 }
 
 void packet_print_features_lmp(const uint8_t *features, uint8_t page)
@@ -2810,6 +2919,11 @@ void packet_print_features_lmp(const uint8_t *features, uint8_t page)
 void packet_print_features_ll(const uint8_t *features)
 {
 	print_features(0, features, 0x01);
+}
+
+void packet_print_features_ext_ll(uint8_t page, const uint8_t *features)
+{
+	print_features(page, features, 0x01);
 }
 
 void packet_print_features_msft(const uint8_t *features)
@@ -3121,18 +3235,36 @@ static const struct bitfield_data events_le_table[] = {
 	{ 20, "LE Connectionless IQ Report"		},
 	{ 21, "LE Connection IQ Report"			},
 	{ 22, "LE CTE Request Failed"			},
-	{ 23, "LE Periodic Advertising Sync Transfer Rvc"},
+	{ 23, "LE PAST Received"			},
 	{ 24, "LE CIS Established"			},
 	{ 25, "LE CIS Request"				},
 	{ 26, "LE Create BIG Complete"			},
 	{ 27, "LE Terminate BIG Complete"		},
-	{ 28, "LE BIG Sync Estabilished Complete"	},
+	{ 28, "LE BIG Sync Established Complete"	},
 	{ 29, "LE BIG Sync Lost"			},
-	{ 30, "LE Request Peer SCA Complete"},
-	{ 31, "LE Path Loss Threshold"		},
-	{ 32, "LE Transmit Power Reporting"	},
-	{ 33, "LE BIG Info Advertising Report"	},
+	{ 30, "LE Request Peer SCA Complete"		},
+	{ 31, "LE Path Loss Threshold"			},
+	{ 32, "LE Transmit Power Reporting"		},
+	{ 33, "LE BIG Info Advertising Report"		},
 	{ 34, "LE Subrate Change"			},
+	{ 35, "LE Periodic Advertising Sync Established v2"},
+	{ 36, "LE Periodic Advertising Report v2"	},
+	{ 37, "LE Periodic Advertising Sync Transfer Received" },
+	{ 38, "LE Periodic Advertising Subevent Data Request" },
+	{ 39, "LE Periodic Advertising Response Report" },
+	{ 40, "LE Enhanced Connection Complete v2"	},
+	{ 41, "LE CIS Established v2"			},
+	{ 42, "LE Read All Remote Features Complete"	},
+	{ 43, "LE CS Read Remote Supported Capabilities Complete" },
+	{ 44, "LE CS Read Remote FAE Table Complete"	},
+	{ 45, "LE CS Security Enable Complete"		},
+	{ 46, "LE CS Config Complete"			},
+	{ 47, "LE CS Procedure Enable Complete"		},
+	{ 48, "LE CS Subevent Result"			},
+	{ 49, "LE CS Subevent Result Continue"		},
+	{ 50, "LE CS Test End Complete"			},
+	{ 51, "LE Monitored Advertisers Report"		},
+	{ 52, "LE Frame Space Update Complete"		},
 	{ }
 };
 
@@ -3197,6 +3329,7 @@ static void print_fec(uint8_t fec)
 #define BT_EIR_MESH_DATA		0x2a
 #define BT_EIR_MESH_BEACON		0x2b
 #define BT_EIR_CSIP_RSI			0x2e
+#define BT_EIR_BC_NAME			0x30
 #define BT_EIR_3D_INFO_DATA		0x3d
 #define BT_EIR_MANUFACTURER_DATA	0xff
 
@@ -3427,7 +3560,7 @@ static void print_base_annoucement(const uint8_t *data, uint8_t data_len)
 		goto done;
 
 	/* Level 1 - BASE */
-	print_field("  Presetation Delay: %u", get_le24(base_data->pd));
+	print_field("  Presentation Delay: %u", get_le24(base_data->pd));
 	print_field("  Number of Subgroups: %u", base_data->num_subgroups);
 
 	/* Level 2 - Subgroups*/
@@ -3672,7 +3805,6 @@ static void print_mesh_prov(const uint8_t *data, uint8_t len)
 		print_field("  TotalLength: %u", get_be16(data + 1));
 		print_field("  FCS: 0x%2.2x", data[3]);
 		print_hex_field("  Data", data + 4, len - 4);
-		packet_hexdump(data + 5, len - 5);
 		break;
 	case 0x01:
 		print_field("  Transaction Acknowledgment (0x01)");
@@ -3686,7 +3818,6 @@ static void print_mesh_prov(const uint8_t *data, uint8_t len)
 			return;
 		}
 		print_hex_field("  Data", data + 1, len - 1);
-		packet_hexdump(data + 2, len - 2);
 		break;
 	case 0x03:
 		print_field("  Provisioning Bearer Control (0x03)");
@@ -3772,7 +3903,7 @@ static void print_transport_data(const uint8_t *data, uint8_t len)
 		print_field("      Provider Only");
 		break;
 	case 0x03:
-		print_field("      Both Seeker an Provider");
+		print_field("      Both Seeker and Provider");
 		break;
 	}
 
@@ -4042,6 +4173,12 @@ static void print_eir(const uint8_t *eir, uint8_t eir_len, bool le)
 			print_field("  Random: 0x%6x", get_le24(data + 3));
 			break;
 
+		case BT_EIR_BC_NAME:
+			memset(name, 0, sizeof(name));
+			memcpy(name, data, data_len);
+			print_field("Broadcast Name: %s", name);
+			break;
+
 		case BT_EIR_MANUFACTURER_DATA:
 			if (data_len < 2)
 				break;
@@ -4057,7 +4194,7 @@ static void print_eir(const uint8_t *eir, uint8_t eir_len, bool le)
 		eir += field_len + 1;
 	}
 
-	if (len < eir_len && eir[0] != 0)
+	if (len < eir_len)
 		packet_hexdump(eir, eir_len - len);
 }
 
@@ -4286,10 +4423,26 @@ void packet_monitor(struct timeval *tv, struct ucred *cred,
 				 */
 				index_list[index].msft_opcode = 0xFC1E;
 				break;
+			case 29:
+				/*
+				 * Qualcomm controllers that support the
+				 * Microsoft vendor extensions are using
+				 * 0xFD70 for VsMsftOpCode.
+				 */
+				index_list[index].msft_opcode = 0xFD70;
+				break;
+			case 70:
+				/*
+				 * Mediatek controllers that support the
+				 * Microsoft vendor extensions are using
+				 * 0xFD30 for VsMsftOpCode.
+				 */
+				index_list[index].msft_opcode = 0xFD30;
+				break;
 			case 93:
 				/*
 				 * Realtek controllers that support the
-				 * Microsoft vendor extenions are using
+				 * Microsoft vendor extensions are using
 				 * 0xFCF0 for VsMsftOpCode.
 				 */
 				index_list[index].msft_opcode = 0xFCF0;
@@ -4298,7 +4451,7 @@ void packet_monitor(struct timeval *tv, struct ucred *cred,
 				/*
 				 * Emulator controllers use Linux Foundation as
 				 * manufacturer and support the
-				 * Microsoft vendor extenions using
+				 * Microsoft vendor extensions using
 				 * 0xFC1E for VsMsftOpCode.
 				 */
 				index_list[index].msft_opcode = 0xFC1E;
@@ -4822,6 +4975,50 @@ static void flow_spec_modify_cmd(uint16_t index, const void *data, uint8_t size)
 	print_flow_spec("RX", cmd->rx_flow_spec);
 }
 
+static void print_coding_format(const char *label,
+						const uint8_t coding_format[5])
+{
+	print_field("%s:", label);
+	packet_print_codec_id("  Codec", coding_format[0]);
+	if (coding_format[0] == 0xff) {
+		print_field("  Company: %s",
+				bt_compidtostr(get_le16(coding_format + 1)));
+		print_field("  Vendor Specific Codec: 0x%4.4x",
+						get_le16(coding_format + 3));
+	}
+}
+
+static void print_pcm_data_format(const char *label, uint8_t pcm)
+{
+	switch (pcm) {
+	case 0:
+		print_field("%s: NA", label);
+		break;
+	case 1:
+		print_field("%s: 1's complement", label);
+		break;
+	case 2:
+		print_field("%s: 2's complement", label);
+		break;
+	case 3:
+		print_field("%s: Sign-magnitude", label);
+		break;
+	case 4:
+		print_field("%s: Unsigned", label);
+		break;
+	default:
+		print_field("%s: Unknown (0x%2.2x)", label, pcm);
+	}
+}
+
+static void print_data_path(const char *label, uint8_t data_path)
+{
+	if (data_path == 0)
+		print_field("%s: HCI", label);
+	else
+		print_field("%s: Vendor Specific (0x%2.2x)", label, data_path);
+}
+
 static void enhanced_setup_sync_conn_cmd(uint16_t index, const void *data,
 							uint8_t size)
 {
@@ -4830,9 +5027,30 @@ static void enhanced_setup_sync_conn_cmd(uint16_t index, const void *data,
 	print_handle(cmd->handle);
 	print_field("Transmit bandwidth: %d", le32_to_cpu(cmd->tx_bandwidth));
 	print_field("Receive bandwidth: %d", le32_to_cpu(cmd->rx_bandwidth));
-
-	/* TODO */
-
+	print_coding_format("Transmit Coding Format", cmd->tx_coding_format);
+	print_coding_format("Receive Coding Format", cmd->rx_coding_format);
+	print_field("Transmit Codec Frame Size: %d",
+					le16_to_cpu(cmd->tx_codec_frame_size));
+	print_field("Receive Codec Frame Size: %d",
+					le16_to_cpu(cmd->rx_codec_frame_size));
+	print_coding_format("Input Coding Format", cmd->input_coding_format);
+	print_coding_format("Output Coding Format", cmd->output_coding_format);
+	print_field("Input Coded Data Size: %d",
+				le16_to_cpu(cmd->input_coded_data_size));
+	print_field("Output Coded Data Size: %d",
+				le16_to_cpu(cmd->output_coded_data_size));
+	print_pcm_data_format("Input PCM Data Format",
+						cmd->input_pcm_data_format);
+	print_pcm_data_format("Output PCM Data Format",
+						cmd->output_pcm_data_format);
+	print_field("Input PCM Sample Payload MSB Position: %d",
+						cmd->input_pcm_msb_position);
+	print_field("Output PCM Sample Payload MSB Position: %d",
+						cmd->output_pcm_msb_position);
+	print_data_path("Input Data Path", cmd->input_data_path);
+	print_data_path("Output Data Path", cmd->output_data_path);
+	print_field("Input Transport Unit Size: %d", cmd->input_unit_size);
+	print_field("Output Transport Unit Size: %d", cmd->output_unit_size);
 	print_field("Max latency: %d", le16_to_cpu(cmd->max_latency));
 	print_pkt_type_sco(cmd->pkt_type);
 	print_retransmission_effort(cmd->retrans_effort);
@@ -4847,9 +5065,30 @@ static void enhanced_accept_sync_conn_request_cmd(uint16_t index,
 	print_bdaddr(cmd->bdaddr);
 	print_field("Transmit bandwidth: %d", le32_to_cpu(cmd->tx_bandwidth));
 	print_field("Receive bandwidth: %d", le32_to_cpu(cmd->rx_bandwidth));
-
-	/* TODO */
-
+	print_coding_format("Transmit Coding Format", cmd->tx_coding_format);
+	print_coding_format("Receive Coding Format", cmd->rx_coding_format);
+	print_field("Transmit Codec Frame Size: %d",
+					le16_to_cpu(cmd->tx_codec_frame_size));
+	print_field("Receive Codec Frame Size: %d",
+					le16_to_cpu(cmd->rx_codec_frame_size));
+	print_coding_format("Input Coding Format", cmd->input_coding_format);
+	print_coding_format("Output Coding Format", cmd->output_coding_format);
+	print_field("Input Coded Data Size: %d",
+				le16_to_cpu(cmd->input_coded_data_size));
+	print_field("Output Coded Data Size: %d",
+				le16_to_cpu(cmd->output_coded_data_size));
+	print_pcm_data_format("Input PCM Data Format",
+						cmd->input_pcm_data_format);
+	print_pcm_data_format("Output PCM Data Format",
+						cmd->output_pcm_data_format);
+	print_field("Input PCM Sample Payload MSB Position: %d",
+						cmd->input_pcm_msb_position);
+	print_field("Output PCM Sample Payload MSB Position: %d",
+						cmd->output_pcm_msb_position);
+	print_data_path("Input Data Path", cmd->input_data_path);
+	print_data_path("Output Data Path", cmd->output_data_path);
+	print_field("Input Transport Unit Size: %d", cmd->input_unit_size);
+	print_field("Output Transport Unit Size: %d", cmd->output_unit_size);
 	print_field("Max latency: %d", le16_to_cpu(cmd->max_latency));
 	print_pkt_type_sco(cmd->pkt_type);
 	print_retransmission_effort(cmd->retrans_effort);
@@ -6303,6 +6542,7 @@ static void read_local_ext_features_rsp(uint16_t index, const void *data,
 static void read_buffer_size_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_rsp_read_buffer_size *rsp = data;
+	struct index_data *ctrl;
 
 	print_status(rsp->status);
 	print_field("ACL MTU: %-4d ACL max packet: %d",
@@ -6311,6 +6551,15 @@ static void read_buffer_size_rsp(uint16_t index, const void *data, uint8_t size)
 	print_field("SCO MTU: %-4d SCO max packet: %d",
 					rsp->sco_mtu,
 					le16_to_cpu(rsp->sco_max_pkt));
+
+	if (index >= MAX_INDEX)
+		return;
+
+	ctrl = &index_list[index];
+	ctrl->acl.total = le16_to_cpu(rsp->acl_max_pkt);
+	ctrl->acl.tx = 0;
+	ctrl->sco.total = le16_to_cpu(rsp->sco_max_pkt);
+	ctrl->sco.tx = 0;
 }
 
 static void read_country_code_rsp(uint16_t index, const void *data,
@@ -6905,10 +7154,18 @@ static void le_read_buffer_size_rsp(uint16_t index, const void *data,
 							uint8_t size)
 {
 	const struct bt_hci_rsp_le_read_buffer_size *rsp = data;
+	struct index_data *ctrl;
 
 	print_status(rsp->status);
 	print_field("Data packet length: %d", le16_to_cpu(rsp->le_mtu));
 	print_field("Num data packets: %d", rsp->le_max_pkt);
+
+	if (index >= MAX_INDEX)
+		return;
+
+	ctrl = &index_list[index];
+	ctrl->le.total = rsp->le_max_pkt;
+	ctrl->le.tx = 0;
 }
 
 static void le_read_local_features_rsp(uint16_t index, const void *data,
@@ -7509,6 +7766,18 @@ static const struct bitfield_data le_phys[] = {
 	{ }
 };
 
+static void print_le_phy_bitfield(const char *label, uint8_t phys)
+{
+	uint8_t mask;
+
+	print_field("%s: 0x%2.2x", label, phys);
+
+	mask = print_bitfield(2, phys, le_phys);
+	if (mask)
+		print_text(COLOR_UNKNOWN_OPTIONS_BIT, "  Reserved"
+							" (0x%2.2x)", mask);
+}
+
 static const struct bitfield_data le_phy_preference[] = {
 	{  0, "No TX PHY preference"	},
 	{  1, "No RX PHY preference"	},
@@ -7527,19 +7796,8 @@ static void print_le_phys_preference(uint8_t all_phys, uint8_t tx_phys,
 		print_text(COLOR_UNKNOWN_OPTIONS_BIT, "  Reserved"
 							" (0x%2.2x)", mask);
 
-	print_field("TX PHYs preference: 0x%2.2x", tx_phys);
-
-	mask = print_bitfield(2, tx_phys, le_phys);
-	if (mask)
-		print_text(COLOR_UNKNOWN_OPTIONS_BIT, "  Reserved"
-							" (0x%2.2x)", mask);
-
-	print_field("RX PHYs preference: 0x%2.2x", rx_phys);
-
-	mask = print_bitfield(2, rx_phys, le_phys);
-	if (mask)
-		print_text(COLOR_UNKNOWN_OPTIONS_BIT, "  Reserved"
-							" (0x%2.2x)", mask);
+	print_le_phy_bitfield("TX PHYs preference", tx_phys);
+	print_le_phy_bitfield("RX PHYs preference", rx_phys);
 }
 
 static void le_set_default_phy_cmd(uint16_t index, const void *data,
@@ -8399,18 +8657,18 @@ static void le_pa_rec_enable(uint16_t index, const void *data, uint8_t size)
 	print_enable("Reporting", cmd->enable);
 }
 
-static void le_pa_sync_trans(uint16_t index, const void *data, uint8_t size)
+static void le_past(uint16_t index, const void *data, uint8_t size)
 {
-	const struct bt_hci_cmd_periodic_sync_trans *cmd = data;
+	const struct bt_hci_cmd_le_past *cmd = data;
 
 	print_field("Connection handle: %d", cmd->handle);
 	print_field("Service data: 0x%4.4x", cmd->service_data);
 	print_field("Sync handle: %d", cmd->sync_handle);
 }
 
-static void le_pa_set_info_trans(uint16_t index, const void *data, uint8_t size)
+static void le_past_set_info(uint16_t index, const void *data, uint8_t size)
 {
-	const struct bt_hci_cmd_pa_set_info_trans *cmd = data;
+	const struct bt_hci_cmd_le_past_set_info *cmd = data;
 
 	print_field("Connection handle: %d", cmd->handle);
 	print_field("Service data: 0x%4.4x", cmd->service_data);
@@ -8431,6 +8689,10 @@ static void print_sync_mode(uint8_t mode)
 	case 0x02:
 		str = "Enabled with report events enabled";
 		break;
+	case 0x03:
+		str = "Enabled with report events enabled with duplicate "
+			"filtering";
+		break;
 	default:
 		str = "RFU";
 		break;
@@ -8439,10 +8701,10 @@ static void print_sync_mode(uint8_t mode)
 	print_field("Mode: %s (0x%2.2x)", str, mode);
 }
 
-static void le_pa_sync_trans_params(uint16_t index, const void *data,
+static void le_past_params(uint16_t index, const void *data,
 							uint8_t size)
 {
-	const struct bt_hci_cmd_pa_sync_trans_params *cmd = data;
+	const struct bt_hci_cmd_le_past_params *cmd = data;
 
 	print_field("Connection handle: %d", cmd->handle);
 	print_sync_mode(cmd->mode);
@@ -8453,10 +8715,10 @@ static void le_pa_sync_trans_params(uint16_t index, const void *data,
 	print_create_sync_cte_type(cmd->cte_type);
 }
 
-static void le_set_default_pa_sync_trans_params(uint16_t index,
+static void le_set_default_past_params(uint16_t index,
 						const void *data, uint8_t size)
 {
-	const struct bt_hci_cmd_default_pa_sync_trans_params *cmd = data;
+	const struct bt_hci_cmd_le_default_past_params *cmd = data;
 
 	print_sync_mode(cmd->mode);
 	print_field("Skip: 0x%2.2x", cmd->skip);
@@ -8530,6 +8792,7 @@ static void le_read_buffer_size_v2_rsp(uint16_t index, const void *data,
 							uint8_t size)
 {
 	const struct bt_hci_rsp_le_read_buffer_size_v2 *rsp = data;
+	struct index_data *ctrl;
 
 	print_status(rsp->status);
 
@@ -8540,6 +8803,15 @@ static void le_read_buffer_size_v2_rsp(uint16_t index, const void *data,
 	print_field("ACL max packet: %d", rsp->acl_max_pkt);
 	print_field("ISO MTU: %d", le16_to_cpu(rsp->iso_mtu));
 	print_field("ISO max packet: %d", rsp->iso_max_pkt);
+
+	if (index >= MAX_INDEX)
+		return;
+
+	ctrl = &index_list[index];
+	ctrl->le.total = rsp->acl_max_pkt;
+	ctrl->le.tx = 0;
+	ctrl->iso.total = rsp->iso_max_pkt;
+	ctrl->iso.tx = 0;
 }
 
 static void le_read_iso_tx_sync_cmd(uint16_t index, const void *data,
@@ -8917,7 +9189,7 @@ static void le_set_host_feature_cmd(uint16_t index, const void *data,
 	print_field("Bit Number: %u", cmd->bit_number);
 
 	mask = print_bitfield(2, (((uint64_t) 1) << cmd->bit_number),
-							features_le);
+							features_le_0);
 	if (mask)
 		print_text(COLOR_UNKNOWN_FEATURE_BIT, "  Unknown features "
 						"(0x%16.16" PRIx64 ")", mask);
@@ -8954,6 +9226,544 @@ static void status_le_read_iso_link_quality_rsp(uint16_t index,
 	print_field("TX crc error packets %d", rsp->crc_error_packets);
 	print_field("RX unreceived packets %d", rsp->rx_unreceived_packets);
 	print_field("Duplicated packets %d", rsp->duplicated_packets);
+}
+
+static void print_le_ext_features(const uint8_t features[248], uint8_t pages)
+{
+	int i;
+
+	/* Page 0 containing bits 0 to 63 (octets 0 to 7) */
+	print_features(0, features, 0x01);
+
+	/* 10 pages of 192 bits (24 octets) each */
+	for (i = 0; i < pages && i < 10; i++)
+		print_features(i + 1, &features[i * 24 + 8], 0x01);
+}
+
+static void le_read_all_local_features_rsp(uint16_t index, const void *data,
+							uint8_t size)
+{
+	const struct bt_hci_rsp_le_read_all_local_features *rsp = data;
+
+	print_status(rsp->status);
+
+	if (size == 1)
+		return;
+
+	print_field("Page: %d", rsp->page);
+	print_le_ext_features(rsp->features, rsp->page);
+}
+
+static void le_read_all_remote_features(uint16_t index, const void *data,
+							uint8_t size)
+{
+	const struct bt_hci_cmd_le_read_all_remote_features *cmd = data;
+
+	print_handle(cmd->handle);
+	print_field("Pages: %d", cmd->pages);
+}
+
+static const struct bitfield_data cs_roles_supp_table[] = {
+	{ 0, "Initiator"	},
+	{ 1, "Reflector"	},
+	{ }
+};
+
+static const struct bitfield_data cs_sync_phys_supp_table[] = {
+	{ 1, "LE 2M"		},
+	{ 2, "LE 2M 2BT"	},
+	{ }
+};
+
+static const struct bitfield_data cs_subfeatures_supp_table[] = {
+	{ 1, "CS with no transmitter Frequency Actuation Error"		},
+	{ 2, "CS Channel Selection Algorithm #3c"			},
+	{ 3, "CS phase-based ranging from RTT sounding sequence"	},
+	{ }
+};
+
+static const struct bitfield_data cs_t_ip1_times_supp_table[] = {
+	{ 0, "10 μs"	},
+	{ 1, "20 μs"	},
+	{ 2, "30 μs"	},
+	{ 3, "40 μs"	},
+	{ 4, "50 μs"	},
+	{ 5, "60 μs"	},
+	{ 6, "80 μs"	},
+	{ }
+};
+
+static const struct bitfield_data cs_t_ip2_times_supp_table[] = {
+	{ 0, "10 μs"	},
+	{ 1, "20 μs"	},
+	{ 2, "30 μs"	},
+	{ 3, "40 μs"	},
+	{ 4, "50 μs"	},
+	{ 5, "60 μs"	},
+	{ 6, "80 μs"	},
+	{ }
+};
+
+static const struct bitfield_data cs_t_fcs_times_supp_table[] = {
+	{ 0, "15 μs"	},
+	{ 1, "20 μs"	},
+	{ 2, "30 μs"	},
+	{ 3, "40 μs"	},
+	{ 4, "50 μs"	},
+	{ 5, "60 μs"	},
+	{ 6, "80 μs"	},
+	{ 7, "100 μs"	},
+	{ 8, "120 μs"	},
+	{ }
+};
+
+static const struct bitfield_data cs_t_pm_times_supp_table[] = {
+	{ 0, "10 us"	},
+	{ 1, "20 us"	},
+	{ }
+};
+
+static const struct bitfield_data cs_tx_snr_capability_table[] = {
+	{ 0, "18 dB"	},
+	{ 1, "21 dB"	},
+	{ 2, "24 dB"	},
+	{ 3, "27 dB"	},
+	{ 4, "30 dB"	},
+	{ }
+};
+
+static void le_cs_rd_loc_supp_cap_rsp(uint16_t index, const void *data,
+					uint8_t size)
+{
+	const struct bt_hci_rsp_le_cs_rd_loc_supp_cap *rsp = data;
+	uint16_t mask;
+
+	print_status(rsp->status);
+	print_field("Num Config Supported: %d", rsp->num_config_supported);
+	print_field("Max Consecutive Procedures Supported: %d",
+		le16_to_cpu(rsp->max_consecutive_procedures_supported));
+	print_field("Num Antennas Supported: %d", rsp->num_antennas_supported);
+	print_field("Max Antenna Paths Supported: %d",
+		rsp->max_antenna_paths_supported);
+
+	print_field("Roles Supported: 0x%2.2x", rsp->roles_supported);
+	mask = print_bitfield(2, rsp->roles_supported, cs_roles_supp_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_FEATURE_BIT,
+			"  Unknown Role (0x%2.2x)", mask);
+
+	print_field("Modes Supported: 0x%2.2x", rsp->modes_supported);
+	print_field("RTT Capability: 0x%2.2x", rsp->rtt_capability);
+	print_field("RTT AA Only N: %d", rsp->rtt_aa_only_n);
+	print_field("RTT Sounding N: %d", rsp->rtt_sounding_n);
+	print_field("RTT Random Sequence N: %d", rsp->rtt_random_payload_n);
+	print_field("NADM Sounding Capability: 0x%2.2x",
+		le16_to_cpu(rsp->nadm_sounding_capability));
+	print_field("NADM Random Capability: 0x%2.2x",
+		le16_to_cpu(rsp->nadm_random_capability));
+
+	print_field("CS_SYNC PHYs Supported: 0x%2.2x",
+		rsp->cs_sync_phys_supported);
+	mask = print_bitfield(2, rsp->cs_sync_phys_supported,
+		cs_sync_phys_supp_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_PHY, "  Unknown PHYs (0x%2.2x)", mask);
+
+	print_field("Subfeatures Supported: 0x%4.4x",
+		le16_to_cpu(rsp->subfeatures_supported));
+	mask = print_bitfield(2, le16_to_cpu(rsp->subfeatures_supported),
+		cs_subfeatures_supp_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_FEATURE_BIT, "  Unknown subfeatures"
+			" (0x%4.4x)", mask);
+
+	print_field("T_IP1 Times Supported: 0x%4.4x",
+		le16_to_cpu(rsp->t_ip1_times_supported));
+	mask = print_bitfield(2, le16_to_cpu(rsp->t_ip1_times_supported),
+		cs_t_ip1_times_supp_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_FEATURE_BIT, "  Unknown T_IP1 Times"
+			" (0x%4.4x)", mask);
+
+	print_field("T_IP2 Times Supported: 0x%4.4x",
+		le16_to_cpu(rsp->t_ip2_times_supported));
+	mask = print_bitfield(2, le16_to_cpu(rsp->t_ip2_times_supported),
+		cs_t_ip2_times_supp_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_FEATURE_BIT, "  Unknown T_IP2 Times"
+			" (0x%4.4x)", mask);
+
+	print_field("T_FCS Times Supported: 0x%4.4x",
+		le16_to_cpu(rsp->t_fcs_times_supported));
+	mask = print_bitfield(2, le16_to_cpu(rsp->t_fcs_times_supported),
+		cs_t_fcs_times_supp_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_FEATURE_BIT, "  Unknown T_FCS Times"
+			" (0x%4.4x)", mask);
+
+	print_field("T_PM Times Supported: 0x%4.4x",
+		le16_to_cpu(rsp->t_pm_times_supported));
+	mask = print_bitfield(2, le16_to_cpu(rsp->t_pm_times_supported),
+		cs_t_pm_times_supp_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_FEATURE_BIT, "  Unknown T_PM Times"
+			" (0x%4.4x)", mask);
+
+	print_field("T_SW Time Supported: 0x%2.2x", rsp->t_sw_time_supported);
+
+	print_field("TX_SNR Capability: 0x%2.2x", rsp->tx_snr_capability);
+	mask = print_bitfield(2, rsp->tx_snr_capability,
+		cs_tx_snr_capability_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_FEATURE_BIT,
+			"  Unknown TX_SNR Capability (0x%2.2x)", mask);
+}
+
+static void le_cs_rd_rem_supp_cap_cmd(uint16_t index, const void *data,
+					uint8_t size)
+{
+	const struct bt_hci_cmd_le_cs_rd_rem_supp_cap *cmd = data;
+
+	print_field("Connection handle: %d", le16_to_cpu(cmd->handle));
+}
+
+static void le_cs_wr_cached_rem_supp_cap_cmd(uint16_t index, const void *data,
+					uint8_t size)
+{
+	const struct bt_hci_cmd_le_cs_wr_cached_rem_supp_cap *cmd = data;
+	uint16_t mask;
+
+	print_field("Connection Handle: %d", le16_to_cpu(cmd->handle));
+	print_field("Num Config Supported: %d", cmd->num_config_supported);
+	print_field("Max Consecutive Procedures Supported: %d",
+		le16_to_cpu(cmd->max_consecutive_procedures_supported));
+	print_field("Num Antennas Supported: %d", cmd->num_antennas_supported);
+	print_field("Max Antenna Paths Supported: %d",
+		cmd->max_antenna_paths_supported);
+
+	print_field("Roles Supported: 0x%2.2x", cmd->roles_supported);
+	mask = print_bitfield(2, cmd->roles_supported, cs_roles_supp_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_FEATURE_BIT,
+		"  Unknown Role (0x%2.2x)", mask);
+
+	print_field("Modes Supported: 0x%2.2x", cmd->modes_supported);
+	print_field("RTT Capability: 0x%2.2x", cmd->rtt_capability);
+	print_field("RTT AA Only N: %d", cmd->rtt_aa_only_n);
+	print_field("RTT Sounding N: %d", cmd->rtt_sounding_n);
+	print_field("RTT Random Sequence N: %d", cmd->rtt_random_payload_n);
+	print_field("NADM Sounding Capability: 0x%2.2x",
+		le16_to_cpu(cmd->nadm_sounding_capability));
+	print_field("NADM Random Capability: 0x%2.2x",
+		le16_to_cpu(cmd->nadm_random_capability));
+
+	print_field("CS_SYNC PHYs Supported: 0x%2.2x",
+		cmd->cs_sync_phys_supported);
+	mask = print_bitfield(2, cmd->cs_sync_phys_supported,
+		cs_sync_phys_supp_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_PHY, "  Unknown PHYs (0x%2.2x)", mask);
+
+	print_field("Subfeatures Supported: 0x%4.4x",
+		le16_to_cpu(cmd->subfeatures_supported));
+	mask = print_bitfield(2, le16_to_cpu(cmd->subfeatures_supported),
+		cs_subfeatures_supp_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_FEATURE_BIT, "  Unknown subfeatures"
+			" (0x%4.4x)", mask);
+
+	print_field("T_IP1 Times Supported: 0x%4.4x",
+		le16_to_cpu(cmd->t_ip1_times_supported));
+	mask = print_bitfield(2, le16_to_cpu(cmd->t_ip1_times_supported),
+		cs_t_ip1_times_supp_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_FEATURE_BIT, "  Unknown T_IP1 Times"
+			" (0x%4.4x)", mask);
+
+	print_field("T_IP2 Times Supported: 0x%4.4x",
+		le16_to_cpu(cmd->t_ip2_times_supported));
+	mask = print_bitfield(2, le16_to_cpu(cmd->t_ip2_times_supported),
+		cs_t_ip2_times_supp_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_FEATURE_BIT, "  Unknown T_IP2 Times"
+			" (0x%4.4x)", mask);
+
+	print_field("T_FCS Times Supported: 0x%4.4x",
+		le16_to_cpu(cmd->t_fcs_times_supported));
+	mask = print_bitfield(2, le16_to_cpu(cmd->t_fcs_times_supported),
+		cs_t_fcs_times_supp_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_FEATURE_BIT, "  Unknown T_FCS Times"
+			" (0x%4.4x)", mask);
+
+	print_field("T_PM Times Supported: 0x%4.4x",
+		le16_to_cpu(cmd->t_pm_times_supported));
+	mask = print_bitfield(2, le16_to_cpu(cmd->t_pm_times_supported),
+		cs_t_pm_times_supp_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_FEATURE_BIT, "  Unknown T_PM Times"
+			" (0x%4.4x)", mask);
+
+	print_field("T_SW Time Supported: 0x%2.2x", cmd->t_sw_time_supported);
+
+	print_field("TX_SNR Capability: 0x%2.2x", cmd->tx_snr_capability);
+	mask = print_bitfield(2, cmd->tx_snr_capability,
+		cs_tx_snr_capability_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_FEATURE_BIT,
+			"  Unknown TX_SNR Capability (0x%2.2x)", mask);
+}
+
+static void le_cs_wr_cached_rem_supp_cap_rsp(uint16_t index, const void *data,
+					uint8_t size)
+{
+	const struct bt_hci_rsp_le_cs_wr_cached_rem_supp_cap *rsp = data;
+
+	print_status(rsp->status);
+	print_field("Connection handle: %d", le16_to_cpu(rsp->handle));
+}
+
+static void le_cs_sec_enable_cmd(uint16_t index, const void *data,
+					uint8_t size)
+{
+	const struct bt_hci_cmd_le_cs_sec_enable *cmd = data;
+
+	print_field("Connection handle: %d", le16_to_cpu(cmd->handle));
+}
+
+static void le_cs_set_def_settings_cmd(uint16_t index, const void *data,
+					uint8_t size)
+{
+	const struct bt_hci_cmd_le_cs_set_def_settings *cmd = data;
+	uint16_t mask;
+
+	print_field("Connection handle: %d", le16_to_cpu(cmd->handle));
+	print_field("Role Enable: 0x%2.2x", cmd->role_enable);
+	mask = print_bitfield(2, cmd->role_enable, cs_roles_supp_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_FEATURE_BIT,
+		"  Unknown Role (0x%2.2x)", mask);
+
+	print_field("CS SYNC Antenna Selection: 0x%2.2x",
+		cmd->cs_sync_antenna_selection);
+	print_field("Max TX Power: %d", cmd->max_tx_power);
+}
+
+static void le_cs_set_def_settings_rsp(uint16_t index, const void *data,
+					uint8_t size)
+{
+	const struct bt_hci_rsp_le_cs_set_def_settings *rsp = data;
+
+	print_status(rsp->status);
+	print_field("Connection handle: %d", le16_to_cpu(rsp->handle));
+}
+
+static void le_cs_rd_rem_fae_cmd(uint16_t index, const void *data,
+					uint8_t size)
+{
+	const struct bt_hci_cmd_le_cs_rd_rem_fae *cmd = data;
+
+	print_field("Connection handle: %d", le16_to_cpu(cmd->handle));
+}
+
+static void le_cs_wr_cached_rem_fae_cmd(uint16_t index, const void *data,
+					uint8_t size)
+{
+	const struct bt_hci_cmd_le_cs_wr_cached_rem_fae *cmd = data;
+
+	print_field("Connection handle: %d", le16_to_cpu(cmd->handle));
+	print_hex_field("Remote FAE Table: ", cmd->remote_fae_table,
+		sizeof(cmd->remote_fae_table));
+}
+
+static void le_cs_wr_cached_rem_fae_rsp(uint16_t index, const void *data,
+					uint8_t size)
+{
+	const struct bt_hci_rsp_le_cs_wr_cached_rem_fae *rsp = data;
+
+	print_status(rsp->status);
+	print_field("Connection handle: %d", le16_to_cpu(rsp->handle));
+}
+
+static void le_cs_create_config_cmd(uint16_t index, const void *data,
+					uint8_t size)
+{
+	const struct bt_hci_cmd_le_cs_create_config *cmd = data;
+
+	print_field("Connection handle: %d", le16_to_cpu(cmd->handle));
+	print_field("Config ID: %d", cmd->config_id);
+	print_field("Create Context: %d", cmd->create_context);
+	print_field("Main Mode Type: %d", cmd->main_mode_type);
+	print_field("Sub Mode Type: %d", cmd->sub_mode_type);
+	print_field("Min Main Mode Steps: %d", cmd->min_main_mode_steps);
+	print_field("Max Main Mode Steps: %d", cmd->max_main_mode_steps);
+	print_field("Main Mode Repetition: %d", cmd->main_mode_repetition);
+	print_field("Mode 0 Steps: %d", cmd->mode_0_steps);
+	print_field("Role: %d", cmd->role);
+	print_field("RTT Type: %d", cmd->rtt_type);
+	print_field("CS SYNC PHY: %d", cmd->cs_sync_phy);
+	print_hex_field("Channel Map: ", cmd->channel_map,
+		sizeof(cmd->channel_map));
+	print_field("Channel Map Repetition: %d", cmd->channel_map_repetition);
+	print_field("Channel Selection Type: %d", cmd->channel_selection_type);
+	print_field("Ch3c Shape: %d", cmd->ch3c_shape);
+	print_field("Ch3c Jump: %d", cmd->ch3c_jump);
+	print_field("Reserved: %d", cmd->reserved);
+}
+
+static void le_cs_remove_config_cmd(uint16_t index, const void *data,
+					uint8_t size)
+{
+	const struct bt_hci_cmd_le_cs_remove_config *cmd = data;
+
+	print_field("Connection handle: %d", le16_to_cpu(cmd->handle));
+	print_field("Config ID: %d", cmd->config_id);
+}
+
+static void le_cs_set_chan_class_cmd(uint16_t index, const void *data,
+					uint8_t size)
+{
+	const struct bt_hci_cmd_le_cs_set_chan_class *cmd = data;
+
+	print_hex_field("Channel Classification: ",
+			cmd->channel_classification,
+			sizeof(cmd->channel_classification));
+}
+
+static void le_cs_set_chan_class_rsp(uint16_t index, const void *data,
+					uint8_t size)
+{
+	const struct bt_hci_rsp_le_cs_set_chan_class *rsp = data;
+
+	print_status(rsp->status);
+}
+
+static void le_cs_set_proc_params_cmd(uint16_t index, const void *data,
+					uint8_t size)
+{
+	const struct bt_hci_cmd_le_cs_set_proc_params *cmd = data;
+
+	print_field("Connection Handle: %d", le16_to_cpu(cmd->handle));
+	print_field("Config ID: %d", cmd->config_id);
+	print_field("Max Procedure Len: %d",
+		le16_to_cpu(cmd->max_procedure_len));
+	print_field("Min Procedure Interval: %d",
+		    le16_to_cpu(cmd->min_procedure_interval));
+	print_field("Max Procedure Interval: %d",
+		    le16_to_cpu(cmd->max_procedure_interval));
+	print_field("Max Procedure Count: %d",
+		    le16_to_cpu(cmd->max_procedure_count));
+	print_field("Min Subevent Len: %d",
+		    get_le24(cmd->min_subevent_len));
+	print_field("Max Subevent Len: %d",
+		    get_le24(cmd->max_subevent_len));
+	print_field("Tone Antenna Config Selection: %d",
+		    cmd->tone_antenna_config_selection);
+	print_field("PHY: %d", cmd->phy);
+	print_field("Tx Power Delta: %d", cmd->tx_power_delta);
+	print_field("Preferred Peer Antenna: %d", cmd->preferred_peer_antenna);
+	print_field("SNR Control Initiator: %d", cmd->snr_control_initiator);
+	print_field("SNR Control Reflector: %d", cmd->snr_control_reflector);
+}
+
+static void le_cs_set_proc_params_rsp(uint16_t index, const void *data,
+					uint8_t size)
+{
+	const struct bt_hci_rsp_le_cs_set_proc_params *rsp = data;
+
+	print_status(rsp->status);
+	print_field("Connection handle: %d", le16_to_cpu(rsp->handle));
+}
+
+static void le_cs_proc_enable_cmd(uint16_t index, const void *data,
+					uint8_t size)
+{
+	const struct bt_hci_cmd_le_cs_proc_enable *cmd = data;
+
+	print_field("Connection handle: %d", le16_to_cpu(cmd->handle));
+	print_field("Config ID: %d", cmd->config_id);
+	print_field("Enable: %d", cmd->enable);
+}
+
+static void le_cs_test_cmd(uint16_t index, const void *data, uint8_t size)
+{
+	const struct bt_hci_cmd_le_cs_test *cmd = data;
+
+	print_field("Main Mode Type: %d", cmd->main_mode_type);
+	print_field("Sub Mode Type: %d", cmd->sub_mode_type);
+	print_field("Main Mode Repetition: %d", cmd->main_mode_repetition);
+	print_field("Mode 0 Steps: %d", cmd->mode_0_steps);
+	print_field("Role: %d", cmd->role);
+	print_field("RTT Type: %d", cmd->rtt_type);
+	print_field("CS_SYNC PHY: %d", cmd->cs_sync_phy);
+	print_field("CS_SYNC Antenna Selection: %d",
+		cmd->cs_sync_antenna_selection);
+	print_field("Subevent Len: %d", get_le24(cmd->subevent_len));
+	print_field("Subevent Interval: %d",
+		le16_to_cpu(cmd->subevent_interval));
+	print_field("Max Num Subevents: %d", cmd->max_num_subevents);
+	print_field("Transmit Power Level: %d", cmd->transmit_power_level);
+	print_field("T_IP1 Time: %d", cmd->t_ip1_time);
+	print_field("T_IP2 Time: %d", cmd->t_ip2_time);
+	print_field("T_FCS Time: %d", cmd->t_fcs_time);
+	print_field("T_PM Time: %d", cmd->t_pm_time);
+	print_field("T_SW Time: %d", cmd->t_sw_time);
+	print_field("Tone Antenna Config Selection: %d",
+		cmd->tone_antenna_config_selection);
+	print_field("Reserved: %d", cmd->reserved);
+	print_field("SNR Control Initiator: %d", cmd->snr_control_initiator);
+	print_field("SNR Control Reflector: %d", cmd->snr_control_reflector);
+	print_field("DRBG Nonce: %d", le16_to_cpu(cmd->drbg_nonce));
+	print_field("Channel Map Repetition: %d", cmd->channel_map_repetition);
+	print_field("Override Config: %d",  le16_to_cpu(cmd->override_config));
+	print_field("Override Parameters Length: %d",
+		cmd->override_parameters_length);
+	print_hex_field("Override Parameters Data: ",
+		cmd->override_parameters_data,
+		cmd->override_parameters_length);
+}
+
+static void le_cs_test_rsp(uint16_t index, const void *data, uint8_t size)
+{
+	const struct bt_hci_rsp_le_cs_test *rsp = data;
+
+	print_status(rsp->status);
+}
+
+static const struct bitfield_data fsu_type_table[] = {
+	{  0, "T_IFS_ACL_CP"		},
+	{  1, "T_IFS_ACL_PC"		},
+	{  2, "T_MCES"			},
+	{  3, "T_IFS_CIS"		},
+	{  4, "T_MSS_CIS"		},
+	{ }
+};
+
+static void print_fsu_types(uint8_t types)
+{
+	uint8_t mask;
+
+	print_field("types: 0x%2.2x", types);
+
+	mask = print_bitfield(2, types, fsu_type_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_ADDRESS_TYPE, "  Unknown type"
+							" (0x%2.2x)", mask);
+}
+
+static void le_fsu_cmd(uint16_t index, const void *data, uint8_t size)
+{
+	const struct bt_hci_cmd_le_fsu *cmd = data;
+
+	print_handle(cmd->handle);
+	print_field("Frame Space min: %d us (0x%4.4x)",
+				le16_to_cpu(cmd->frame_space_min),
+				le16_to_cpu(cmd->frame_space_min));
+	print_field("Frame Space max: %d us (0x%4.4x)",
+				le16_to_cpu(cmd->frame_space_max),
+				le16_to_cpu(cmd->frame_space_max));
+	print_le_phy_bitfield("PHYs", cmd->phys);
+	print_fsu_types(cmd->types);
 }
 
 struct opcode_data {
@@ -9079,7 +9889,7 @@ static const struct opcode_data opcode_table[] = {
 	{ 0x043b, 174, "Logical Link Cancel",
 				logic_link_cancel_cmd, 2, true,
 				logic_link_cancel_rsp, 3, true },
-	{ 0x043c, 175, "Flow Specifcation Modify",
+	{ 0x043c, 175, "Flow Specification Modify",
 				flow_spec_modify_cmd, 34, true },
 	{ 0x043d, 235, "Enhanced Setup Synchronous Connection",
 				enhanced_setup_sync_conn_cmd, 59, true },
@@ -9782,17 +10592,17 @@ static const struct opcode_data opcode_table[] = {
 				le_pa_rec_enable, 3, true,
 				status_rsp, 1, true },
 	{ 0x205a, 326, "LE Periodic Advertising Sync Transfer",
-				le_pa_sync_trans, 6, true,
+				le_past, 6, true,
 				status_handle_rsp, 3, true },
 	{ 0x205b, 327, "LE Periodic Advertising Set Info Transfer",
-				le_pa_set_info_trans, 5, true,
+				le_past_set_info, 5, true,
 				status_handle_rsp, 3, true },
 	{ 0x205c, 328, "LE Periodic Advertising Sync Transfer Parameters",
-				le_pa_sync_trans_params, 8, true,
+				le_past_params, 8, true,
 				status_handle_rsp, 3, true},
 	{ 0x205d, 329, "LE Set Default Periodic Advertisng Sync Transfer "
 				"Parameters",
-				le_set_default_pa_sync_trans_params,
+				le_set_default_past_params,
 				6, true, status_rsp, 1, true},
 	{ BT_HCI_CMD_LE_READ_BUFFER_SIZE_V2,
 				BT_HCI_BIT_LE_READ_BUFFER_SIZE_V2,
@@ -9915,6 +10725,118 @@ static const struct opcode_data opcode_table[] = {
 				sizeof(
 				struct bt_hci_rsp_le_read_iso_link_quality),
 				true },
+	{ BT_HCI_CMD_LE_READ_ALL_LOCAL_FEATURES,
+			BT_HCI_BIT_LE_READ_ALL_LOCAL_FEATURES,
+			"LE Read All Local Features",
+			null_cmd, 0, true,
+			le_read_all_local_features_rsp,
+			sizeof(struct bt_hci_rsp_le_read_all_local_features),
+			true },
+	{ BT_HCI_CMD_LE_READ_ALL_REMOTE_FEATURES,
+			BT_HCI_BIT_LE_READ_ALL_REMOTE_FEATURES,
+			"LE Read All Remote Features",
+			le_read_all_remote_features,
+			sizeof(struct bt_hci_cmd_le_read_all_remote_features),
+			true, status_rsp, 1, true },
+	{ BT_HCI_CMD_LE_CS_RD_LOC_SUPP_CAP, BT_HCI_BIT_LE_CS_RD_LOC_SUPP_CAP,
+				"LE CS Read Local Supported Capabilities",
+				NULL, 0, false,
+				le_cs_rd_loc_supp_cap_rsp,
+				sizeof(struct bt_hci_rsp_le_cs_rd_loc_supp_cap),
+				true },
+	{ BT_HCI_CMD_LE_CS_RD_REM_SUPP_CAP, BT_HCI_BIT_LE_CS_RD_REM_SUPP_CAP,
+				"LE CS Read Remote Supported Capabilities",
+				le_cs_rd_rem_supp_cap_cmd,
+				sizeof(struct bt_hci_cmd_le_cs_rd_rem_supp_cap),
+				true },
+	{ BT_HCI_CMD_LE_CS_WR_CACHED_REM_SUPP_CAP,
+				BT_HCI_BIT_LE_CS_WR_CACHED_REM_SUPP_CAP,
+				"LE CS Write Cached Remote Supported Capabilities",
+				le_cs_wr_cached_rem_supp_cap_cmd,
+				sizeof(
+				struct bt_hci_cmd_le_cs_wr_cached_rem_supp_cap),
+				true,
+				le_cs_wr_cached_rem_supp_cap_rsp,
+				sizeof(
+				struct bt_hci_rsp_le_cs_wr_cached_rem_supp_cap),
+				true },
+	{ BT_HCI_CMD_LE_CS_SEC_ENABLE, BT_HCI_BIT_LE_CS_SEC_ENABLE,
+				"LE CS Security Enable",
+				le_cs_sec_enable_cmd,
+				sizeof(struct bt_hci_cmd_le_cs_sec_enable),
+				true },
+	{ BT_HCI_CMD_LE_CS_SET_DEF_SETTINGS,
+				BT_HCI_BIT_LE_CS_SET_DEF_SETTINGS,
+				"LE CS Set Default Settings",
+				le_cs_set_def_settings_cmd,
+				sizeof(
+				struct bt_hci_cmd_le_cs_set_def_settings),
+				true,
+				le_cs_set_def_settings_rsp,
+				sizeof(
+				struct bt_hci_rsp_le_cs_set_def_settings),
+				true },
+	{ BT_HCI_CMD_LE_CS_RD_REM_FAE, BT_HCI_BIT_LE_CS_RD_REM_FAE,
+				"LE CS Read Remote FAE Table",
+				le_cs_rd_rem_fae_cmd,
+				sizeof(struct bt_hci_cmd_le_cs_rd_rem_fae),
+				true },
+	{ BT_HCI_CMD_LE_CS_WR_CACHED_REM_FAE,
+				BT_HCI_BIT_LE_CS_WR_CACHED_REM_FAE,
+				"LE CS Write Cached Remote FAE Table",
+				le_cs_wr_cached_rem_fae_cmd,
+				sizeof(
+				struct bt_hci_cmd_le_cs_wr_cached_rem_fae),
+				true,
+				le_cs_wr_cached_rem_fae_rsp,
+				sizeof(
+				struct bt_hci_rsp_le_cs_wr_cached_rem_fae),
+				true },
+	{ BT_HCI_CMD_LE_CS_CREATE_CONFIG, BT_HCI_BIT_LE_CS_CREATE_CONFIG,
+				"LE CS Create Config",
+				le_cs_create_config_cmd,
+				sizeof(struct bt_hci_cmd_le_cs_create_config),
+				true },
+	{ BT_HCI_CMD_LE_CS_REMOVE_CONFIG, BT_HCI_BIT_LE_CS_REMOVE_CONFIG,
+				"LE CS Remove Config",
+				le_cs_remove_config_cmd,
+				sizeof(struct bt_hci_cmd_le_cs_remove_config),
+				true },
+	{ BT_HCI_CMD_LE_CS_SET_CHAN_CLASS, BT_HCI_BIT_LE_CS_SET_CHAN_CLASS,
+				"LE CS Set Channel Classification",
+				le_cs_set_chan_class_cmd,
+				sizeof(struct bt_hci_cmd_le_cs_set_chan_class),
+				true,
+				le_cs_set_chan_class_rsp,
+				sizeof(struct bt_hci_rsp_le_cs_set_chan_class),
+				true},
+	{ BT_HCI_CMD_LE_CS_SET_PROC_PARAMS,
+				BT_HCI_BIT_LE_CS_SET_PROC_PARAMS,
+				"LE CS Set Procedure Parameters",
+				le_cs_set_proc_params_cmd,
+				sizeof(struct bt_hci_cmd_le_cs_set_proc_params),
+				true,
+				le_cs_set_proc_params_rsp,
+				sizeof(struct bt_hci_rsp_le_cs_set_proc_params),
+				true },
+	{ BT_HCI_CMD_LE_CS_PROC_ENABLE, BT_HCI_BIT_LE_CS_PROC_ENABLE,
+				"LE CS Procedure Enable",
+				le_cs_proc_enable_cmd,
+				sizeof(struct bt_hci_cmd_le_cs_proc_enable),
+				true },
+	{ BT_HCI_CMD_LE_CS_TEST, BT_HCI_BIT_LE_CS_TEST,
+				"LE CS Test", le_cs_test_cmd,
+				sizeof(struct bt_hci_cmd_le_cs_test),
+				false,
+				le_cs_test_rsp,
+				sizeof(struct bt_hci_rsp_le_cs_test),
+				true},
+	{ BT_HCI_CMD_LE_CS_TEST_END, BT_HCI_BIT_LE_CS_TEST_END,
+				"LE CS Test End" },
+	{ BT_HCI_CMD_LE_FSU, BT_HCI_BIT_LE_FSU,
+				"LE Frame Space Update", le_fsu_cmd,
+				sizeof(struct bt_hci_cmd_le_fsu),
+				true, status_rsp, 1, true },
 	{ }
 };
 
@@ -10060,7 +10982,7 @@ static void conn_complete_evt(struct timeval *tv, uint16_t index,
 	const struct bt_hci_evt_conn_complete *evt = data;
 
 	print_status(evt->status);
-	print_handle(evt->handle);
+	print_field("Handle: %d", le16_to_cpu(evt->handle));
 	print_bdaddr(evt->bdaddr);
 	print_link_type(evt->link_type);
 	print_enable("Encryption", evt->encr_mode);
@@ -10397,15 +11319,26 @@ static void packet_dequeue_tx(struct timeval *tv, uint16_t handle)
 {
 	struct packet_conn_data *conn;
 	struct packet_frame *frame;
+	struct index_buf_pool *pool;
 	struct timeval delta;
 
 	conn = packet_get_conn_data(handle);
 	if (!conn)
 		return;
 
+	pool = get_pool(conn->index, conn->type);
+	if (pool) {
+		if (!pool->tx)
+			print_field("Buffers: underflow/%u", pool->total);
+		else
+			print_field("Buffers: %u/%u", --pool->tx, pool->total);
+	}
+
 	frame = queue_pop_head(conn->tx_q);
-	if (!frame)
+	if (!frame) {
+		print_field("#(frame not found)");
 		return;
+	}
 
 	timersub(tv, &frame->tv, &delta);
 
@@ -10632,7 +11565,7 @@ static void sync_conn_complete_evt(struct timeval *tv, uint16_t index,
 	const struct bt_hci_evt_sync_conn_complete *evt = data;
 
 	print_status(evt->status);
-	print_handle(evt->handle);
+	print_field("Handle: %d", le16_to_cpu(evt->handle));
 	print_bdaddr(evt->bdaddr);
 	print_link_type(evt->link_type);
 	print_field("Transmission interval: 0x%2.2x", evt->tx_interval);
@@ -10794,7 +11727,7 @@ static void keypress_notify_evt(struct timeval *tv, uint16_t index,
 		str = "Passkey digit erased";
 		break;
 	case 0x03:
-		str = "Passkey clared";
+		str = "Passkey cleared";
 		break;
 	case 0x04:
 		str = "Passkey entry completed";
@@ -11061,7 +11994,7 @@ static void le_conn_complete_evt(struct timeval *tv, uint16_t index,
 	const struct bt_hci_evt_le_conn_complete *evt = data;
 
 	print_status(evt->status);
-	print_handle(evt->handle);
+	print_field("Handle: %d", le16_to_cpu(evt->handle));
 	print_role(evt->role);
 	print_peer_addr_type("Peer address type", evt->peer_addr_type);
 	print_addr("Peer address", evt->peer_addr, evt->peer_addr_type);
@@ -11190,7 +12123,7 @@ static void le_enhanced_conn_complete_evt(struct timeval *tv, uint16_t index,
 	const struct bt_hci_evt_le_enhanced_conn_complete *evt = data;
 
 	print_status(evt->status);
-	print_handle(evt->handle);
+	print_field("Handle: %d", le16_to_cpu(evt->handle));
 	print_role(evt->role);
 	print_peer_addr_type("Peer address type", evt->peer_addr_type);
 	print_addr("Peer address", evt->peer_addr, evt->peer_addr_type);
@@ -11497,7 +12430,7 @@ static void le_pa_report_evt(struct timeval *tv, uint16_t index,
 
 	print_field("Data status: %s%s%s", color_on, str, COLOR_OFF);
 	print_field("Data length: 0x%2.2x", evt->data_len);
-	packet_hexdump(evt->data, evt->data_len);
+	print_eir(evt->data, evt->data_len, true);
 }
 
 static void le_pa_sync_lost_evt(struct timeval *tv, uint16_t index,
@@ -11563,10 +12496,10 @@ static void le_cte_request_failed_evt(struct timeval *tv, uint16_t index,
 	print_field("Connection handle: %d", evt->handle);
 }
 
-static void le_pa_sync_trans_rec_evt(struct timeval *tv, uint16_t index,
+static void le_past_received_evt(struct timeval *tv, uint16_t index,
 					const void *data, uint8_t size)
 {
-	const struct bt_hci_evt_le_pa_sync_trans_rec *evt = data;
+	const struct bt_hci_evt_le_past_recv *evt = data;
 
 	print_status(evt->status);
 	print_field("Handle: %d", evt->handle);
@@ -11679,7 +12612,7 @@ static void le_big_sync_estabilished_evt(struct timeval *tv, uint16_t index,
 	print_usec_interval("Transport Latency", evt->latency);
 	print_field("NSE: %u", evt->nse);
 	print_field("BN: %u", evt->bn);
-	print_field("PTO: %u", evt->bn);
+	print_field("PTO: %u", evt->pto);
 	print_field("IRC: %u", evt->irc);
 	print_field("Maximum PDU: %u", evt->max_pdu);
 	print_slot_125("ISO Interval", evt->interval);
@@ -11724,7 +12657,7 @@ static void le_big_info_evt(struct timeval *tv, uint16_t index,
 	print_field("NSE: %u", evt->nse);
 	print_slot_125("ISO Interval", evt->iso_interval);
 	print_field("BN: %u", evt->bn);
-	print_field("PTO: %u", evt->bn);
+	print_field("PTO: %u", evt->pto);
 	print_field("IRC: %u", evt->irc);
 	print_field("Maximum PDU: %u", evt->max_pdu);
 	print_usec_interval("SDU Interval", evt->sdu_interval);
@@ -11732,6 +12665,666 @@ static void le_big_info_evt(struct timeval *tv, uint16_t index,
 	print_le_phy("PHY", evt->phy);
 	print_framing(evt->framing);
 	print_field("Encryption: 0x%02x", evt->encryption);
+}
+
+static void le_read_all_remote_features_complete_evt(struct timeval *tv,
+					uint16_t index, const void *data,
+					uint8_t size)
+{
+	const struct bt_hci_evt_le_read_all_remote_features_complete *evt =
+									data;
+
+	print_status(evt->status);
+
+	if (size == 1)
+		return;
+
+	print_handle(evt->handle);
+	print_field("Max Pages: 0x%2.2x", evt->max_pages);
+	print_field("Valid Pages: 0x%2.2x", evt->valid_pages);
+	print_le_ext_features(evt->features, evt->valid_pages);
+}
+
+static void le_cs_rd_rem_supp_cap_complete_evt(struct timeval *tv,
+				uint16_t index, const void *data, uint8_t size)
+{
+	const struct bt_hci_evt_le_cs_rd_rem_supp_cap_complete *evt = data;
+	uint16_t mask;
+
+	print_status(evt->status);
+	print_field("Connection Handle: %d", le16_to_cpu(evt->handle));
+	print_field("Num Config Supported: %d", evt->num_config_supported);
+	print_field("Max Consecutive Procedures Supported: %d",
+		le16_to_cpu(evt->max_consecutive_procedures_supported));
+	print_field("Num Antennas Supported: %d", evt->num_antennas_supported);
+	print_field("Max Antenna Paths Supported: %d",
+		evt->max_antenna_paths_supported);
+
+	print_field("Roles Supported: 0x%2.2x", evt->roles_supported);
+	mask = print_bitfield(2, evt->roles_supported, cs_roles_supp_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_FEATURE_BIT,
+		"  Unknown Role (0x%2.2x)", mask);
+
+	print_field("Modes Supported: 0x%2.2x", evt->modes_supported);
+	print_field("RTT Capability: 0x%2.2x", evt->rtt_capability);
+	print_field("RTT AA Only N: %d", evt->rtt_aa_only_n);
+	print_field("RTT Sounding N: %d", evt->rtt_sounding_n);
+	print_field("RTT Random Sequence N: %d", evt->rtt_random_payload_n);
+	print_field("NADM Sounding Capability: 0x%2.2x",
+		le16_to_cpu(evt->nadm_sounding_capability));
+	print_field("NADM Random Capability: 0x%2.2x",
+		le16_to_cpu(evt->nadm_random_capability));
+
+	print_field("CS_SYNC PHYs Supported: 0x%2.2x",
+		evt->cs_sync_phys_supported);
+	mask = print_bitfield(2, evt->cs_sync_phys_supported,
+		cs_sync_phys_supp_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_PHY, "  Unknown PHYs (0x%2.2x)", mask);
+
+	print_field("Subfeatures Supported: 0x%4.4x",
+		le16_to_cpu(evt->subfeatures_supported));
+	mask = print_bitfield(2, le16_to_cpu(evt->subfeatures_supported),
+		cs_subfeatures_supp_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_FEATURE_BIT, "  Unknown subfeatures"
+			" (0x%4.4x)", mask);
+
+	print_field("T_IP1 Times Supported: 0x%4.4x",
+		le16_to_cpu(evt->t_ip1_times_supported));
+	mask = print_bitfield(2, le16_to_cpu(evt->t_ip1_times_supported),
+		cs_t_ip1_times_supp_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_FEATURE_BIT, "  Unknown T_IP1 Times"
+			" (0x%4.4x)", mask);
+
+	print_field("T_IP2 Times Supported: 0x%4.4x",
+		le16_to_cpu(evt->t_ip2_times_supported));
+	mask = print_bitfield(2, le16_to_cpu(evt->t_ip2_times_supported),
+		cs_t_ip2_times_supp_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_FEATURE_BIT, "  Unknown T_IP2 Times"
+			" (0x%4.4x)", mask);
+
+	print_field("T_FCS Times Supported: 0x%4.4x",
+		le16_to_cpu(evt->t_fcs_times_supported));
+	mask = print_bitfield(2, le16_to_cpu(evt->t_fcs_times_supported),
+		cs_t_fcs_times_supp_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_FEATURE_BIT, "  Unknown T_FCS Times"
+			" (0x%4.4x)", mask);
+
+	print_field("T_PM Times Supported: 0x%4.4x",
+		le16_to_cpu(evt->t_pm_times_supported));
+	mask = print_bitfield(2, le16_to_cpu(evt->t_pm_times_supported),
+		cs_t_pm_times_supp_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_FEATURE_BIT, "  Unknown T_PM Times"
+			" (0x%4.4x)", mask);
+
+	print_field("T_SW Time Supported: 0x%2.2x", evt->t_sw_time_supported);
+
+	print_field("TX_SNR Capability: 0x%2.2x", evt->tx_snr_capability);
+	mask = print_bitfield(2, evt->tx_snr_capability,
+		cs_tx_snr_capability_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_FEATURE_BIT,
+			"  Unknown TX_SNR Capability (0x%2.2x)", mask);
+}
+
+static void le_cs_rd_rem_fae_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
+{
+	const struct bt_hci_evt_le_cs_rd_rem_fae_complete *evt = data;
+
+	print_status(evt->status);
+	print_field("Connection handle: %d", le16_to_cpu(evt->handle));
+	print_hex_field("Remote FAE Table: ", evt->remote_fae_table,
+		sizeof(evt->remote_fae_table));
+}
+
+static void le_cs_sec_enable_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
+{
+	const struct bt_hci_evt_le_cs_sec_enable_complete *evt = data;
+
+	print_status(evt->status);
+	print_field("Connection handle: %d", le16_to_cpu(evt->handle));
+}
+
+static void print_cs_role(uint8_t role)
+{
+	const char *str;
+
+	switch (role) {
+	case 0x00:
+		str = "Initiator";
+		break;
+	case 0x01:
+		str = "Reflector";
+		break;
+	default:
+		str = "Reserved";
+		break;
+	}
+
+	print_field("Role: %s (0x%2.2x)", str, role);
+}
+
+static void le_cs_config_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
+{
+	const struct bt_hci_evt_le_cs_config_complete *evt = data;
+
+	print_status(evt->status);
+	print_field("Connection handle: %d", le16_to_cpu(evt->handle));
+	print_field("Config ID: %d", evt->config_id);
+	print_field("Action: %d", evt->action);
+	print_field("Main Mode Type: %d", evt->main_mode_type);
+	print_field("Sub Mode Type: %d", evt->sub_mode_type);
+	print_field("Min Main Mode Steps: %d", evt->min_main_mode_steps);
+	print_field("Max Main Mode Steps: %d", evt->max_main_mode_steps);
+	print_field("Main Mode Repetition: %d", evt->main_mode_repetition);
+	print_field("Mode 0 Steps: %d", evt->mode_0_steps);
+	print_cs_role(evt->role);
+	print_field("RTT Type: %d", evt->rtt_type);
+	print_field("CS_SYNC PHY: %d", evt->cs_sync_phy);
+	print_hex_field("Channel Map: ", evt->channel_map,
+		sizeof(evt->channel_map));
+	print_field("Channel Map Repetition: %d", evt->channel_map_repetition);
+	print_field("Channel Selection Type: %d", evt->channel_selection_type);
+	print_field("Ch3c Shape: %d", evt->ch3c_shape);
+	print_field("Ch3c Jump: %d", evt->ch3c_jump);
+	print_field("Reserved: %d", evt->reserved);
+	print_field("T_IP1 Time: %d", evt->t_ip1_time);
+	print_field("T_IP2 Time: %d", evt->t_ip2_time);
+	print_field("T_FCS Time: %d", evt->t_fcs_time);
+	print_field("T_PM Tim: %d", evt->t_pm_time);
+}
+
+static void le_cs_proc_enable_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
+{
+	const struct bt_hci_evt_le_cs_proc_enable_complete *evt = data;
+
+	print_status(evt->status);
+	print_field("Connection handle: %d", le16_to_cpu(evt->handle));
+	print_field("Config ID: %d", evt->config_id);
+	print_field("State: %d", evt->state);
+	print_field("Tone Antenna Config Selection: %d",
+		evt->tone_antenna_config_selection);
+	print_field("Selected TX Power: %d", evt->selected_tx_power);
+	print_field("Subevent Len: %d", get_le24(evt->subevent_len));
+	print_field("Subevents Per Event: %d", evt->subevents_per_event);
+	print_field("Subevent Interval: %d",
+		le16_to_cpu(evt->subevent_interval));
+	print_field("Event Interval: %d", le16_to_cpu(evt->event_interval));
+	print_field("Procedure Interval: %d",
+		le16_to_cpu(evt->procedure_interval));
+	print_field("Procedure Count: %d", le16_to_cpu(evt->procedure_count));
+	print_field("Max Procedure Len: %d",
+		le16_to_cpu(evt->max_procedure_len));
+}
+
+static void print_cs_packet_quality(uint8_t packet_quality)
+{
+	const char *str;
+
+	print_field("  Packet Quality: 0x%2.2x", packet_quality);
+
+	switch (packet_quality & 0xF) {
+	case 0x00:
+		str = "CS Access Address check is successful, and all bits"
+			" match the expected sequence";
+		break;
+	case 0x01:
+		str = "CS Access Address check contains one or more bit errors";
+		break;
+	case 0x02:
+		str = "CS Access Address not found";
+		break;
+	default:
+		str = "Reserved";
+		break;
+	}
+
+	print_field("    %s", str);
+	print_field("    Bit errors: %d", (packet_quality & 0xF0) >> 4);
+}
+
+static void print_cs_packet_nadm(uint8_t packet_nadm)
+{
+	const char *str;
+
+	switch (packet_nadm) {
+	case 0x00:
+		str = "Attack is extremely unlikely";
+		break;
+	case 0x01:
+		str = "Attack is very unlikely";
+		break;
+	case 0x02:
+		str = "Attack is unlikely";
+		break;
+	case 0x03:
+		str = "Attack is possible";
+		break;
+	case 0x04:
+		str = "Attack is likely";
+		break;
+	case 0x05:
+		str = "Attack is very likely";
+		break;
+	case 0x06:
+		str = "Attack is extremely likely";
+		break;
+	case 0xFF:
+		str = "Unknown NADM";
+		break;
+	default:
+		str = "Reserved";
+		break;
+	}
+
+	print_field("  Packet NADM: %s (0x%2.2x)", str, packet_nadm);
+}
+
+static void print_cs_sync_pct(uint32_t pct, uint8_t id)
+{
+	print_field("  Packet PCT%d: 0x%6.6x", id, pct);
+	print_field("    I: 0x%3.3x", pct & 0xFFF);
+	print_field("    Q: 0x%3.3x", (pct >> 12) & 0xFFF);
+}
+
+static void print_cs_tone_quality_indicator(uint8_t ind)
+{
+	const char *str;
+	uint8_t quality = ind & 0xF;
+	uint8_t ext_slot = (ind >> 4) & 0xF;
+
+	print_field("    Tone quality indicator: 0x%2.2x", ind);
+
+	switch (quality) {
+	case 0x00:
+		str = "Tone quality is high";
+		break;
+	case 0x01:
+		str = "Tone quality is medium";
+		break;
+	case 0x02:
+		str = "Tone quality is low";
+		break;
+	case 0x03:
+		str = "Tone quality indication is not available";
+		break;
+	default:
+		str = "Reserved";
+		break;
+	}
+
+	print_field("      %s (0x%2.2x)", str, quality);
+
+	switch (ext_slot) {
+	case 0x00:
+		str = "Not tone extension slot";
+		break;
+	case 0x01:
+		str = "Tone extension slot; tone not expected to be present";
+		break;
+	case 0x02:
+		str = "Tone extension slot; tone expected to be present";
+		break;
+	default:
+		str = "Reserved";
+		break;
+	}
+
+	print_field("      %s (0x%2.2x)", str, ext_slot);
+}
+
+static int print_cs_mode0_result(const uint8_t *data, uint8_t size)
+{
+	if (size < 3)
+		return 1;
+
+	print_cs_packet_quality(data[0]);
+	print_field("  Packet RSSI: %d", (int8_t)data[1]);
+	print_field("  Packet Antenna: %d", data[2]);
+
+	if (size == 5) {
+		print_field("  Measured Freq Offset: 0x%4.4x",
+					get_le16(data + 3) & 0x7FFF);
+	}
+
+	return 0;
+}
+
+static int print_cs_mode1_result(const uint8_t *data, uint8_t size)
+{
+	uint16_t tod_toa;
+
+	if (size < 6)
+		return 1;
+
+	print_cs_packet_quality(data[0]);
+	print_cs_packet_nadm(data[1]);
+	print_field("  Packet RSSI: %d", (int8_t)data[2]);
+
+	tod_toa = get_le16(data + 3);
+	if (tod_toa == 0x8000)
+		print_field("  ToA_ToD: Time difference is not available");
+	else
+		print_field("  ToA_ToD: 0x%4.4x", (int16_t)tod_toa);
+
+	print_field("  Packet Antenna: %d", data[5]);
+
+	if (size <= 14)
+		return 0;
+
+	print_cs_sync_pct(get_le32(data + 6), 1);
+	print_cs_sync_pct(get_le32(data + 10), 2);
+
+	return 0;
+}
+
+static int print_cs_mode2_result(const uint8_t *data, uint8_t size)
+{
+	const uint8_t *pct_ptr;
+	uint32_t pct;
+	uint8_t antenna_paths;
+	uint8_t i;
+
+	if (size < 5)
+		return 1;
+
+	print_field("  Antenna Permutation Index: %d", data[0]);
+
+	antenna_paths = (size - 1) / 4;
+	pct_ptr = data + 1;
+
+	for (i = 0; i < antenna_paths; ++i) {
+		pct = get_le24(pct_ptr);
+		print_field("  Path %d", i);
+		print_field("    PCT: 0x%6.6x", pct);
+		print_field("      I: 0x%3.3x", pct & 0xFFF);
+		print_field("      Q: 0x%3.3x", (pct >> 12) & 0xFFF);
+		pct_ptr += 3;
+		print_cs_tone_quality_indicator(*pct_ptr);
+		pct_ptr += 1;
+	}
+
+	return 0;
+}
+
+static int print_cs_mode3_result(const uint8_t *data, uint8_t size)
+{
+	uint16_t tod_toa;
+
+	if (size < 6)
+		return 1;
+
+	print_cs_packet_quality(data[0]);
+	print_cs_packet_nadm(data[1]);
+	print_field("  Packet RSSI: %d", (int8_t)data[2]);
+
+	tod_toa = get_le16(data + 3);
+	if (tod_toa == 0x8000) {
+		print_field("  ToA_ToD: Time difference is not available "
+			"(0x%4.4x)", tod_toa);
+	} else {
+		print_field("  ToA_ToD: %d (0x%4.4x)", tod_toa,
+			(int16_t)tod_toa);
+	}
+
+	print_field("  Packet Antenna: %d", data[5]);
+
+	/* To parse the remaining data for mode3 results we would need
+	 * to capture and cache the exchanged CS configuration.
+	 */
+
+	return 0;
+}
+
+static void print_cs_steps(const uint8_t *data, uint8_t size)
+{
+	int rc = 1;
+	const uint8_t *ptr = data;
+	uint8_t data_len;
+	uint8_t mode;
+	uint8_t channel;
+	uint8_t i = 0;
+
+	while (size > 3) {
+		mode = ptr[0];
+		channel = ptr[1];
+		data_len = ptr[2];
+		ptr += 3;
+		size -= 3;
+		if (size < data_len)
+			break;
+
+		print_field("Step %d", i++);
+		print_field("  Mode: %d", mode);
+		print_field("  Channel: %d", channel);
+		print_field("  Step data len: %d", data_len);
+		print_hex_field("  Raw step data: ", ptr, data_len);
+
+		if (data_len == 0)
+			continue;
+
+		switch (mode) {
+		case 0x00:
+			rc = print_cs_mode0_result(ptr, data_len);
+			break;
+		case 0x01:
+			rc = print_cs_mode1_result(ptr, data_len);
+			break;
+		case 0x02:
+			rc = print_cs_mode2_result(ptr, data_len);
+			break;
+		case 0x03:
+			rc = print_cs_mode3_result(ptr, data_len);
+			break;
+		default:
+			rc = 1;
+		}
+
+		if (rc)
+			break;
+
+		size -= data_len;
+		ptr += data_len;
+	}
+}
+
+static void print_cs_procedure_done_status(uint8_t status)
+{
+	const char *str;
+
+	switch (status) {
+	case 0x00:
+		str = "All results complete for the CS procedure";
+		break;
+	case 0x01:
+		str = "Partial results with more to follow for the CS "
+			"procedure";
+		break;
+	case 0x0F:
+		str = "All subsequent CS procedures aborted";
+		break;
+	default:
+		str = "Reserved";
+		break;
+	}
+
+	print_field("Procedure Done Status: %s (0x%2.2x)", str, status);
+}
+
+static void print_cs_subevent_done_status(uint8_t status)
+{
+	const char *str;
+
+	switch (status) {
+	case 0x00:
+		str = "All results complete for the CS subevent";
+		break;
+	case 0x01:
+		str = "Partial results with more to follow for the CS subevent";
+		break;
+	case 0x0F:
+		str = "Current CS subevent aborted";
+		break;
+	default:
+		str = "Reserved";
+		break;
+	}
+
+	print_field("Subevent Done Status: %s (0x%2.2x)", str, status);
+}
+
+static void print_cs_abort_reason(uint8_t reason)
+{
+	const char *str;
+
+	print_field("Abort reason: 0x%2.2x", reason);
+
+	switch (reason & 0xF) {
+	case 0x00:
+		str = "Report with no abort";
+		break;
+	case 0x01:
+		str = "Abort because of local Host or remote request";
+		break;
+	case 0x02:
+		str = "Abort because filtered channel map has less than 15 "
+		      "channels";
+		break;
+	case 0x03:
+		str = "Abort because the channel map update instant has passed";
+		break;
+	case 0x0F:
+		str = "Abort because of unspecified reasons";
+		break;
+	default:
+		str = "Reserved";
+		break;
+	}
+
+	print_field("  Procedure: %s (0x%2.2x)", str, reason & 0xF);
+
+	switch ((reason & 0xF0) >> 4) {
+	case 0x00:
+		str = "Report with no abort";
+		break;
+	case 0x01:
+		str = "Abort because of local Host or remote request";
+		break;
+	case 0x02:
+		str = "Abort because no CS_SYNC (mode-0) received";
+		break;
+	case 0x03:
+		str = "Abort because of scheduling conflicts or limited "
+		      "resources";
+		break;
+	case 0x0F:
+		str = "Abort because of unspecified reasons";
+		break;
+	default:
+		str = "Reserved";
+		break;
+	}
+
+	print_field("  Subevent: %s (0x%2.2x)", str, (reason & 0xF0) >> 4);
+}
+
+static void le_cs_subevent_result_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
+{
+	const struct bt_hci_evt_le_cs_subevent_result *evt = data;
+	uint8_t head_size = sizeof(struct bt_hci_evt_le_cs_subevent_result);
+
+	print_field("Connection handle: %d", le16_to_cpu(evt->handle));
+	print_field("Config ID: %d", evt->config_id);
+	print_field("Start ACL Conn Event Counter: %d",
+		le16_to_cpu(evt->start_acl_conn_event_counter));
+	print_field("Procedure Counter: %d",
+		le16_to_cpu(evt->procedure_counter));
+	print_field("Frequency Compensation: %d",
+		le16_to_cpu(evt->frequency_compensation));
+	print_field("Reference Power Level: %d", evt->reference_power_level);
+	print_cs_procedure_done_status(evt->procedure_done_status);
+	print_cs_subevent_done_status(evt->subevent_done_status);
+	print_cs_abort_reason(evt->abort_reason);
+	print_field("Num Antenna Paths: %d", evt->num_antenna_paths);
+	print_field("Num Steps Reported: %d", evt->num_steps_reported);
+	print_hex_field("Steps data: ",
+		(const uint8_t *)evt->steps + head_size, size - head_size);
+	print_cs_steps(evt->steps, size - head_size);
+}
+
+static void le_cs_subevent_result_continue_evt(struct timeval *tv,
+				uint16_t index, const void *data, uint8_t size)
+{
+	const struct bt_hci_evt_le_cs_subevent_result_continue *evt = data;
+	uint8_t head_size = sizeof(
+		struct bt_hci_evt_le_cs_subevent_result_continue);
+
+	print_field("Connection handle: %d", le16_to_cpu(evt->handle));
+	print_field("Config ID: %d", evt->config_id);
+	print_cs_procedure_done_status(evt->procedure_done_status);
+	print_cs_subevent_done_status(evt->subevent_done_status);
+	print_cs_abort_reason(evt->abort_reason);
+	print_field("Num Antenna Paths: %d", evt->num_antenna_paths);
+	print_field("Num Steps Reported: %d", evt->num_steps_reported);
+	print_hex_field("Steps data: ",
+		(const uint8_t *)evt->steps + head_size, size - head_size);
+	print_cs_steps(evt->steps, size - head_size);
+}
+
+static void le_cs_test_end_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
+{
+	const struct bt_hci_evt_le_cs_test_end_complete *evt = data;
+
+	print_status(evt->status);
+}
+
+static void print_fsu_initiator(uint8_t initiator)
+{
+	const char *str;
+
+	switch (initiator) {
+	case 0x00:
+		str = "Local Host initiated";
+		break;
+	case 0x01:
+		str = "Local Controller initiated";
+		break;
+	case 0x02:
+		str = "Peer initiated";
+		break;
+	default:
+		str = "Reserved";
+		break;
+	}
+
+	print_field("initiator: %s (0x%2.2x)", str, initiator);
+}
+
+static void le_fsu_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
+{
+	const struct bt_hci_evt_le_fsu_complete *evt = data;
+
+	print_status(evt->status);
+	print_handle(evt->handle);
+	print_fsu_initiator(evt->initiator);
+	print_field("Frame Space: %u us (0x%4.4x)",
+				le16_to_cpu(evt->frame_space),
+				le16_to_cpu(evt->frame_space));
+	print_le_phy_bitfield("PHYs", evt->phys);
+	print_fsu_types(evt->types);
 }
 
 struct subevent_data {
@@ -11821,9 +13414,10 @@ static const struct subevent_data le_meta_event_table[] = {
 				le_chan_select_alg_evt, 3, true},
 	{ 0x17, "LE CTE Request Failed",
 				le_cte_request_failed_evt, 3, true},
-	{ 0x18, "LE Periodic Advertising Sync Transfer Received",
-					le_pa_sync_trans_rec_evt, 19,
-					true},
+	{ BT_HCI_EVT_LE_PAST_RECEIVED,
+			"LE Periodic Advertising Sync Transfer Received",
+			le_past_received_evt, 19,
+			true},
 	{ BT_HCI_EVT_LE_CIS_ESTABLISHED,
 				"LE Connected Isochronous Stream Established",
 				le_cis_established_evt,
@@ -11843,7 +13437,7 @@ static const struct subevent_data le_meta_event_table[] = {
 				sizeof(struct bt_hci_evt_le_big_terminate) },
 	{ BT_HCI_EVT_LE_BIG_SYNC_ESTABILISHED,
 				"LE Broadcast Isochronous Group Sync "
-				"Estabilished", le_big_sync_estabilished_evt,
+				"Established", le_big_sync_estabilished_evt,
 				sizeof(struct bt_hci_evt_le_big_sync_lost) },
 	{ BT_HCI_EVT_LE_BIG_SYNC_LOST,
 				"LE Broadcast Isochronous Group Sync Lost",
@@ -11858,6 +13452,47 @@ static const struct subevent_data le_meta_event_table[] = {
 		"LE Broadcast Isochronous Group Info Advertising Report",
 		le_big_info_evt,
 		sizeof(struct bt_hci_evt_le_big_info_adv_report) },
+	{ BT_HCI_EVT_LE_READ_ALL_REMOTE_FEATURES_COMPLETE,
+		"LE CS Read All Remote Features Complete",
+		le_read_all_remote_features_complete_evt,
+		sizeof(struct bt_hci_evt_le_read_all_remote_features_complete),
+		true },
+	{ BT_HCI_EVT_LE_CS_RD_REM_SUPP_CAP_COMPLETE,
+		"LE CS Read Remote Supported Capabilities Complete",
+		le_cs_rd_rem_supp_cap_complete_evt,
+		sizeof(struct bt_hci_evt_le_cs_rd_rem_supp_cap_complete), true},
+	{ BT_HCI_EVT_LE_CS_RD_REM_FAE_COMPLETE,
+		"LE CS Read Remote FAE Table Complete",
+		le_cs_rd_rem_fae_complete_evt,
+		sizeof(struct bt_hci_evt_le_cs_rd_rem_fae_complete), true },
+	{ BT_HCI_EVT_LE_CS_SEC_ENABLE_COMPLETE,
+		"LE CS Security Enable Complete",
+		le_cs_sec_enable_complete_evt,
+		sizeof(struct bt_hci_evt_le_cs_sec_enable_complete), true },
+	{ BT_HCI_EVT_LE_CS_CONFIG_COMPLETE,
+		"LE CS Config Complete",
+		le_cs_config_complete_evt,
+		sizeof(struct bt_hci_evt_le_cs_config_complete), true },
+	{ BT_HCI_EVT_LE_CS_PROC_ENABLE_COMPLETE,
+		"LE CS Procedure Enable Complete",
+		le_cs_proc_enable_complete_evt,
+		sizeof(struct bt_hci_evt_le_cs_proc_enable_complete), true },
+	{ BT_HCI_EVT_LE_CS_SUBEVENT_RESULT,
+		"LE CS Subevent Result",
+		le_cs_subevent_result_evt,
+		sizeof(struct bt_hci_evt_le_cs_subevent_result), false },
+	{ BT_HCI_EVT_LE_CS_SUBEVENT_RESULT_CONTINUE,
+		"LE CS Subevent Result Continue",
+		le_cs_subevent_result_continue_evt,
+		sizeof(struct bt_hci_evt_le_cs_subevent_result_continue),
+		false },
+	{ BT_HCI_EVT_LE_CS_TEST_END_COMPLETE,
+		"LE CS Test End Complete",
+		le_cs_test_end_complete_evt,
+		sizeof(struct bt_hci_evt_le_cs_test_end_complete), true },
+	{ BT_HCI_EVT_LE_FSU_COMPLETE,
+		"LE Frame Space Update Complete",
+		le_fsu_evt, sizeof(struct bt_hci_evt_le_fsu_complete) },
 	{ }
 };
 
@@ -12449,7 +14084,9 @@ void packet_hci_acldata(struct timeval *tv, struct ucred *cred, uint16_t index,
 	uint16_t handle = le16_to_cpu(hdr->handle);
 	uint16_t dlen = le16_to_cpu(hdr->dlen);
 	uint8_t flags = acl_flags(handle);
-	char handle_str[16], extra_str[32];
+	char handle_str[22], extra_str[32];
+	struct packet_conn_data *conn;
+	struct index_buf_pool *pool = &index_list[index].acl;
 
 	if (index >= MAX_INDEX) {
 		print_field("Invalid index (%d).", index);
@@ -12472,7 +14109,16 @@ void packet_hci_acldata(struct timeval *tv, struct ucred *cred, uint16_t index,
 	data += HCI_ACL_HDR_SIZE;
 	size -= HCI_ACL_HDR_SIZE;
 
-	sprintf(handle_str, "Handle %d", acl_handle(handle));
+	conn = packet_get_conn_data(handle);
+	if (conn && conn->type == 0x01 && index_list[index].le.total)
+		pool = &index_list[index].le;
+
+	if (!in && pool && pool->total)
+		sprintf(handle_str, "Handle %d [%u/%u]", acl_handle(handle),
+				++pool->tx, pool->total);
+	else
+		sprintf(handle_str, "Handle %d", acl_handle(handle));
+
 	sprintf(extra_str, "flags 0x%2.2x dlen %d", flags, dlen);
 
 	print_packet(tv, cred, in ? '>' : '<', index, NULL, COLOR_HCI_ACLDATA,
@@ -12502,7 +14148,7 @@ void packet_hci_scodata(struct timeval *tv, struct ucred *cred, uint16_t index,
 	const hci_sco_hdr *hdr = data;
 	uint16_t handle = le16_to_cpu(hdr->handle);
 	uint8_t flags = acl_flags(handle);
-	char handle_str[16], extra_str[32];
+	char handle_str[22], extra_str[32];
 
 	if (index >= MAX_INDEX) {
 		print_field("Invalid index (%d).", index);
@@ -12525,7 +14171,12 @@ void packet_hci_scodata(struct timeval *tv, struct ucred *cred, uint16_t index,
 	data += HCI_SCO_HDR_SIZE;
 	size -= HCI_SCO_HDR_SIZE;
 
-	sprintf(handle_str, "Handle %d", acl_handle(handle));
+	if (index_list[index].sco.total && !in)
+		sprintf(handle_str, "Handle %d [%u/%u]", acl_handle(handle),
+			index_list[index].sco.total, index_list[index].sco.tx);
+	else
+		sprintf(handle_str, "Handle %d", acl_handle(handle));
+
 	sprintf(extra_str, "flags 0x%2.2x dlen %d", flags, hdr->dlen);
 
 	print_packet(tv, cred, in ? '>' : '<', index, NULL, COLOR_HCI_SCODATA,
@@ -12551,9 +14202,11 @@ void packet_hci_isodata(struct timeval *tv, struct ucred *cred, uint16_t index,
 				bool in, const void *data, uint16_t size)
 {
 	const struct bt_hci_iso_hdr *hdr = data;
+	const struct bt_hci_iso_data_start *start;
 	uint16_t handle = le16_to_cpu(hdr->handle);
 	uint8_t flags = acl_flags(handle);
-	char handle_str[16], extra_str[32];
+	char handle_str[36], extra_str[33];
+	struct index_buf_pool *pool = &index_list[index].iso;
 
 	if (index >= MAX_INDEX) {
 		print_field("Invalid index (%d).", index);
@@ -12562,22 +14215,32 @@ void packet_hci_isodata(struct timeval *tv, struct ucred *cred, uint16_t index,
 
 	index_list[index].frame++;
 
-	if (size < sizeof(*hdr)) {
-		if (in)
-			print_packet(tv, cred, '*', index, NULL, COLOR_ERROR,
-				"Malformed ISO Data RX packet", NULL, NULL);
-		else
-			print_packet(tv, cred, '*', index, NULL, COLOR_ERROR,
-				"Malformed ISO Data TX packet", NULL, NULL);
-		packet_hexdump(data, size);
-		return;
-	}
+	if (size < sizeof(*hdr))
+		goto malformed;
 
 	data += sizeof(*hdr);
 	size -= sizeof(*hdr);
 
-	sprintf(handle_str, "Handle %d", acl_handle(handle));
-	sprintf(extra_str, "flags 0x%2.2x dlen %d", flags, hdr->dlen);
+	/* Detect if timestamp field is preset */
+	if (iso_flags_ts(flags)) {
+		if (size < sizeof(uint32_t))
+			goto malformed;
+
+		data += sizeof(uint32_t);
+		size -= sizeof(uint32_t);
+	}
+
+	start = data;
+
+	if (!in && pool->total)
+		sprintf(handle_str, "Handle %d [%u/%u] SN %u",
+			acl_handle(handle), ++pool->tx, pool->total, start->sn);
+	else
+		sprintf(handle_str, "Handle %u SN %u", acl_handle(handle),
+			start->sn);
+
+	sprintf(extra_str, "flags 0x%2.2x dlen %u slen %u", flags, hdr->dlen,
+		start->slen);
 
 	print_packet(tv, cred, in ? '>' : '<', index, NULL, COLOR_HCI_ISODATA,
 				in ? "ISO Data RX" : "ISO Data TX",
@@ -12596,6 +14259,17 @@ void packet_hci_isodata(struct timeval *tv, struct ucred *cred, uint16_t index,
 
 	if (filter_mask & PACKET_FILTER_SHOW_ISO_DATA)
 		packet_hexdump(data, size);
+
+	return;
+
+malformed:
+	if (in)
+		print_packet(tv, cred, '*', index, NULL, COLOR_ERROR,
+				"Malformed ISO Data RX packet", NULL, NULL);
+	else
+		print_packet(tv, cred, '*', index, NULL, COLOR_ERROR,
+				"Malformed ISO Data TX packet", NULL, NULL);
+	packet_hexdump(data, size);
 }
 
 void packet_ctrl_open(struct timeval *tv, struct ucred *cred, uint16_t index,
@@ -12881,6 +14555,9 @@ static const struct bitfield_data mgmt_settings_table[] = {
 	{ 19, "CIS Peripheral"		},
 	{ 20, "ISO Broadcaster"		},
 	{ 21, "Sync Receiver"		},
+	{ 22, "LL Privacy"		},
+	{ 23, "PAST Sender"		},
+	{ 24, "PAST Receiver"		},
 	{}
 };
 
@@ -13313,6 +14990,57 @@ static void mgmt_set_low_energy_cmd(const void *data, uint16_t size)
 	uint8_t enable = get_u8(data);
 
 	print_enable("Low Energy", enable);
+}
+
+static void mgmt_set_blocked_keys_cmd(const void *data, uint16_t size)
+{
+	struct iovec frame = { (void *)data, size };
+	uint16_t num_keys;
+	int i;
+
+	if (!util_iov_pull_le16(&frame, &num_keys)) {
+		print_field("Keys: invalid size");
+		return;
+	}
+
+	print_field("Keys: %u", num_keys);
+
+	for (i = 0; i < num_keys; i++) {
+		uint8_t type;
+		uint8_t *key;
+
+		if (!util_iov_pull_u8(&frame, &type)) {
+			print_field("Key type[%u]: invalid size", i);
+			return;
+		}
+
+		switch (type) {
+		case 0x00:
+			print_field("type: Link Key (0x00)");
+			break;
+		case 0x01:
+			print_field("type: Long Term Key (0x01)");
+			break;
+		case 0x02:
+			print_field("type: Identity Resolving Key (0x02)");
+			break;
+		}
+
+		key = util_iov_pull_mem(&frame, 16);
+		if (!key) {
+			print_field("Key[%u]: invalid size", i);
+			return;
+		}
+
+		print_link_key(key);
+	}
+}
+
+static void mgmt_set_wbs_cmd(const void *data, uint16_t size)
+{
+	uint8_t enable = get_u8(data);
+
+	print_enable("Wideband Speech", enable);
 }
 
 static void mgmt_new_settings_rsp(const void *data, uint16_t size)
@@ -14257,6 +15985,8 @@ static void mgmt_set_exp_feature_rsp(const void *data, uint16_t size)
 static const struct bitfield_data mgmt_added_device_flags_table[] = {
 	{ 0, "Remote Wakeup"		},
 	{ 1, "Device Privacy Mode"	},
+	{ 2, "Address Resolution"	},
+	{ 3, "PAST"			},
 	{ }
 };
 
@@ -14551,6 +16281,55 @@ static void mgmt_mesh_send_cancel_cmd(const void *data, uint16_t size)
 	print_field("Handle: %d", handle);
 }
 
+static void mgmt_hci_cmd_sync_cmd(const void *data, uint16_t size)
+{
+	struct iovec iov = { (void *)data, size };
+	uint16_t opcode, len;
+	uint8_t event;
+	uint8_t timeout;
+
+	if (!util_iov_pull_le16(&iov, &opcode)) {
+		print_text(COLOR_ERROR, "  invalid opcode");
+		return;
+	}
+
+	print_field("Opcode: 0x%4.4x", opcode);
+
+	if (!util_iov_pull_u8(&iov, &event)) {
+		print_text(COLOR_ERROR, "  invalid event");
+		return;
+	}
+
+	print_field("Event: 0x%2.2x", event);
+
+	if (!util_iov_pull_u8(&iov, &timeout)) {
+		print_text(COLOR_ERROR, "  invalid timeout");
+		return;
+	}
+
+	print_field("Timeout: %d seconds", timeout);
+
+	if (!util_iov_pull_le16(&iov, &len)) {
+		print_text(COLOR_ERROR, "  invalid parameters length");
+		return;
+	}
+
+	print_field("Parameters Length: %d", len);
+
+	if (iov.iov_len != len) {
+		print_text(COLOR_ERROR, "  length mismatch (%zu != %d)",
+				iov.iov_len, len);
+		return;
+	}
+
+	print_hex_field("Parameters", iov.iov_base, iov.iov_len);
+}
+
+static void mgmt_hci_cmd_sync_rsp(const void *data, uint16_t size)
+{
+	print_hex_field("Response", data, size);
+}
+
 struct mgmt_data {
 	uint16_t opcode;
 	const char *str;
@@ -14770,8 +16549,12 @@ static const struct mgmt_data mgmt_command_table[] = {
 	{ 0x0045, "Set PHY Configuration",
 				mgmt_set_phy_cmd, 4, true,
 				mgmt_null_rsp, 0, true },
-	{ 0x0046, "Load Blocked Keys" },
-	{ 0x0047, "Set Wideband Speech" },
+	{ 0x0046, "Set Blocked Keys",
+				mgmt_set_blocked_keys_cmd, 2, false,
+				mgmt_null_rsp, 0, true },
+	{ 0x0047, "Set Wideband Speech",
+				mgmt_set_wbs_cmd, 1, true,
+				mgmt_new_settings_rsp, 4, true },
 	{ 0x0048, "Read Controller Capabilities" },
 	{ 0x0049, "Read Experimental Features Information",
 				mgmt_null_cmd, 0, true,
@@ -14817,9 +16600,12 @@ static const struct mgmt_data mgmt_command_table[] = {
 	{ 0x0059, "Mesh Send",
 				mgmt_mesh_send_cmd, 19, false,
 				mgmt_mesh_send_rsp, 1, true},
-	{ 0x0056, "Mesh Send Cancel",
+	{ 0x005A, "Mesh Send Cancel",
 				mgmt_mesh_send_cancel_cmd, 1, true,
 				mgmt_null_rsp, 0, true},
+	{ 0x005B, "Send HCI command and wait for event",
+				mgmt_hci_cmd_sync_cmd, 6, false,
+				mgmt_hci_cmd_sync_rsp, 0, false},
 	{ }
 };
 

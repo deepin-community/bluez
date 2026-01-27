@@ -12,6 +12,7 @@
 #include <config.h>
 #endif
 
+#include <limits.h>
 #include <stdio.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -22,7 +23,7 @@
 #include <dirent.h>
 #include <sys/param.h>
 
-#include "lib/bluetooth.h"
+#include "bluetooth/bluetooth.h"
 
 #include "hciattach.h"
 

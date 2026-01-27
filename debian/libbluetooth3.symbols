@@ -1,4 +1,5 @@
 libbluetooth.so.3 libbluetooth3 #MINVER#
+* Build-Depends-Package: libbluetooth-dev
  ba2oui@Base 4.91
  ba2str@Base 4.91
  ba2strlc@Base 5.54
@@ -217,5 +218,3 @@ libbluetooth.so.3 libbluetooth3 #MINVER#
  sdp_uuid_to_uuid128@Base 4.91
  str2ba@Base 4.91
  strtoba@Base 4.91
-sixaxis.so libbluetooth3 #MINVER#
- bluetooth_plugin_desc@Base 5.20

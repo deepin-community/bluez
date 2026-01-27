@@ -38,7 +38,7 @@
 #include "tools/mesh/model.h"
 #include "tools/mesh/remote.h"
 
-#define PROMPT_ON	COLOR_BLUE "[mesh-cfgclient]" COLOR_OFF "# "
+#define PROMPT_ON	"[mesh-cfgclient]> "
 #define PROMPT_OFF	"Waiting to connect to bluetooth-meshd..."
 
 #define CFG_SRV_MODEL	0x0000
@@ -766,7 +766,7 @@ static void attach_node_reply(struct l_dbus_proxy *proxy,
 	if (local->mgmt_proxy)
 		l_queue_remove(node_proxies, local->mgmt_proxy);
 
-	/* Inititalize config client model */
+	/* Initialize config client model */
 	client_init();
 
 	if (l_dbus_proxy_get_property(local->proxy, "IvIndex", "u", &ivi) &&
@@ -2021,6 +2021,7 @@ static struct l_dbus_message *scan_result_call(struct l_dbus *dbus,
 	result.server = server;
 	result.rssi = rssi;
 	result.id = 0;
+	result.last_seen = time(NULL);
 
 	if (n > 16 && n <= 18)
 		result.oob_info = l_get_be16(prov_data + 16);
@@ -2042,8 +2043,6 @@ static struct l_dbus_message *scan_result_call(struct l_dbus *dbus,
 
 	} else if (dev->rssi < result.rssi)
 		*dev = result;
-
-	dev->last_seen = time(NULL);
 
 	l_queue_insert(devices, dev, sort_rssi, NULL);
 
@@ -2483,7 +2482,7 @@ static void client_ready(struct l_dbus_client *client, void *user_data)
 static void client_connected(struct l_dbus *dbus, void *user_data)
 {
 	bt_shell_printf("D-Bus client connected\n");
-	bt_shell_set_prompt(PROMPT_ON);
+	bt_shell_set_prompt(PROMPT_ON, COLOR_BLUE);
 }
 
 static void client_disconnected(struct l_dbus *dbus, void *user_data)
@@ -2530,8 +2529,10 @@ static bool setup_cfg_storage(void)
 				return false;
 			}
 		} else if (errno == ENOENT) {
-			if (mkdir(mesh_dir, 0700) != 0)
+			if (mkdir(mesh_dir, 0700) != 0) {
+				l_error("Cannot create %s", mesh_dir);
 				return false;
+			}
 		} else {
 			perror("Cannot open config directory");
 			return false;
@@ -2643,7 +2644,7 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
-	bt_shell_set_prompt(PROMPT_OFF);
+	bt_shell_set_prompt(PROMPT_OFF, NULL);
 
 	dbus = l_dbus_new_default(L_DBUS_SYSTEM_BUS);
 

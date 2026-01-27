@@ -75,7 +75,7 @@ bool str2hex(const char *str, uint16_t in_len, uint8_t *out,
 	return true;
 }
 
-size_t hex2str(uint8_t *in, size_t in_len, char *out, size_t out_len)
+size_t hex2str(const uint8_t *in, size_t in_len, char *out, size_t out_len)
 {
 	static const char hexdigits[] = "0123456789abcdef";
 	size_t i;
@@ -161,3 +161,13 @@ void enable_debug(void)
 	debug_enabled = true;
 	l_debug_enable("*");
 }
+
+#if !HAVE_DECL_BASENAME
+#include <string.h>
+const char *mesh_basename(const char *path)
+{
+	const char *base = strrchr(path, '/');
+
+	return base ? base + 1 : path;
+}
+#endif

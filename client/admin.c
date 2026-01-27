@@ -1,19 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2021 Google LLC
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
  *
  */
 
@@ -35,6 +26,8 @@ static DBusConnection *dbus_conn;
 static GList *admin_proxies;
 static GDBusProxy *set_proxy;
 static GDBusProxy *status_proxy;
+
+static void admin_menu_pre_run(const struct bt_shell_menu *menu);
 
 static void admin_policy_set_set_proxy(GDBusProxy *proxy)
 {
@@ -149,6 +142,7 @@ static void cmd_admin_allow(int argc, char *argv[])
 static const struct bt_shell_menu admin_menu = {
 	.name = "admin",
 	.desc = "Admin Policy Submenu",
+	.pre_run = admin_menu_pre_run,
 	.entries = {
 	{ "allow", "[clear/uuid1 uuid2 ...]", cmd_admin_allow,
 				"Allow service UUIDs and block rest of them"},
@@ -202,7 +196,10 @@ static void disconnect_handler(DBusConnection *connection, void *user_data)
 void admin_add_submenu(void)
 {
 	bt_shell_add_submenu(&admin_menu);
+}
 
+static void admin_menu_pre_run(const struct bt_shell_menu *menu)
+{
 	dbus_conn = bt_shell_get_env("DBUS_CONNECTION");
 	if (!dbus_conn || client)
 		return;

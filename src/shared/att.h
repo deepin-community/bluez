@@ -35,7 +35,7 @@ int bt_att_get_channels(struct bt_att *att);
 
 typedef void (*bt_att_response_func_t)(uint8_t opcode, const void *pdu,
 					uint16_t length, void *user_data);
-typedef void (*bt_att_notify_func_t)(struct bt_att_chan *chan,
+typedef void (*bt_att_notify_func_t)(struct bt_att_chan *chan, uint16_t mtu,
 					uint8_t opcode, const void *pdu,
 					uint16_t length, void *user_data);
 typedef void (*bt_att_destroy_func_t)(void *user_data);
@@ -110,3 +110,4 @@ bool bt_att_set_local_key(struct bt_att *att, uint8_t sign_key[16],
 bool bt_att_set_remote_key(struct bt_att *att, uint8_t sign_key[16],
 			bt_att_counter_func_t func, void *user_data);
 bool bt_att_has_crypto(struct bt_att *att);
+bool bt_att_set_retry(struct bt_att *att, unsigned int id, bool retry);

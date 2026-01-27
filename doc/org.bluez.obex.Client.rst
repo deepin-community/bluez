@@ -24,46 +24,50 @@ Methods
 object CreateSession(string destination, dict args)
 ```````````````````````````````````````````````````
 
-	Connects to the destination address and then proceed to create an OBEX
-	session object which implements **org.bluez.obex.Session(5)** interface.
+Connects to the destination address and then proceed to create an OBEX session
+object which implements **org.bluez.obex.Session(5)** interface.
 
-	The last parameter is a dictionary to hold optional or type-specific
-	parameters.
+The last parameter is a dictionary to hold optional or type-specific parameters.
 
-	Possible args values:
+Possible args values:
 
-	:string Target:
+:string Target:
 
-		Type of session to be created.
+	Type of session to be created.
 
-		Possible values:
+	Possible values:
 
-		:"ftp":
-		:"map":
-		:"opp":
-		:"pbap":
-		:"sync":
+	:"ftp":
+	:"map":
+	:"opp":
+	:"pbap":
+	:"sync":
+	:"bip-avrcp":
 
-	:string Source:
+:string Source:
 
-		Local address to be used.
+	Local address to be used.
 
-	:byte Channel:
+:byte Channel:
 
-		Channel to be used.
+	Channel to be used.
 
-	Possible errors:
+:uint16 PSM:
 
-	:org.bluez.obex.Error.InvalidArguments:
-	:org.bluez.obex.Error.Failed:
+	L2CAP PSM to be used.
+
+Possible errors:
+
+:org.bluez.obex.Error.InvalidArguments:
+:org.bluez.obex.Error.Failed:
 
 void RemoveSession(object session)
 ``````````````````````````````````
 
-	Disconnects and removes session previously created by
-	**CreateSession()** aborting any pending transfers.
+Disconnects and removes session previously created by **CreateSession()**
+aborting any pending transfers.
 
-	Possible errors:
+Possible errors:
 
-	:org.bluez.obex.Error.InvalidArguments:
-	:org.bluez.obex.Error.NotAuthorized:
+:org.bluez.obex.Error.InvalidArguments:
+:org.bluez.obex.Error.NotAuthorized:

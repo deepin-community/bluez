@@ -21,6 +21,7 @@ enum hciemu_type {
 	HCIEMU_TYPE_LEGACY,
 	HCIEMU_TYPE_BREDRLE50,
 	HCIEMU_TYPE_BREDRLE52,
+	HCIEMU_TYPE_BREDRLE60,
 };
 
 enum hciemu_hook_type {
@@ -55,6 +56,7 @@ void hciemu_flush_client_events(struct hciemu *hciemu);
 
 const char *hciemu_get_address(struct hciemu *hciemu);
 uint8_t *hciemu_get_features(struct hciemu *hciemu);
+uint8_t *hciemu_get_commands(struct hciemu *hciemu);
 
 const uint8_t *hciemu_get_central_bdaddr(struct hciemu *hciemu);
 const uint8_t *hciemu_get_client_bdaddr(struct hciemu *hciemu);

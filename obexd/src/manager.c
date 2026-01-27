@@ -40,7 +40,7 @@
 #define AGENT_INTERFACE OBEXD_SERVICE ".Agent1"
 #define OBEX_ERROR_REJECT      "org.bluez.obex.Error.Rejected"
 
-#define TIMEOUT 60*1000 /* Timeout for user response (miliseconds) */
+#define TIMEOUT 60*1000 /* Timeout for user response (milliseconds) */
 
 struct agent {
 	char *bus_name;
@@ -488,7 +488,7 @@ gboolean manager_init(void)
 
 	dbus_error_init(&err);
 
-	connection = g_dbus_setup_bus(DBUS_BUS_SESSION, OBEXD_SERVICE, &err);
+	connection = obex_setup_dbus_connection(OBEXD_SERVICE, &err);
 	if (connection == NULL) {
 		if (dbus_error_is_set(&err) == TRUE) {
 			fprintf(stderr, "%s\n", err.message);
@@ -525,11 +525,16 @@ void manager_cleanup(void)
 void manager_emit_transfer_property(struct obex_transfer *transfer,
 								char *name)
 {
-	if (!transfer->path)
+	if (transfer->path == NULL)
 		return;
 
-	g_dbus_emit_property_changed(connection, transfer->path,
-					TRANSFER_INTERFACE, name);
+	if (strcasecmp("Size", name) == 0)
+		g_dbus_emit_property_changed_full(connection, transfer->path,
+					TRANSFER_INTERFACE, name,
+					G_DBUS_PROPERTY_CHANGED_FLAG_FLUSH);
+	else
+		g_dbus_emit_property_changed(connection, transfer->path,
+						TRANSFER_INTERFACE, name);
 }
 
 void manager_emit_transfer_started(struct obex_transfer *transfer)
@@ -542,9 +547,6 @@ void manager_emit_transfer_started(struct obex_transfer *transfer)
 static void emit_transfer_completed(struct obex_transfer *transfer,
 							gboolean success)
 {
-	if (transfer->path == NULL)
-		return;
-
 	transfer->status = success ? TRANSFER_STATUS_COMPLETE :
 						TRANSFER_STATUS_ERROR;
 

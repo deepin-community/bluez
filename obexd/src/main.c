@@ -35,12 +35,15 @@
 #include "../client/manager.h"
 
 #include "log.h"
+#include "logind.h"
 #include "obexd.h"
 #include "server.h"
 
 #define DEFAULT_CAP_FILE CONFIGDIR "/capability.xml"
 
 static GMainLoop *main_loop = NULL;
+static DBusConnection *connection;
+
 
 static gboolean signal_handler(GIOChannel *channel, GIOCondition cond,
 							gpointer user_data)
@@ -126,6 +129,7 @@ static char *option_noplugin = NULL;
 
 static gboolean option_autoaccept = FALSE;
 static gboolean option_symlinks = FALSE;
+static gboolean option_system_bus = FALSE;
 
 static gboolean parse_debug(const char *key, const char *value,
 				gpointer user_data, GError **error)
@@ -138,7 +142,7 @@ static gboolean parse_debug(const char *key, const char *value,
 	return TRUE;
 }
 
-static GOptionEntry options[] = {
+static const GOptionEntry options[] = {
 	{ "debug", 'd', G_OPTION_FLAG_OPTIONAL_ARG,
 				G_OPTION_ARG_CALLBACK, parse_debug,
 				"Enable debug information output", "DEBUG" },
@@ -164,6 +168,8 @@ static GOptionEntry options[] = {
 				"scripts", "FILE" },
 	{ "auto-accept", 'a', 0, G_OPTION_ARG_NONE, &option_autoaccept,
 				"Automatically accept push requests" },
+	{ "system-bus", 's', 0, G_OPTION_ARG_NONE, &option_system_bus,
+				"Use System bus "},
 	{ NULL },
 };
 
@@ -227,6 +233,27 @@ static gboolean root_folder_setup(char *root, char *root_setup)
 	return is_dir(root);
 }
 
+DBusConnection *obex_get_dbus_connection(void)
+{
+	if (connection)
+		return dbus_connection_ref(connection);
+
+	connection = dbus_bus_get(option_system_bus ?
+				DBUS_BUS_SYSTEM : DBUS_BUS_SESSION, NULL);
+
+	return connection;
+}
+
+DBusConnection *obex_setup_dbus_connection(const char *name,
+					DBusError *error)
+{
+	connection = g_dbus_setup_bus(option_system_bus ?
+				DBUS_BUS_SYSTEM : DBUS_BUS_SESSION,
+				name, error);
+
+	return connection;
+}
+
 int main(int argc, char *argv[])
 {
 	GOptionContext *context;
@@ -249,18 +276,14 @@ int main(int argc, char *argv[])
 
 	__obex_log_init(option_debug, option_detach);
 
+	if (option_system_bus)
+		logind_set(FALSE);
+
 	DBG("Entering main loop");
 
 	main_loop = g_main_loop_new(NULL, FALSE);
 
 	signal = setup_signalfd();
-
-#ifdef NEED_THREADS
-	if (dbus_threads_init_default() == FALSE) {
-		fprintf(stderr, "Can't init usage of threads\n");
-		exit(EXIT_FAILURE);
-	}
-#endif
 
 	if (manager_init() == FALSE) {
 		error("manager_init failed");

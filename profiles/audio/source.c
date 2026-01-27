@@ -21,8 +21,8 @@
 #include <glib.h>
 #include <dbus/dbus.h>
 
-#include "lib/bluetooth.h"
-#include "lib/sdp.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/sdp.h"
 
 #include "gdbus/gdbus.h"
 
@@ -61,7 +61,7 @@ struct source_state_callback {
 
 static GSList *source_callbacks = NULL;
 
-static char *str_state[] = {
+static const char *str_state[] = {
 	"SOURCE_STATE_DISCONNECTED",
 	"SOURCE_STATE_CONNECTING",
 	"SOURCE_STATE_CONNECTED",
@@ -107,6 +107,7 @@ static void avdtp_state_callback(struct btd_device *dev, struct avdtp *session,
 	switch (new_state) {
 	case AVDTP_SESSION_STATE_DISCONNECTED:
 		source_set_state(source, SOURCE_STATE_DISCONNECTED);
+		btd_service_disconnecting_complete(source->service, 0);
 		break;
 	case AVDTP_SESSION_STATE_CONNECTING:
 		source_set_state(source, SOURCE_STATE_CONNECTING);
@@ -132,7 +133,10 @@ static void stream_state_changed(struct avdtp_stream *stream,
 
 	switch (new_state) {
 	case AVDTP_STATE_IDLE:
-		btd_service_disconnecting_complete(source->service, 0);
+		if (source->connect_id > 0) {
+			a2dp_cancel(source->connect_id);
+			source->connect_id = 0;
+		}
 
 		if (source->disconnect_id > 0) {
 			a2dp_cancel(source->disconnect_id);
@@ -302,8 +306,10 @@ static void source_free(struct btd_service *service)
 		avdtp_stream_remove_cb(source->session, source->stream,
 					source->cb_id);
 
-	if (source->session)
+	if (source->session) {
 		avdtp_unref(source->session);
+		source->session = NULL;
+	}
 
 	if (source->connect_id > 0) {
 		btd_service_connecting_complete(source->service, -ECANCELED);

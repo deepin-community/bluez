@@ -1,0 +1,221 @@
+.\" Man page generated from reStructuredText.
+.
+.
+.nr rst2man-indent-level 0
+.
+.de1 rstReportMargin
+\\$1 \\n[an-margin]
+level \\n[rst2man-indent-level]
+level margin: \\n[rst2man-indent\\n[rst2man-indent-level]]
+-
+\\n[rst2man-indent0]
+\\n[rst2man-indent1]
+\\n[rst2man-indent2]
+..
+.de1 INDENT
+.\" .rstReportMargin pre:
+. RS \\$1
+. nr rst2man-indent\\n[rst2man-indent-level] \\n[an-margin]
+. nr rst2man-indent-level +1
+.\" .rstReportMargin post:
+..
+.de UNINDENT
+. RE
+.\" indent \\n[an-margin]
+.\" old: \\n[rst2man-indent\\n[rst2man-indent-level]]
+.nr rst2man-indent-level -1
+.\" new: \\n[rst2man-indent\\n[rst2man-indent-level]]
+.in \\n[rst2man-indent\\n[rst2man-indent-level]]u
+..
+.TH "ORG.BLUEZ.LEADVERTISEMENT" "5" "October 2023" "BlueZ" "Linux System Administration"
+.SH NAME
+org.bluez.LEAdvertisement \- BlueZ D-Bus LEAdvertisement API documentation
+.SH DESCRIPTION
+.sp
+Advertising packets are structured data which is broadcast on the LE Advertising
+channels and available for all devices in range.  Because of the limited space
+available in LE Advertising packets, each packet\(aqs contents must be carefully
+controlled.
+.sp
+\fBbluetoothd(8)\fP acts as a store for the Advertisement Data which is meant to
+be sent. It constructs the correct Advertisement Data from the structured
+data and configured the kernel to send the correct advertisement.
+.SH INTERFACE
+.sp
+Specifies the Advertisement Data to be broadcast and some advertising
+parameters.  Properties which are not present will not be included in the
+data.  Required advertisement data types will always be included.
+All UUIDs are 128\-bit versions in the API, and 16 or 32\-bit
+versions of the same UUID will be used in the advertising data as appropriate.
+.INDENT 0.0
+.TP
+.B Service
+org.bluez
+.TP
+.B Interface
+org.bluez.LEAdvertisement1
+.TP
+.B Object path
+freely definable
+.UNINDENT
+.SS Methods
+.SS void Release() [noreply]
+.sp
+This method gets called when the \fBbluetoothd(8)\fP removes the Advertisement.
+.sp
+A client can use it to do cleanup tasks. There is no need to call
+\fBUnregisterAdvertisement()\fP because when this method gets called it has
+already been unregistered.
+.SS Properties
+.SS string Type [readonly]
+.sp
+Determines the type of advertising packet requested.
+.sp
+Possible values:
+.INDENT 0.0
+.TP
+.B \(dqbroadcast\(dq
+.TP
+.B \(dqperipheral\(dq
+.UNINDENT
+.SS array{string} ServiceUUIDs [readonly, optional]
+.sp
+List of UUIDs to include in the \(dqService UUID\(dq field of the Advertising Data.
+.SS dict ManufacturerData [readonly, optional]
+.sp
+Manufacturer Data fields to include in the Advertising Data.
+.sp
+Keys are the Manufacturer ID to associate with the data.
+.SS array{string} SolicitUUIDs [readonly, optional]
+.sp
+List of UUIDs to include in the \(dqService Solicitation\(dq field of the Advertising
+Data.
+.SS dict ServiceData [readonly, optional]
+.sp
+Service Data elements to include in the Advertising Data.
+.sp
+The keys are the UUID to associate with the data.
+.SS dict Data [readonly, optional]
+.sp
+Advertising Data to include.
+.sp
+Key is the advertising type and value is the data as byte array.
+.sp
+Note: Types already handled by other properties shall not be used.
+.sp
+Possible values:
+.INDENT 0.0
+.TP
+.B <type>
+<byte array>
+.UNINDENT
+.INDENT 0.0
+.TP
+.B Example:
+<Transport Discovery> <Organization Flags...>
+0x26                   0x01         0x01...
+.UNINDENT
+.SS array{string} ScanResponseServiceUUIDs [readonly, optional, experimental]
+.sp
+List of UUIDs to include in the \(dqService UUID\(dq field of the Scan Response Data.
+.SS dict ScanResponseManufacturerData [readonly, optional, experimental]
+.sp
+Manufacturer Data fields to include in the Scan Response Data.
+.sp
+Keys are the Manufacturer ID to associate with the data.
+.SS array{string} ScanResponseSolicitUUIDs [readonly, optional, experimental]
+.sp
+List of UUIDs to include in the \(dqService Solicitation\(dq field of the Scan
+Response Data.
+.SS dict ScanResponseServiceData [readonly, optional, experimental]
+.sp
+Service Data elements to include in the Scan Response Data.
+.sp
+The keys are the UUID to associate with the data.
+.SS dict ScanResponseData [readonly, optional, experimental]
+.sp
+Scan Response Data to include.
+.sp
+Key is the advertising type and value is the data as byte array.
+.SS bool Discoverable [readonly, optional]
+.sp
+Advertise as general discoverable. When present this will override adapter
+Discoverable property.
+.sp
+Note: This property shall not be set when \fBType\fP is set to \(dqbroadcast\(dq.
+.SS uint16 DiscoverableTimeout [readonly, optional]
+.sp
+The discoverable timeout in seconds. A value of zero means that the timeout is
+disabled and it will stay in discoverable/limited mode forever.
+.sp
+Note: This property shall not be set when \fBType\fP is set to \(dqbroadcast\(dq.
+.SS array{string} Includes [readonly, optional]
+.sp
+List of features to be included in the advertising packet.
+.sp
+Possible values:
+.sp
+See \fBorg.bluez.LEAdvertisingManager(5)\fP \fBSupportedIncludes\fP property.
+.SS string LocalName [readonly, optional]
+.sp
+Local name to be used in the advertising report. If the string is too big to
+fit into the packet it will be truncated.
+.sp
+If this property is available \(aqlocal\-name\(aq cannot be present in the
+\fBIncludes\fP\&.
+.SS uint16 Appearance [readonly, optional]
+.sp
+Appearance to be used in the advertising report.
+.sp
+Possible values: as found on GAP Service.
+.SS uint16 Duration [readonly, optional]
+.sp
+Rotation duration of the advertisement in seconds.
+.sp
+If there are other applications advertising no duration is set the default is
+2 seconds.
+.SS uint16 Timeout [readonly, optional]
+.sp
+Timeout of the advertisement in seconds. This defines the lifetime of the
+advertisement.
+.SS string SecondaryChannel [readonly, optional]
+.sp
+Secondary channel to be used.
+.sp
+Primary channel is always set to \(dq1M\(dq except when \(dqCoded\(dq is set.
+.sp
+Possible value:
+.INDENT 0.0
+.TP
+.B \(dq1M\(dq (default)
+.TP
+.B \(dq2M\(dq
+.TP
+.B \(dqCoded\(dq
+.UNINDENT
+.SS uint32 MinInterval [readonly, optional]
+.sp
+Minimum advertising interval to be used by the advertising set, in milliseconds.
+.sp
+Acceptable values are in the range [20ms, 10,485s].
+.sp
+If the provided MinInterval is larger than the provided MaxInterval, the
+registration will return failure.
+.SS uint32 MaxInterval [readonly, optional]
+.sp
+Maximum advertising interval to be used by the advertising set, in milliseconds.
+.sp
+Acceptable values are in the range [20ms, 10,485s].
+.sp
+If the provided MinInterval is larger than the provided MaxInterval, the
+registration will return failure.
+.SS int16 TxPower [readonly, optional]
+.sp
+Requested transmission power of this advertising set.
+.sp
+The provided value is used only if the \(dqCanSetTxPower\(dq feature is enabled on the
+\fBorg.bluez.LEAdvertisingManager(5)\fP\&.
+.sp
+Values must be in range [\-127 to +20], where units are in dBm.
+.\" Generated by docutils manpage writer.
+.
