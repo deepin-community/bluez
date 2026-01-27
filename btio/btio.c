@@ -5,7 +5,7 @@
  *
  *  Copyright (C) 2009-2010  Marcel Holtmann <marcel@holtmann.org>
  *  Copyright (C) 2009-2010  Nokia Corporation
- *  Copyright 2023 NXP
+ *  Copyright 2023-2025 NXP
  *
  *
  */
@@ -25,11 +25,11 @@
 
 #include <glib.h>
 
-#include "lib/bluetooth.h"
-#include "lib/l2cap.h"
-#include "lib/rfcomm.h"
-#include "lib/sco.h"
-#include "lib/iso.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/l2cap.h"
+#include "bluetooth/rfcomm.h"
+#include "bluetooth/sco.h"
+#include "bluetooth/iso.h"
 
 #include "btio.h"
 
@@ -63,7 +63,7 @@ struct set_opts {
 	uint16_t psm;
 	uint16_t cid;
 	uint16_t mtu;
-	uint16_t imtu;
+	int imtu;
 	uint16_t omtu;
 	int central;
 	uint8_t mode;
@@ -253,8 +253,11 @@ static gboolean server_cb(GIOChannel *io, GIOCondition cond,
 	srv_sock = g_io_channel_unix_get_fd(io);
 
 	cli_sock = accept(srv_sock, NULL, NULL);
-	if (cli_sock < 0)
+	if (cli_sock < 0) {
+		if (errno == EBADFD)
+			return FALSE;
 		return TRUE;
+	}
 
 	cli_io = g_io_channel_unix_new(cli_sock);
 
@@ -455,7 +458,7 @@ static gboolean set_sec_level(int sock, BtIOType type, int level, GError **err)
 	struct bt_security sec;
 	int ret;
 
-	if (level < BT_SECURITY_LOW || level > BT_SECURITY_HIGH) {
+	if (level < BT_SECURITY_LOW || level > BT_SECURITY_FIPS) {
 		g_set_error(err, BT_IO_ERROR, EINVAL,
 				"Valid security level range is %d-%d",
 				BT_SECURITY_LOW, BT_SECURITY_HIGH);
@@ -471,6 +474,12 @@ static gboolean set_sec_level(int sock, BtIOType type, int level, GError **err)
 
 	if (errno != ENOPROTOOPT) {
 		ERROR_FAILED(err, "setsockopt(BT_SECURITY)", errno);
+		return FALSE;
+	}
+
+	if (level == BT_SECURITY_FIPS) {
+		g_set_error(err, BT_IO_ERROR, EINVAL, "setsockopt(LM): "
+				"FIPS security level is not supported");
 		return FALSE;
 	}
 
@@ -609,8 +618,8 @@ static uint8_t mode_l2mode(uint8_t mode)
 	}
 }
 
-static gboolean set_l2opts(int sock, uint16_t imtu, uint16_t omtu,
-						uint8_t mode, GError **err)
+static gboolean set_l2opts(int sock, int imtu, uint16_t omtu, uint8_t mode,
+			   GError **err)
 {
 	struct l2cap_options l2o;
 	socklen_t len;
@@ -622,7 +631,7 @@ static gboolean set_l2opts(int sock, uint16_t imtu, uint16_t omtu,
 		return FALSE;
 	}
 
-	if (imtu)
+	if (imtu != -1)
 		l2o.imtu = imtu;
 	if (omtu)
 		l2o.omtu = omtu;
@@ -666,17 +675,27 @@ static gboolean set_le_mode(int sock, uint8_t mode, GError **err)
 }
 
 static gboolean l2cap_set(int sock, uint8_t src_type, int sec_level,
-				uint16_t imtu, uint16_t omtu, uint8_t mode,
+				int imtu, uint16_t omtu, uint8_t mode,
 				int central, int flushable, uint32_t priority,
 				GError **err)
 {
-	if (imtu || omtu || mode) {
+	if (imtu != -1 || omtu || mode) {
 		gboolean ret = FALSE;
 
-		if (src_type == BDADDR_BREDR)
+		if (src_type == BDADDR_BREDR) {
 			ret = set_l2opts(sock, imtu, omtu, mode, err);
-		else {
-			if (imtu)
+
+			/* Back to default behavior in case the first call
+			 * fails: it may happen if the used kernel still
+			 * doesn't support auto-tuning the MTU.
+			 */
+			if (!ret && !imtu) {
+				/* Free existing error */
+				g_error_free(*err);
+				ret = set_l2opts(sock, -1, omtu, mode, err);
+			}
+		} else {
+			if (imtu != -1)
 				ret = set_le_imtu(sock, imtu, err);
 
 			if (ret && mode)
@@ -932,6 +951,7 @@ static gboolean parse_set_opts(struct set_opts *opts, GError **err,
 	opts->priority = 0;
 	opts->src_type = BDADDR_BREDR;
 	opts->dst_type = BDADDR_BREDR;
+	opts->imtu = -1;
 
 	while (opt != BT_IO_OPT_INVALID) {
 		switch (opt) {
@@ -1638,6 +1658,31 @@ static gboolean sco_get(int sock, GError **err, BtIOOption opt1, va_list args)
 	return TRUE;
 }
 
+static bool get_bc_sid(int sock, uint8_t *sid, GError **err)
+{
+	struct {
+		struct sockaddr_iso iso;
+		struct sockaddr_iso_bc bc;
+	} addr;
+	socklen_t olen;
+
+	olen = sizeof(addr);
+	memset(&addr, 0, olen);
+	if (getpeername(sock, (void *)&addr, &olen) < 0) {
+		ERROR_FAILED(err, "getpeername", errno);
+		return false;
+	}
+
+	if (olen != sizeof(addr)) {
+		ERROR_FAILED(err, "getpeername: size mismatch", EINVAL);
+		return false;
+	}
+
+	*sid = addr.iso.iso_bc->bc_sid;
+
+	return true;
+}
+
 static gboolean iso_get(int sock, GError **err, BtIOOption opt1, va_list args)
 {
 	BtIOOption opt = opt1;
@@ -1646,6 +1691,7 @@ static gboolean iso_get(int sock, GError **err, BtIOOption opt1, va_list args)
 	struct bt_iso_base base;
 	socklen_t len;
 	uint32_t phy;
+	uint8_t bc_sid;
 
 	len = sizeof(qos);
 	memset(&qos, 0, len);
@@ -1654,6 +1700,7 @@ static gboolean iso_get(int sock, GError **err, BtIOOption opt1, va_list args)
 		return FALSE;
 	}
 
+	len = BASE_MAX_LENGTH;
 	if (getsockopt(sock, SOL_BLUETOOTH, BT_ISO_BASE,
 			&base.base, &len) < 0) {
 		ERROR_FAILED(err, "getsockopt(BT_ISO_BASE)", errno);
@@ -1709,6 +1756,12 @@ static gboolean iso_get(int sock, GError **err, BtIOOption opt1, va_list args)
 		case BT_IO_OPT_BASE:
 			*(va_arg(args, struct bt_iso_base *)) = base;
 			break;
+		case BT_IO_OPT_ISO_BC_SID:
+			if (!get_bc_sid(sock, &bc_sid, err))
+				return FALSE;
+
+			*(va_arg(args, uint8_t *)) = bc_sid;
+			break;
 		case BT_IO_OPT_HANDLE:
 		case BT_IO_OPT_CLASS:
 		case BT_IO_OPT_DEFER_TIMEOUT:
@@ -1724,7 +1777,6 @@ static gboolean iso_get(int sock, GError **err, BtIOOption opt1, va_list args)
 		case BT_IO_OPT_FLUSHABLE:
 		case BT_IO_OPT_PRIORITY:
 		case BT_IO_OPT_VOICE:
-		case BT_IO_OPT_ISO_BC_SID:
 		case BT_IO_OPT_ISO_BC_NUM_BIS:
 		case BT_IO_OPT_ISO_BC_BIS:
 		case BT_IO_OPT_INVALID:
@@ -1800,7 +1852,6 @@ gboolean bt_io_bcast_accept(GIOChannel *io, BtIOConnect connect,
 {
 	int sock;
 	char c;
-	struct pollfd pfd;
 	va_list args;
 	struct sockaddr_iso *addr = NULL;
 	uint8_t bc_num_bis = 0;
@@ -1857,20 +1908,9 @@ gboolean bt_io_bcast_accept(GIOChannel *io, BtIOConnect connect,
 			return FALSE;
 	}
 
-	memset(&pfd, 0, sizeof(pfd));
-	pfd.fd = sock;
-	pfd.events = POLLOUT;
-
-	if (poll(&pfd, 1, 0) < 0) {
-		ERROR_FAILED(err, "poll", errno);
+	if (read(sock, &c, 1) < 0) {
+		ERROR_FAILED(err, "read", errno);
 		return FALSE;
-	}
-
-	if (!(pfd.revents & POLLOUT)) {
-		if (read(sock, &c, 1) < 0) {
-			ERROR_FAILED(err, "read", errno);
-			return FALSE;
-		}
 	}
 
 	server_add(io, connect, NULL, user_data, destroy);

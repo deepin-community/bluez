@@ -4,7 +4,7 @@
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2012-2014  Intel Corporation. All rights reserved.
- *  Copyright 2023 NXP
+ *  Copyright 2023-2024 NXP
  *
  *
  */
@@ -85,12 +85,16 @@ do {						\
 	}))
 
 #define newa(t, n) ((t*) alloca(sizeof(t)*(n)))
-#define malloc0(n) (calloc((n), 1))
+#define malloc0(n) (calloc(1, (n)))
 
 char *strdelimit(char *str, char *del, char c);
 int strsuffix(const char *str, const char *suffix);
 char *strstrip(char *str);
+
+size_t strnlenutf8(const char *str, size_t len);
 bool strisutf8(const char *str, size_t length);
+bool argsisutf8(int argc, char *argv[]);
+char *strtoutf8(char *str, size_t len);
 
 void *util_malloc(size_t size);
 void *util_memdup(const void *src, size_t size);
@@ -134,9 +138,17 @@ struct util_ltv_debugger {
 			util_debug_func_t func, void *user_data);
 };
 
+void util_ltv_push(struct iovec *output, uint8_t l, uint8_t t, void *v);
+
 bool util_debug_ltv(const uint8_t *data, uint8_t len,
 			const struct util_ltv_debugger *debugger, size_t num,
 			util_debug_func_t function, void *user_data);
+
+typedef void (*util_ltv_func_t)(size_t i, uint8_t l, uint8_t t, uint8_t *v,
+					void *user_data);
+
+bool util_ltv_foreach(const uint8_t *data, uint8_t len, uint8_t *type,
+			util_ltv_func_t func, void *user_data);
 
 unsigned char util_get_dt(const char *parent, const char *name);
 
@@ -144,6 +156,14 @@ ssize_t util_getrandom(void *buf, size_t buflen, unsigned int flags);
 
 uint8_t util_get_uid(uint64_t *bitmap, uint8_t max);
 void util_clear_uid(uint64_t *bitmap, uint8_t id);
+
+#define util_data(args...) ((const unsigned char[]) { args })
+
+#define UTIL_IOV_INIT(args...) \
+{ \
+	.iov_base = (void *)util_data(args), \
+	.iov_len = sizeof(util_data(args)), \
+}
 
 struct iovec *util_iov_dup(const struct iovec *iov, size_t cnt);
 int util_iov_memcmp(const struct iovec *iov1, const struct iovec *iov2);
@@ -159,6 +179,8 @@ void *util_iov_push_be24(struct iovec *iov, uint32_t val);
 void *util_iov_push_le16(struct iovec *iov, uint16_t val);
 void *util_iov_push_be16(struct iovec *iov, uint16_t val);
 void *util_iov_push_u8(struct iovec *iov, uint8_t val);
+void *util_iov_append(struct iovec *iov, const void *data, size_t len);
+struct iovec *util_iov_new(void *data, size_t len);
 void *util_iov_pull(struct iovec *iov, size_t len);
 void *util_iov_pull_mem(struct iovec *iov, size_t len);
 void *util_iov_pull_le64(struct iovec *iov, uint64_t *val);

@@ -46,7 +46,8 @@
 #define AVRCP_MEDIA_ATTRIBUTE_N_TRACKS	0x05
 #define AVRCP_MEDIA_ATTRIBUTE_GENRE	0x06
 #define AVRCP_MEDIA_ATTRIBUTE_DURATION	0x07
-#define AVRCP_MEDIA_ATTRIBUTE_LAST	AVRCP_MEDIA_ATTRIBUTE_DURATION
+#define AVRCP_MEDIA_ATTRIBUTE_IMG_HANDLE	0x08
+#define AVRCP_MEDIA_ATTRIBUTE_LAST	AVRCP_MEDIA_ATTRIBUTE_IMG_HANDLE
 
 /* play status */
 #define AVRCP_PLAY_STATUS_STOPPED	0x00
@@ -63,6 +64,7 @@
 #define AVRCP_EVENT_TRACK_REACHED_START		0x04
 #define AVRCP_EVENT_PLAYBACK_POS_CHANGED	0x05
 #define AVRCP_EVENT_SETTINGS_CHANGED		0x08
+#define AVRCP_EVENT_NOW_PLAYING_CHANGED		0x09
 #define AVRCP_EVENT_AVAILABLE_PLAYERS_CHANGED	0x0a
 #define AVRCP_EVENT_ADDRESSED_PLAYER_CHANGED	0x0b
 #define AVRCP_EVENT_UIDS_CHANGED		0x0c
@@ -81,8 +83,6 @@ struct avrcp_player_cb {
 	uint32_t (*get_position)(void *user_data);
 	uint32_t (*get_duration)(void *user_data);
 	const char *(*get_name)(void *user_data);
-	void (*set_volume)(int8_t volume, struct btd_device *dev,
-							void *user_data);
 	bool (*play)(void *user_data);
 	bool (*stop)(void *user_data);
 	bool (*pause)(void *user_data);

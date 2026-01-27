@@ -27,6 +27,7 @@ typedef void (*bt_shell_menu_disp_t) (char **matches, int num_matches,
 							int max_length);
 typedef void (*bt_shell_prompt_input_func) (const char *input, void *user_data);
 typedef bool (*bt_shell_menu_exists_t) (const struct bt_shell_menu *menu);
+typedef void (*bt_shell_menu_pre_run_t) (const struct bt_shell_menu *menu);
 
 struct bt_shell_menu_entry {
 	const char *cmd;
@@ -41,6 +42,7 @@ struct bt_shell_menu_entry {
 struct bt_shell_menu {
 	const char *name;
 	const char *desc;
+	bt_shell_menu_pre_run_t pre_run;
 	const struct bt_shell_menu_entry entries[];
 };
 
@@ -60,13 +62,15 @@ int bt_shell_exec(const char *input);
 void bt_shell_quit(int status);
 void bt_shell_noninteractive_quit(int status);
 
+void bt_shell_handle_non_interactive_help(void);
+
 bool bt_shell_set_menu(const struct bt_shell_menu *menu);
 
 bool bt_shell_add_submenu(const struct bt_shell_menu *menu);
 
 bool bt_shell_remove_submenu(const struct bt_shell_menu *menu);
 
-void bt_shell_set_prompt(const char *string);
+void bt_shell_set_prompt(const char *string, const char *color);
 
 void bt_shell_printf(const char *fmt,
 				...) __attribute__((format(printf, 1, 2)));
@@ -84,5 +88,7 @@ bool bt_shell_detach(void);
 
 void bt_shell_set_env(const char *name, void *value);
 void *bt_shell_get_env(const char *name);
+
+int bt_shell_get_timeout(void);
 
 void bt_shell_cleanup(void);

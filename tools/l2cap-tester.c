@@ -20,9 +20,9 @@
 
 #include <glib.h>
 
-#include "lib/bluetooth.h"
-#include "lib/l2cap.h"
-#include "lib/mgmt.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/l2cap.h"
+#include "bluetooth/mgmt.h"
 
 #include "monitor/bt.h"
 #include "emulator/bthost.h"
@@ -30,6 +30,9 @@
 
 #include "src/shared/tester.h"
 #include "src/shared/mgmt.h"
+#include "src/shared/util.h"
+
+#include "tester.h"
 
 struct test_data {
 	const void *test_data;
@@ -38,12 +41,16 @@ struct test_data {
 	struct hciemu *hciemu;
 	enum hciemu_type hciemu_type;
 	unsigned int io_id;
+	unsigned int err_io_id;
 	uint16_t handle;
 	uint16_t scid;
 	uint16_t dcid;
+	struct l2cap_options l2o;
 	int sk;
 	int sk2;
 	bool host_disconnected;
+	int step;
+	struct tx_tstamp_data tx_ts;
 };
 
 struct l2cap_data {
@@ -51,6 +58,9 @@ struct l2cap_data {
 	uint16_t server_psm;
 	uint16_t cid;
 	uint8_t mode;
+	uint16_t mtu;
+	uint16_t mps;
+	uint16_t credits;
 	int expect_err;
 	int timeout;
 
@@ -86,6 +96,15 @@ struct l2cap_data {
 	bool defer;
 
 	bool shut_sock_wr;
+
+	/* Enable SO_TIMESTAMPING with these flags */
+	uint32_t so_timestamping;
+
+	/* Number of additional packets to send. */
+	unsigned int repeat_send;
+
+	/* Socket type (0 means SOCK_SEQPACKET) */
+	int sock_type;
 };
 
 static void print_debug(const char *str, void *user_data)
@@ -226,6 +245,11 @@ static void test_post_teardown(const void *test_data)
 		data->io_id = 0;
 	}
 
+	if (data->err_io_id > 0) {
+		g_source_remove(data->err_io_id);
+		data->err_io_id = 0;
+	}
+
 	hciemu_unref(data->hciemu);
 	data->hciemu = NULL;
 }
@@ -245,6 +269,7 @@ static void test_data_free(void *test_data)
 			break; \
 		user->hciemu_type = HCIEMU_TYPE_BREDR; \
 		user->io_id = 0; \
+		user->err_io_id = 0; \
 		user->test_data = data; \
 		tester_add_full(name, data, \
 				test_pre_setup, setup, func, NULL, \
@@ -259,6 +284,7 @@ static void test_data_free(void *test_data)
 			break; \
 		user->hciemu_type = HCIEMU_TYPE_LE; \
 		user->io_id = 0; \
+		user->err_io_id = 0; \
 		user->test_data = data; \
 		tester_add_full(name, data, \
 				test_pre_setup, setup, func, NULL, \
@@ -307,6 +333,16 @@ static const struct l2cap_data client_connect_pin_success_test = {
 
 static uint8_t l2_data[] = { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 };
 
+const uint8_t l2_data_32k[32768] = { [0 ... 4095] =  0x00,
+				[4096 ... 8191] =  0x01,
+				[8192 ... 12287] =  0x02,
+				[12288 ... 16383] =  0x03,
+				[16384 ... 20479] =  0x04,
+				[20480 ... 24575] =  0x05,
+				[24576 ... 28671] =  0x06,
+				[28672 ... 32767] =  0x07,
+};
+
 static const struct l2cap_data client_connect_read_success_test = {
 	.client_psm = 0x1001,
 	.server_psm = 0x1001,
@@ -314,11 +350,68 @@ static const struct l2cap_data client_connect_read_success_test = {
 	.data_len = sizeof(l2_data),
 };
 
+static const struct l2cap_data client_connect_read_32k_success_test = {
+	.client_psm = 0x1001,
+	.server_psm = 0x1001,
+	.read_data = l2_data_32k,
+	.data_len = sizeof(l2_data_32k),
+};
+
+static const struct l2cap_data client_connect_rx_timestamping_test = {
+	.client_psm = 0x1001,
+	.server_psm = 0x1001,
+	.read_data = l2_data,
+	.data_len = sizeof(l2_data),
+	.so_timestamping = (SOF_TIMESTAMPING_SOFTWARE |
+					SOF_TIMESTAMPING_RX_SOFTWARE),
+};
+
+static const struct l2cap_data client_connect_rx_timestamping_32k_test = {
+	.client_psm = 0x1001,
+	.server_psm = 0x1001,
+	.read_data = l2_data_32k,
+	.data_len = sizeof(l2_data_32k),
+	.so_timestamping = (SOF_TIMESTAMPING_SOFTWARE |
+					SOF_TIMESTAMPING_RX_SOFTWARE),
+};
+
 static const struct l2cap_data client_connect_write_success_test = {
 	.client_psm = 0x1001,
 	.server_psm = 0x1001,
 	.write_data = l2_data,
 	.data_len = sizeof(l2_data),
+};
+
+static const struct l2cap_data client_connect_write_32k_success_test = {
+	.client_psm = 0x1001,
+	.server_psm = 0x1001,
+	.write_data = l2_data_32k,
+	.data_len = sizeof(l2_data_32k),
+};
+
+static const struct l2cap_data client_connect_tx_timestamping_test = {
+	.client_psm = 0x1001,
+	.server_psm = 0x1001,
+	.write_data = l2_data,
+	.data_len = sizeof(l2_data),
+	.so_timestamping = (SOF_TIMESTAMPING_SOFTWARE |
+					SOF_TIMESTAMPING_OPT_ID |
+					SOF_TIMESTAMPING_TX_SOFTWARE |
+					SOF_TIMESTAMPING_TX_COMPLETION),
+	.repeat_send = 2,
+};
+
+static const struct l2cap_data client_connect_stream_tx_timestamping_test = {
+	.client_psm = 0x1001,
+	.server_psm = 0x1001,
+	.write_data = l2_data,
+	.data_len = sizeof(l2_data),
+	.so_timestamping = (SOF_TIMESTAMPING_SOFTWARE |
+					SOF_TIMESTAMPING_OPT_ID |
+					SOF_TIMESTAMPING_TX_SOFTWARE |
+					SOF_TIMESTAMPING_TX_COMPLETION),
+	.repeat_send = 2,
+	.sock_type = SOCK_STREAM,
 };
 
 static const struct l2cap_data client_connect_shut_wr_success_test = {
@@ -363,6 +456,16 @@ static const struct l2cap_data l2cap_server_read_success_test = {
 	.data_len = sizeof(l2_data),
 };
 
+static const struct l2cap_data l2cap_server_read_32k_success_test = {
+	.server_psm = 0x1001,
+	.send_cmd_code = BT_L2CAP_PDU_CONN_REQ,
+	.send_cmd = l2cap_connect_req,
+	.send_cmd_len = sizeof(l2cap_connect_req),
+	.expect_cmd_code = BT_L2CAP_PDU_CONN_RSP,
+	.read_data = l2_data_32k,
+	.data_len = sizeof(l2_data_32k),
+};
+
 static const struct l2cap_data l2cap_server_write_success_test = {
 	.server_psm = 0x1001,
 	.send_cmd_code = BT_L2CAP_PDU_CONN_REQ,
@@ -371,6 +474,16 @@ static const struct l2cap_data l2cap_server_write_success_test = {
 	.expect_cmd_code = BT_L2CAP_PDU_CONN_RSP,
 	.write_data = l2_data,
 	.data_len = sizeof(l2_data),
+};
+
+static const struct l2cap_data l2cap_server_write_32k_success_test = {
+	.server_psm = 0x1001,
+	.send_cmd_code = BT_L2CAP_PDU_CONN_REQ,
+	.send_cmd = l2cap_connect_req,
+	.send_cmd_len = sizeof(l2cap_connect_req),
+	.expect_cmd_code = BT_L2CAP_PDU_CONN_RSP,
+	.write_data = l2_data_32k,
+	.data_len = sizeof(l2_data_32k),
 };
 
 static const uint8_t l2cap_sec_block_rsp[] = {	0x00, 0x00,	/* dcid */
@@ -455,6 +568,84 @@ static const struct l2cap_data le_client_connect_close_test_1 = {
 static const struct l2cap_data le_client_connect_timeout_test_1 = {
 	.client_psm = 0x0080,
 	.timeout = 1,
+};
+
+static const struct l2cap_data le_client_connect_read_success_test = {
+	.client_psm = 0x0080,
+	.server_psm = 0x0080,
+	.read_data = l2_data,
+	.data_len = sizeof(l2_data),
+};
+
+static const struct l2cap_data le_client_connect_read_32k_success_test = {
+	.client_psm = 0x0080,
+	.server_psm = 0x0080,
+	.mtu = 672,
+	.mps = 251,
+	/* Given enough credits to complete the transfer without waiting for
+	 * more credits.
+	 * credits = round_up(data size / mtu) * round_up(mtu / mps)
+	 * credits = 49 * 3
+	 * credits = 147
+	 */
+	.credits = 147,
+	.read_data = l2_data_32k,
+	.data_len = sizeof(l2_data_32k),
+};
+
+static const struct l2cap_data le_client_connect_rx_timestamping_test = {
+	.client_psm = 0x0080,
+	.server_psm = 0x0080,
+	.read_data = l2_data,
+	.data_len = sizeof(l2_data),
+	.so_timestamping = (SOF_TIMESTAMPING_SOFTWARE |
+					SOF_TIMESTAMPING_RX_SOFTWARE),
+};
+
+static const struct l2cap_data le_client_connect_rx_timestamping_32k_test = {
+	.client_psm = 0x0080,
+	.server_psm = 0x0080,
+	.mtu = 672,
+	.mps = 251,
+	.credits = 147,
+	.read_data = l2_data_32k,
+	.data_len = sizeof(l2_data_32k),
+	.so_timestamping = (SOF_TIMESTAMPING_SOFTWARE |
+					SOF_TIMESTAMPING_RX_SOFTWARE),
+};
+
+static const struct l2cap_data le_client_connect_write_success_test = {
+	.client_psm = 0x0080,
+	.server_psm = 0x0080,
+	.write_data = l2_data,
+	.data_len = sizeof(l2_data),
+};
+
+static const struct l2cap_data le_client_connect_write_32k_success_test = {
+	.client_psm = 0x0080,
+	.server_psm = 0x0080,
+	.mtu = 672,
+	.mps = 251,
+	/* Given enough credits to complete the transfer without waiting for
+	 * more credits.
+	 * credits = round_up(data size / mtu) * round_up(mtu / mps)
+	 * credits = 49 * 3
+	 * credits = 147
+	 */
+	.credits = 147,
+	.write_data = l2_data_32k,
+	.data_len = sizeof(l2_data_32k),
+};
+
+static const struct l2cap_data le_client_connect_tx_timestamping_test = {
+	.client_psm = 0x0080,
+	.server_psm = 0x0080,
+	.write_data = l2_data,
+	.data_len = sizeof(l2_data),
+	.so_timestamping = (SOF_TIMESTAMPING_SOFTWARE |
+					SOF_TIMESTAMPING_OPT_ID |
+					SOF_TIMESTAMPING_TX_SOFTWARE |
+					SOF_TIMESTAMPING_TX_COMPLETION),
 };
 
 static const struct l2cap_data le_client_connect_adv_success_test_1 = {
@@ -842,7 +1033,7 @@ static void setup_powered_server_callback(uint8_t status, uint16_t length,
 
 	tester_print("Controller powered on");
 
-	if (!test->enable_ssp) {
+	if (!test || !test->enable_ssp) {
 		tester_setup_complete();
 		return;
 	}
@@ -1044,48 +1235,55 @@ static void test_basic(const void *test_data)
 	tester_test_passed();
 }
 
-static gboolean client_received_data(GIOChannel *io, GIOCondition cond,
-							gpointer user_data)
+static void received_data(struct test_data *tdata, const void *buf,
+					uint16_t len, const void *data,
+					uint16_t data_len)
 {
-	struct test_data *data = tester_get_data();
-	const struct l2cap_data *l2data = data->test_data;
-	char buf[1024];
-	int sk;
+	static struct iovec iov;
 
-	sk = g_io_channel_unix_get_fd(io);
-	if (read(sk, buf, l2data->data_len) != l2data->data_len) {
-		tester_warn("Unable to read %u bytes", l2data->data_len);
-		tester_test_failed();
-		return FALSE;
-	}
+	util_iov_append(&iov, buf, len);
 
-	if (memcmp(buf, l2data->read_data, l2data->data_len))
+	tester_debug("read: %d/%zu", len, iov.iov_len);
+
+	/* Check if all the data has been received */
+	if (iov.iov_len < data_len)
+		return;
+
+	--tdata->step;
+
+	if (iov.iov_len != data_len || memcmp(iov.iov_base, data, data_len))
 		tester_test_failed();
-	else
+	else if (!tdata->step)
 		tester_test_passed();
 
-	return FALSE;
+	free(iov.iov_base);
+	iov.iov_base = NULL;
+	iov.iov_len = 0;
 }
 
-static gboolean server_received_data(GIOChannel *io, GIOCondition cond,
+static gboolean sock_received_data(GIOChannel *io, GIOCondition cond,
 							gpointer user_data)
 {
 	struct test_data *data = tester_get_data();
 	const struct l2cap_data *l2data = data->test_data;
+	bool tstamp = l2data->so_timestamping & SOF_TIMESTAMPING_RX_SOFTWARE;
 	char buf[1024];
 	int sk;
+	ssize_t len;
 
 	sk = g_io_channel_unix_get_fd(io);
-	if (read(sk, buf, l2data->data_len) != l2data->data_len) {
-		tester_warn("Unable to read %u bytes", l2data->data_len);
+
+	len = recv_tstamp(sk, buf, sizeof(buf), tstamp);
+	if (len < 0) {
+		tester_warn("Unable to read: %s (%d)", strerror(errno), errno);
 		tester_test_failed();
 		return FALSE;
 	}
 
-	if (memcmp(buf, l2data->read_data, l2data->data_len))
-		tester_test_failed();
-	else
-		tester_test_passed();
+	received_data(data, buf, len, l2data->read_data, l2data->data_len);
+
+	if (data->step)
+		return TRUE;
 
 	return FALSE;
 }
@@ -1096,32 +1294,7 @@ static void bthost_received_data(const void *buf, uint16_t len,
 	struct test_data *data = tester_get_data();
 	const struct l2cap_data *l2data = data->test_data;
 
-	if (len != l2data->data_len) {
-		tester_test_failed();
-		return;
-	}
-
-	if (memcmp(buf, l2data->write_data, l2data->data_len))
-		tester_test_failed();
-	else
-		tester_test_passed();
-}
-
-static void server_bthost_received_data(const void *buf, uint16_t len,
-							void *user_data)
-{
-	struct test_data *data = tester_get_data();
-	const struct l2cap_data *l2data = data->test_data;
-
-	if (len != l2data->data_len) {
-		tester_test_failed();
-		return;
-	}
-
-	if (memcmp(buf, l2data->write_data, l2data->data_len))
-		tester_test_failed();
-	else
-		tester_test_passed();
+	received_data(data, buf, len, l2data->write_data, l2data->data_len);
 }
 
 static gboolean socket_closed_cb(GIOChannel *io, GIOCondition cond,
@@ -1168,43 +1341,193 @@ static gboolean socket_closed_cb(GIOChannel *io, GIOCondition cond,
 static bool check_mtu(struct test_data *data, int sk)
 {
 	const struct l2cap_data *l2data = data->test_data;
-	struct l2cap_options l2o;
 	socklen_t len;
 
-	memset(&l2o, 0, sizeof(l2o));
+	memset(&data->l2o, 0, sizeof(data->l2o));
 
 	if (data->hciemu_type == HCIEMU_TYPE_LE &&
 				(l2data->client_psm || l2data->server_psm)) {
 		/* LE CoC enabled kernels should support BT_RCVMTU and
 		 * BT_SNDMTU.
 		 */
-		len = sizeof(l2o.imtu);
+		len = sizeof(data->l2o.imtu);
 		if (getsockopt(sk, SOL_BLUETOOTH, BT_RCVMTU,
-							&l2o.imtu, &len) < 0) {
+						&data->l2o.imtu, &len) < 0) {
 			tester_warn("getsockopt(BT_RCVMTU): %s (%d)",
 					strerror(errno), errno);
 			return false;
 		}
 
-		len = sizeof(l2o.omtu);
+		len = sizeof(data->l2o.omtu);
 		if (getsockopt(sk, SOL_BLUETOOTH, BT_SNDMTU,
-							&l2o.omtu, &len) < 0) {
+						&data->l2o.omtu, &len) < 0) {
 			tester_warn("getsockopt(BT_SNDMTU): %s (%d)",
 					strerror(errno), errno);
 			return false;
 		}
+
+		/* Take SDU len into account */
+		data->l2o.imtu -= 2;
+		data->l2o.omtu -= 2;
 	} else {
 		/* For non-LE CoC enabled kernels we need to fall back to
 		 * L2CAP_OPTIONS, so test support for it as well */
-		len = sizeof(l2o);
-		if (getsockopt(sk, SOL_L2CAP, L2CAP_OPTIONS, &l2o, &len) < 0) {
+		len = sizeof(data->l2o);
+		if (getsockopt(sk, SOL_L2CAP, L2CAP_OPTIONS, &data->l2o,
+						&len) < 0) {
 			 tester_warn("getsockopt(L2CAP_OPTIONS): %s (%d)",
 						strerror(errno), errno);
 			 return false;
-		 }
+		}
 	}
 
 	return true;
+}
+
+static gboolean recv_errqueue(GIOChannel *io, GIOCondition cond,
+							gpointer user_data)
+{
+	struct test_data *data = user_data;
+	const struct l2cap_data *l2data = data->test_data;
+	int sk = g_io_channel_unix_get_fd(io);
+	int err;
+
+	data->step--;
+
+	err = tx_tstamp_recv(&data->tx_ts, sk, l2data->data_len);
+	if (err > 0)
+		return TRUE;
+	else if (err)
+		tester_test_failed();
+	else if (!data->step)
+		tester_test_passed();
+
+	data->err_io_id = 0;
+	return FALSE;
+}
+
+static void l2cap_tx_timestamping(struct test_data *data, GIOChannel *io)
+{
+	const struct l2cap_data *l2data = data->test_data;
+	int so = l2data->so_timestamping;
+	int sk;
+	int err;
+	unsigned int count;
+
+	if (!(l2data->so_timestamping & TS_TX_RECORD_MASK))
+		return;
+
+	sk = g_io_channel_unix_get_fd(io);
+
+	tester_print("Enabling TX timestamping");
+
+	tx_tstamp_init(&data->tx_ts, l2data->so_timestamping,
+					l2data->sock_type == SOCK_STREAM);
+
+	for (count = 0; count < l2data->repeat_send + 1; ++count)
+		data->step += tx_tstamp_expect(&data->tx_ts, l2data->data_len);
+
+	err = setsockopt(sk, SOL_SOCKET, SO_TIMESTAMPING, &so, sizeof(so));
+	if (err < 0) {
+		tester_warn("setsockopt SO_TIMESTAMPING: %s (%d)",
+						strerror(errno), errno);
+		tester_test_failed();
+		return;
+	}
+
+	data->err_io_id = g_io_add_watch(io, G_IO_ERR, recv_errqueue, data);
+}
+
+static int l2cap_send(int sk, const void *data, size_t len, uint16_t mtu)
+{
+	struct iovec iov = { (void *)data, len };
+	int err;
+	size_t total = 0;
+
+	len = MIN(mtu, len);
+
+	while (iov.iov_len) {
+		size_t l = MIN(iov.iov_len, len);
+
+		err = write(sk, util_iov_pull_mem(&iov, l), l);
+		if (err < 0)
+			return -errno;
+
+		total += err;
+		tester_debug("write: %d/%zu", err, total);
+	}
+
+	return total;
+}
+
+static void l2cap_read_data(struct test_data *data, GIOChannel *io,
+							uint16_t cid)
+{
+	const struct l2cap_data *l2data = data->test_data;
+	struct bthost *bthost;
+	struct iovec iov = { (void *)l2data->read_data, l2data->data_len };
+	size_t len;
+
+	data->step = 0;
+
+	if (rx_timestamping_init(g_io_channel_unix_get_fd(io),
+						l2data->so_timestamping))
+		return;
+
+	bthost = hciemu_client_get_host(data->hciemu);
+	g_io_add_watch(io, G_IO_IN, sock_received_data, NULL);
+
+	len = MIN(iov.iov_len, data->l2o.imtu);
+
+	while (iov.iov_len) {
+		size_t l = MIN(iov.iov_len, len);
+
+		bthost_send_cid(bthost, data->handle, cid,
+					util_iov_pull_mem(&iov, l), l);
+	}
+
+	++data->step;
+}
+
+static void l2cap_write_data(struct test_data *data, GIOChannel *io,
+							uint16_t cid)
+{
+	const struct l2cap_data *l2data = data->test_data;
+	struct bthost *bthost;
+	ssize_t ret;
+	int sk, size;
+	unsigned int count;
+	socklen_t len = sizeof(size);
+
+	sk = g_io_channel_unix_get_fd(io);
+
+	data->step = 0;
+
+	bthost = hciemu_client_get_host(data->hciemu);
+	bthost_add_cid_hook(bthost, data->handle, cid, bthost_received_data,
+							NULL);
+
+	l2cap_tx_timestamping(data, io);
+
+	/* Socket buffer needs to hold what we send, btdev doesn't flush now */
+	ret = getsockopt(sk, SOL_SOCKET, SO_SNDBUF, &size, &len);
+	if (!ret) {
+		size += l2data->data_len * (l2data->repeat_send + 1);
+		ret = setsockopt(sk, SOL_SOCKET, SO_SNDBUF, &size, len);
+		if (ret)
+			tester_warn("Failed to set SO_SNDBUF = %d", size);
+	}
+
+	for (count = 0; count < l2data->repeat_send + 1; ++count) {
+		ret = l2cap_send(sk, l2data->write_data, l2data->data_len,
+							data->l2o.omtu);
+		if (ret != l2data->data_len) {
+			tester_warn("Unable to write all data: "
+					"%zd != %u", ret, l2data->data_len);
+			tester_test_failed();
+		}
+		++data->step;
+	}
 }
 
 static gboolean l2cap_connect_cb(GIOChannel *io, GIOCondition cond,
@@ -1229,7 +1552,7 @@ static gboolean l2cap_connect_cb(GIOChannel *io, GIOCondition cond,
 		goto failed;
 	}
 
-	tester_print("Successfully connected");
+	tester_print("Successfully connected to CID 0x%04x", data->dcid);
 
 	if (!check_mtu(data, sk)) {
 		tester_test_failed();
@@ -1237,29 +1560,10 @@ static gboolean l2cap_connect_cb(GIOChannel *io, GIOCondition cond,
 	}
 
 	if (l2data->read_data) {
-		struct bthost *bthost;
-
-		bthost = hciemu_client_get_host(data->hciemu);
-		g_io_add_watch(io, G_IO_IN, client_received_data, NULL);
-
-		bthost_send_cid(bthost, data->handle, data->dcid,
-					l2data->read_data, l2data->data_len);
-
+		l2cap_read_data(data, io, data->dcid);
 		return FALSE;
 	} else if (l2data->write_data) {
-		struct bthost *bthost;
-		ssize_t ret;
-
-		bthost = hciemu_client_get_host(data->hciemu);
-		bthost_add_cid_hook(bthost, data->handle, data->dcid,
-					bthost_received_data, NULL);
-
-		ret = write(sk, l2data->write_data, l2data->data_len);
-		if (ret != l2data->data_len) {
-			tester_warn("Unable to write all data");
-			tester_test_failed();
-		}
-
+		l2cap_write_data(data, io, data->dcid);
 		return FALSE;
 	} else if (l2data->shut_sock_wr) {
 		g_io_add_watch(io, G_IO_HUP, socket_closed_cb, NULL);
@@ -1284,9 +1588,12 @@ static int create_l2cap_sock(struct test_data *data, uint16_t psm,
 	const uint8_t *central_bdaddr;
 	struct sockaddr_l2 addr;
 	int sk, err;
+	int sock_type = SOCK_SEQPACKET;
 
-	sk = socket(PF_BLUETOOTH, SOCK_SEQPACKET | SOCK_NONBLOCK,
-							BTPROTO_L2CAP);
+	if (l2data && l2data->sock_type)
+		sock_type = l2data->sock_type;
+
+	sk = socket(PF_BLUETOOTH, sock_type | SOCK_NONBLOCK, BTPROTO_L2CAP);
 	if (sk < 0) {
 		err = -errno;
 		tester_warn("Can't create socket: %s (%d)", strerror(errno),
@@ -1413,11 +1720,14 @@ static void client_l2cap_connect_cb(uint16_t handle, uint16_t cid,
 {
 	struct test_data *data = user_data;
 
+	tester_debug("Client connect CID 0x%04x handle 0x%04x", cid, handle);
+
 	data->dcid = cid;
 	data->handle = handle;
 }
 
-static void client_l2cap_disconnect_cb(void *user_data)
+static void client_l2cap_disconnect_cb(uint16_t handle, uint16_t cid,
+							void *user_data)
 {
 	struct test_data *data = user_data;
 
@@ -1473,9 +1783,20 @@ static void test_connect(const void *test_data)
 		if (l2data->shut_sock_wr)
 			host_disconnect_cb = client_l2cap_disconnect_cb;
 
-		bthost_add_l2cap_server(bthost, l2data->server_psm,
-					host_connect_cb, host_disconnect_cb,
-					data);
+		if (l2data->mtu || l2data->mps || l2data->credits)
+			bthost_add_l2cap_server_custom(bthost,
+							l2data->server_psm,
+							l2data->mtu,
+							l2data->mps,
+							l2data->credits,
+							host_connect_cb,
+							host_disconnect_cb,
+							data);
+		else
+			bthost_add_l2cap_server(bthost, l2data->server_psm,
+							host_connect_cb,
+							host_disconnect_cb,
+							data);
 	}
 
 	if (l2data->direct_advertising)
@@ -1634,6 +1955,7 @@ static int connect_socket(const uint8_t *client_bdaddr, GIOFunc connect_cb,
 			tester_print("Can't enable deferred setup: %s (%d)",
 						strerror(errno), errno);
 			tester_test_failed();
+			close(sk);
 			return -1;
 		}
 	}
@@ -1690,7 +2012,7 @@ static gboolean test_close_socket_1_part_2(gpointer args)
 
 	tester_print("Will close socket during scan phase...");
 
-	/* We tried to conect to LE device that is not advertising. It
+	/* We tried to connect to LE device that is not advertising. It
 	 * was added to kernel accept list, and scan was started. We
 	 * should be still scanning.
 	 */
@@ -1958,31 +2280,10 @@ static gboolean l2cap_accept_cb(GIOChannel *io, GIOCondition cond,
 	}
 
 	if (l2data->read_data) {
-		struct bthost *bthost;
-
-		bthost = hciemu_client_get_host(data->hciemu);
-		g_io_add_watch(io, G_IO_IN, server_received_data, NULL);
-		bthost_send_cid(bthost, data->handle, data->dcid,
-					l2data->read_data, l2data->data_len);
-
-		g_io_channel_unref(io);
-
+		l2cap_read_data(data, io, data->dcid);
 		return FALSE;
 	} else if (l2data->write_data) {
-		struct bthost *bthost;
-		ssize_t ret;
-
-		bthost = hciemu_client_get_host(data->hciemu);
-		bthost_add_cid_hook(bthost, data->handle, data->scid,
-					server_bthost_received_data, NULL);
-
-		ret = write(sk, l2data->write_data, l2data->data_len);
-
-		if (ret != l2data->data_len) {
-			tester_warn("Unable to write all data");
-			tester_test_failed();
-		}
-
+		l2cap_write_data(data, io, data->scid);
 		return FALSE;
 	}
 
@@ -2227,7 +2528,7 @@ static void test_getpeername_not_connected(const void *test_data)
 	}
 
 	if (errno != ENOTCONN) {
-		tester_warn("Unexpexted getpeername error: %s (%d)",
+		tester_warn("Unexpected getpeername error: %s (%d)",
 						strerror(errno), errno);
 		tester_test_failed();
 		goto done;
@@ -2237,6 +2538,13 @@ static void test_getpeername_not_connected(const void *test_data)
 
 done:
 	close(sk);
+}
+
+static void test_l2cap_ethtool_get_ts_info(const void *test_data)
+{
+	struct test_data *data = tester_get_data();
+
+	test_ethtool_get_ts_info(data->mgmt_index, BTPROTO_L2CAP, false);
 }
 
 int main(int argc, char *argv[])
@@ -2276,9 +2584,33 @@ int main(int argc, char *argv[])
 					&client_connect_read_success_test,
 					setup_powered_client, test_connect);
 
+	test_l2cap_bredr("L2CAP BR/EDR Client - Read 32k Success",
+					&client_connect_read_32k_success_test,
+					setup_powered_client, test_connect);
+
+	test_l2cap_bredr("L2CAP BR/EDR Client - RX Timestamping",
+					&client_connect_rx_timestamping_test,
+					setup_powered_client, test_connect);
+
+	test_l2cap_bredr("L2CAP BR/EDR Client - RX Timestamping 32k",
+				&client_connect_rx_timestamping_32k_test,
+				setup_powered_client, test_connect);
+
 	test_l2cap_bredr("L2CAP BR/EDR Client - Write Success",
 					&client_connect_write_success_test,
 					setup_powered_client, test_connect);
+
+	test_l2cap_bredr("L2CAP BR/EDR Client - Write 32k Success",
+					&client_connect_write_32k_success_test,
+					setup_powered_client, test_connect);
+
+	test_l2cap_bredr("L2CAP BR/EDR Client - TX Timestamping",
+					&client_connect_tx_timestamping_test,
+					setup_powered_client, test_connect);
+
+	test_l2cap_bredr("L2CAP BR/EDR Client - Stream TX Timestamping",
+				&client_connect_stream_tx_timestamping_test,
+				setup_powered_client, test_connect);
 
 	test_l2cap_bredr("L2CAP BR/EDR Client - Invalid PSM 1",
 					&client_connect_nval_psm_test_1,
@@ -2304,8 +2636,16 @@ int main(int argc, char *argv[])
 					&l2cap_server_read_success_test,
 					setup_powered_server, test_server);
 
+	test_l2cap_bredr("L2CAP BR/EDR Server - Read 32k Success",
+					&l2cap_server_read_32k_success_test,
+					setup_powered_server, test_server);
+
 	test_l2cap_bredr("L2CAP BR/EDR Server - Write Success",
 					&l2cap_server_write_success_test,
+					setup_powered_server, test_server);
+
+	test_l2cap_bredr("L2CAP BR/EDR Server - Write 32k Success",
+					&l2cap_server_write_32k_success_test,
 					setup_powered_server, test_server);
 
 	test_l2cap_bredr("L2CAP BR/EDR Server - Security Block",
@@ -2325,6 +2665,9 @@ int main(int argc, char *argv[])
 				&l2cap_server_nval_cid_test2,
 				setup_powered_server, test_server);
 
+	test_l2cap_bredr("L2CAP BR/EDR Ethtool Get Ts Info - Success", NULL,
+			setup_powered_server, test_l2cap_ethtool_get_ts_info);
+
 	test_l2cap_le("L2CAP LE Client - Success",
 				&le_client_connect_success_test_1,
 				setup_powered_client, test_connect);
@@ -2334,6 +2677,27 @@ int main(int argc, char *argv[])
 	test_l2cap_le("L2CAP LE Client - Timeout",
 				&le_client_connect_timeout_test_1,
 				setup_powered_client, test_connect_timeout);
+	test_l2cap_le("L2CAP LE Client - Read Success",
+				&le_client_connect_read_success_test,
+				setup_powered_client, test_connect);
+	test_l2cap_le("L2CAP LE Client - Read 32k Success",
+				&le_client_connect_read_32k_success_test,
+				setup_powered_client, test_connect);
+	test_l2cap_le("L2CAP LE Client - RX Timestamping",
+				&le_client_connect_rx_timestamping_test,
+				setup_powered_client, test_connect);
+	test_l2cap_le("L2CAP LE Client - RX Timestamping 32k",
+				&le_client_connect_rx_timestamping_32k_test,
+				setup_powered_client, test_connect);
+	test_l2cap_le("L2CAP LE Client - Write Success",
+				&le_client_connect_write_success_test,
+				setup_powered_client, test_connect);
+	test_l2cap_le("L2CAP LE Client - Write 32k Success",
+				&le_client_connect_write_32k_success_test,
+				setup_powered_client, test_connect);
+	test_l2cap_le("L2CAP LE Client - TX Timestamping",
+				&le_client_connect_tx_timestamping_test,
+				setup_powered_client, test_connect);
 	test_l2cap_le("L2CAP LE Client, Direct Advertising - Success",
 				&le_client_connect_adv_success_test_1,
 				setup_powered_client, test_connect);
@@ -2428,6 +2792,9 @@ int main(int argc, char *argv[])
 	test_l2cap_le("L2CAP LE EATT Server - Reject",
 				&le_eatt_server_reject_test_1,
 				setup_powered_server, test_server);
+
+	test_l2cap_le("L2CAP LE Ethtool Get Ts Info - Success", NULL,
+			setup_powered_server, test_l2cap_ethtool_get_ts_info);
 
 	return tester_run();
 }

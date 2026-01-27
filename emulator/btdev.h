@@ -52,6 +52,7 @@ enum btdev_type {
 	BTDEV_TYPE_BREDR20,
 	BTDEV_TYPE_BREDRLE50,
 	BTDEV_TYPE_BREDRLE52,
+	BTDEV_TYPE_BREDRLE60,
 };
 
 enum btdev_hook_type {
@@ -76,11 +77,16 @@ bool btdev_set_bdaddr(struct btdev *btdev, const uint8_t *bdaddr);
 
 uint8_t *btdev_get_features(struct btdev *btdev);
 
+uint8_t *btdev_get_commands(struct btdev *btdev);
+
 uint8_t btdev_get_scan_enable(struct btdev *btdev);
 
 uint8_t btdev_get_le_scan_enable(struct btdev *btdev);
 
 const uint8_t *btdev_get_adv_addr(struct btdev *btdev, uint8_t handle);
+
+void btdev_get_mtu(struct btdev *btdev, uint16_t *acl, uint16_t *sco,
+								uint16_t *iso);
 
 void btdev_set_le_states(struct btdev *btdev, const uint8_t *le_states);
 

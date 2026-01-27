@@ -26,10 +26,10 @@
 
 #include <glib.h>
 
-#include "lib/bluetooth.h"
-#include "lib/l2cap.h"
-#include "lib/bnep.h"
-#include "lib/uuid.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/l2cap.h"
+#include "bluetooth/bnep.h"
+#include "bluetooth/uuid.h"
 
 #include "src/log.h"
 #include "src/shared/timeout.h"
@@ -725,4 +725,10 @@ void bnep_server_delete(char *bridge, char *iface, const bdaddr_t *addr)
 	bnep_del_from_bridge(iface, bridge);
 	bnep_if_down(iface);
 	bnep_conndel(addr);
+}
+
+int bnep_send_unkown_rsp(int sk, uint16_t resp)
+{
+	return bnep_send_ctrl_rsp(sk, BNEP_CMD_NOT_UNDERSTOOD,
+							  resp);
 }

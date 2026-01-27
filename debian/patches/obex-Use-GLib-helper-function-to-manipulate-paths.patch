@@ -13,7 +13,7 @@ diff --git a/obexd/src/manager.c b/obexd/src/manager.c
 index 73fd6b9af..5945e7e37 100644
 --- a/obexd/src/manager.c
 +++ b/obexd/src/manager.c
-@@ -644,17 +644,13 @@ static void agent_reply(DBusPendingCall *call, void *user_data)
+@@ -646,17 +646,13 @@ static void agent_reply(DBusPendingCall *call, void *user_data)
  				DBUS_TYPE_STRING, &name,
  				DBUS_TYPE_INVALID)) {
  		/* Splits folder and name */

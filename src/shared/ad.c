@@ -16,8 +16,8 @@
 
 #include <ctype.h>
 
-#include "lib/bluetooth.h"
-#include "lib/hci.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/hci.h"
 
 #include "src/shared/ad.h"
 
@@ -48,7 +48,7 @@ struct bt_ad *bt_ad_new(void)
 	struct bt_ad *ad;
 
 	ad = new0(struct bt_ad, 1);
-	ad->max_len = BT_AD_MAX_DATA_LEN;
+	ad->max_len = BT_EA_MAX_DATA_LEN;
 	ad->service_uuids = queue_new();
 	ad->manufacturer_data = queue_new();
 	ad->solicit_uuids = queue_new();
@@ -276,7 +276,6 @@ static bool ad_replace_uuid128(struct bt_ad *ad, struct iovec *iov)
 static bool ad_replace_name(struct bt_ad *ad, struct iovec *iov)
 {
 	char utf8_name[HCI_MAX_NAME_LENGTH + 2];
-	int i;
 
 	memset(utf8_name, 0, sizeof(utf8_name));
 	strncpy(utf8_name, (const char *)iov->iov_base, iov->iov_len);
@@ -284,11 +283,7 @@ static bool ad_replace_name(struct bt_ad *ad, struct iovec *iov)
 	if (strisutf8(utf8_name, iov->iov_len))
 		goto done;
 
-	/* Assume ASCII, and replace all non-ASCII with spaces */
-	for (i = 0; utf8_name[i] != '\0'; i++) {
-		if (!isascii(utf8_name[i]))
-			utf8_name[i] = ' ';
-	}
+	strtoutf8(utf8_name, iov->iov_len);
 
 	/* Remove leading and trailing whitespace characters */
 	strstrip(utf8_name);
@@ -520,9 +515,14 @@ static size_t data_length(struct queue *queue)
 	return length;
 }
 
-static size_t calculate_length(struct bt_ad *ad)
+size_t bt_ad_length(struct bt_ad *ad)
 {
-	size_t length = 0;
+	size_t length;
+
+	if (!ad)
+		return 0;
+
+	length = 0;
 
 	length += uuid_list_length(ad->service_uuids);
 
@@ -698,7 +698,7 @@ uint8_t *bt_ad_generate(struct bt_ad *ad, size_t *length)
 	if (!ad)
 		return NULL;
 
-	*length = calculate_length(ad);
+	*length = bt_ad_length(ad);
 
 	if (*length > ad->max_len)
 		return NULL;
@@ -1082,7 +1082,7 @@ bool bt_ad_add_name(struct bt_ad *ad, const char *name)
 const char *bt_ad_get_name(struct bt_ad *ad)
 {
 	if (!ad)
-		return false;
+		return NULL;
 
 	return ad->name;
 }
@@ -1329,7 +1329,7 @@ static bool match_manufacturer(const void *data, const void *user_data)
 	const struct bt_ad_manufacturer_data *manufacturer_data = data;
 	const struct pattern_match_info *info = user_data;
 	const struct bt_ad_pattern *pattern;
-	uint8_t all_data[BT_AD_MAX_DATA_LEN];
+	uint8_t all_data[BT_EA_MAX_DATA_LEN];
 
 	if (!manufacturer_data || !info)
 		return false;

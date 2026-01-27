@@ -8,14 +8,14 @@ Bluetooth monitor
 
 :Authors: - Marcel Holtmann <marcel@holtmann.org>
           - Tedd Ho-Jeong An <tedd.an@intel.com>
-:Copyright: Free use of this software is granted under ther terms of the GNU
+:Copyright: Free use of this software is granted under the terms of the GNU
             Lesser General Public Licenses (LGPL).
 :Version: BlueZ
 :Date: April 2021
 :Manual section: 1
 :Manual group: Linux System Administration
 
-SYNOPSYS
+SYNOPSIS
 ========
 
 **btmon** [*OPTIONS* ...]
@@ -77,6 +77,8 @@ OPTIONS
 
 -M, --mgmt                  Open channel for mgmt events.
 
+-K, --kernel                Open kmsg for kernel messages.
+
 -t, --time                  Show a time instead of time offset.
 
 -T, --date                  Show a time and date information instead of
@@ -91,7 +93,7 @@ OPTIONS
 -P, --no-pager              Disable pager usage while reading the log file.
 
 -J OPTIONS, --jlink OPTIONS     Read data from RTT.  Each options are comma(,)
-                                seprated without spaces.
+                                separated without spaces.
 
 .. list-table::
    :header-rows: 1
@@ -114,7 +116,7 @@ OPTIONS
      - (Optional) Set target interface speed in kHz. Default is **1000**.
 
 -R OPTIONS, --rtt OPTIONS   RTT control block parameters. Each options are
-                            comma(,) seprated without spaces.
+                            comma(,) separated without spaces.
 
 .. list-table::
    :header-rows: 1

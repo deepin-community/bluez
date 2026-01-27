@@ -27,9 +27,9 @@
 
 #include <glib.h>
 
-#include "lib/bluetooth.h"
-#include "lib/sdp.h"
-#include "lib/uuid.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/sdp.h"
+#include "bluetooth/uuid.h"
 
 #include "src/shared/util.h"
 #include "src/shared/uhid.h"
@@ -73,14 +73,13 @@ struct bt_hog {
 	uint16_t		vendor;
 	uint16_t		product;
 	uint16_t		version;
+	uint8_t			type;
 	struct gatt_db_attribute *attr;
 	struct gatt_primary	*primary;
 	GAttrib			*attrib;
 	GSList			*reports;
 	struct bt_uhid		*uhid;
 	int			uhid_fd;
-	bool			uhid_created;
-	bool			uhid_start;
 	uint64_t		uhid_flags;
 	uint16_t		bcdhid;
 	uint8_t			bcountrycode;
@@ -88,9 +87,9 @@ struct bt_hog {
 	uint16_t		ctrlpt_handle;
 	uint8_t			flags;
 	unsigned int		getrep_att;
-	uint16_t		getrep_id;
+	uint32_t		getrep_id;
 	unsigned int		setrep_att;
-	uint16_t		setrep_id;
+	uint32_t		setrep_id;
 	unsigned int		report_map_id;
 	struct bt_scpp		*scpp;
 	struct bt_dis		*dis;
@@ -99,7 +98,6 @@ struct bt_hog {
 	struct queue		*gatt_op;
 	struct gatt_db		*gatt_db;
 	struct gatt_db_attribute	*report_map_attr;
-	struct queue		*input;
 };
 
 struct report {
@@ -326,8 +324,6 @@ static void report_value_cb(const guint8 *pdu, guint16 len, gpointer user_data)
 {
 	struct report *report = user_data;
 	struct bt_hog *hog = report->hog;
-	struct uhid_event ev;
-	uint8_t *buf;
 	int err;
 
 	if (len < ATT_NOTIFICATION_HEADER_SIZE) {
@@ -338,40 +334,10 @@ static void report_value_cb(const guint8 *pdu, guint16 len, gpointer user_data)
 	pdu += ATT_NOTIFICATION_HEADER_SIZE;
 	len -= ATT_NOTIFICATION_HEADER_SIZE;
 
-	memset(&ev, 0, sizeof(ev));
-	ev.type = UHID_INPUT;
-	buf = ev.u.input.data;
-
-	/* BLUETOOTH SPECIFICATION Page 16 of 26
-	 * HID Service Specification
-	 *
-	 * Report ID shall be nonzero in a Report Reference characteristic
-	 * descriptor where there is more than one instance of the Report
-	 * characteristic for any given Report Type.
-	 */
-	if (report->numbered && report->id) {
-		buf[0] = report->id;
-		len = MIN(len, sizeof(ev.u.input.data) - 1);
-		memcpy(buf + 1, pdu, len);
-		ev.u.input.size = ++len;
-	} else {
-		len = MIN(len, sizeof(ev.u.input.data));
-		memcpy(buf, pdu, len);
-		ev.u.input.size = len;
-	}
-
-	/* If uhid had not sent UHID_START yet queue up the input */
-	if (!hog->uhid_created || !hog->uhid_start) {
-		if (!hog->input)
-			hog->input = queue_new();
-
-		queue_push_tail(hog->input, util_memdup(&ev, sizeof(ev)));
-		return;
-	}
-
-	err = bt_uhid_send(hog->uhid, &ev);
+	err = bt_uhid_input(hog->uhid, report->numbered ? report->id : 0, pdu,
+				len);
 	if (err < 0)
-		error("bt_uhid_send: %s (%d)", strerror(-err), -err);
+		error("bt_uhid_input: %s (%d)", strerror(-err), -err);
 }
 
 static void report_notify_destroy(void *user_data)
@@ -832,56 +798,48 @@ static void set_numbered(void *data, void *user_data)
 	}
 }
 
-static bool input_dequeue(const void *data, const void *match_data)
-{
-	const struct uhid_event *ev = data;
-	const struct bt_hog *hog = match_data;
-	int err;
-
-	err = bt_uhid_send(hog->uhid, ev);
-	if (err < 0) {
-		error("bt_uhid_send: %s (%d)", strerror(-err), -err);
-		return false;
-	}
-
-	return true;
-}
-
 static void start_flags(struct uhid_event *ev, void *user_data)
 {
 	struct bt_hog *hog = user_data;
 
-	hog->uhid_start = true;
 	hog->uhid_flags = ev->u.start.dev_flags;
 
 	DBG("uHID device flags: 0x%16" PRIx64, hog->uhid_flags);
 
 	if (hog->uhid_flags)
 		g_slist_foreach(hog->reports, set_numbered, hog);
-
-	queue_remove_all(hog->input, input_dequeue, hog, free);
 }
 
 static void set_report_cb(guint8 status, const guint8 *pdu,
 					guint16 plen, gpointer user_data)
 {
 	struct bt_hog *hog = user_data;
-	struct uhid_event rsp;
 	int err;
 
 	hog->setrep_att = 0;
 
-	memset(&rsp, 0, sizeof(rsp));
-	rsp.type = UHID_SET_REPORT_REPLY;
-	rsp.u.set_report_reply.id = hog->setrep_id;
-	rsp.u.set_report_reply.err = status;
-
 	if (status != 0)
 		error("Error setting Report value: %s", att_ecode2str(status));
 
-	err = bt_uhid_send(hog->uhid, &rsp);
+	err = bt_uhid_set_report_reply(hog->uhid, hog->setrep_id, status);
 	if (err < 0)
-		error("bt_uhid_send: %s", strerror(-err));
+		error("bt_uhid_set_report_reply: %s", strerror(-err));
+}
+
+static void uhid_destroy(struct bt_hog *hog, bool force)
+{
+	int err;
+
+	if (!hog->uhid)
+		return;
+
+	bt_uhid_unregister_all(hog->uhid);
+
+	err = bt_uhid_destroy(hog->uhid, force);
+	if (err < 0) {
+		error("bt_uhid_destroy: %s", strerror(-err));
+		return;
+	}
 }
 
 static void set_report(struct uhid_event *ev, void *user_data)
@@ -891,6 +849,14 @@ static void set_report(struct uhid_event *ev, void *user_data)
 	void *data;
 	int size;
 	int err;
+
+	/* Destroy input device if there is an attempt to communicate with it
+	 * while disconnected.
+	 */
+	if (hog->attrib == NULL) {
+		uhid_destroy(hog, true);
+		return;
+	}
 
 	/* uhid never sends reqs in parallel; if there's a req, it timed out */
 	if (hog->setrep_att) {
@@ -918,9 +884,6 @@ static void set_report(struct uhid_event *ev, void *user_data)
 	DBG("Sending report type %d ID %d to handle 0x%X", report->type,
 				report->id, report->value_handle);
 
-	if (hog->attrib == NULL)
-		return;
-
 	hog->setrep_att = gatt_write_char(hog->attrib,
 						report->value_handle,
 						data, size, set_report_cb,
@@ -937,34 +900,16 @@ fail:
 }
 
 static void report_reply(struct bt_hog *hog, uint8_t status, uint8_t id,
-			bool numbered, uint16_t len, const uint8_t *data)
+			uint16_t len, const uint8_t *data)
 {
-	struct uhid_event rsp;
 	int err;
 
 	hog->getrep_att = 0;
 
-	memset(&rsp, 0, sizeof(rsp));
-	rsp.type = UHID_GET_REPORT_REPLY;
-	rsp.u.get_report_reply.id = hog->getrep_id;
-
-	if (status)
-		goto done;
-
-	if (numbered && len > 0) {
-		rsp.u.get_report_reply.size = len + 1;
-		rsp.u.get_report_reply.data[0] = id;
-		memcpy(&rsp.u.get_report_reply.data[1], data, len);
-	} else {
-		rsp.u.get_report_reply.size = len;
-		memcpy(rsp.u.get_report_reply.data, data, len);
-	}
-
-done:
-	rsp.u.get_report_reply.err = status;
-	err = bt_uhid_send(hog->uhid, &rsp);
+	err = bt_uhid_get_report_reply(hog->uhid, hog->getrep_id, id, status,
+					data, len);
 	if (err < 0)
-		error("bt_uhid_send: %s", strerror(-err));
+		error("bt_uhid_get_report_reply: %s", strerror(-err));
 }
 
 static void get_report_cb(guint8 status, const guint8 *pdu, guint16 len,
@@ -994,7 +939,7 @@ static void get_report_cb(guint8 status, const guint8 *pdu, guint16 len,
 	++pdu;
 
 exit:
-	report_reply(hog, status, report->id, report->numbered, len, pdu);
+	report_reply(hog, status, report->numbered ? report->id : 0, len, pdu);
 }
 
 static void get_report(struct uhid_event *ev, void *user_data)
@@ -1002,6 +947,14 @@ static void get_report(struct uhid_event *ev, void *user_data)
 	struct bt_hog *hog = user_data;
 	struct report *report;
 	guint8 err;
+
+	/* Destroy input device if there is an attempt to communicate with it
+	 * while disconnected.
+	 */
+	if (hog->attrib == NULL) {
+		uhid_destroy(hog, true);
+		return;
+	}
 
 	/* uhid never sends reqs in parallel; if there's a req, it timed out */
 	if (hog->getrep_att) {
@@ -1030,61 +983,33 @@ static void get_report(struct uhid_event *ev, void *user_data)
 
 fail:
 	/* reply with an error on failure */
-	report_reply(hog, err, 0, false, 0, NULL);
+	report_reply(hog, err, 0, 0, NULL);
 }
 
 static void uhid_create(struct bt_hog *hog, uint8_t *report_map,
 							size_t report_map_len)
 {
 	uint8_t *value = report_map;
-	struct uhid_event ev;
 	size_t vlen = report_map_len;
-	int i, err;
+	int err;
 	GError *gerr = NULL;
-
-	if (vlen > sizeof(ev.u.create2.rd_data)) {
-		error("Report MAP too big: %zu > %zu", vlen,
-					sizeof(ev.u.create2.rd_data));
-		return;
-	}
-
-	/* create uHID device */
-	memset(&ev, 0, sizeof(ev));
-	ev.type = UHID_CREATE2;
+	bdaddr_t src, dst;
 
 	bt_io_get(g_attrib_get_channel(hog->attrib), &gerr,
-			BT_IO_OPT_SOURCE, ev.u.create2.phys,
-			BT_IO_OPT_DEST, ev.u.create2.uniq,
+			BT_IO_OPT_SOURCE_BDADDR, &src,
+			BT_IO_OPT_DEST_BDADDR, &dst,
 			BT_IO_OPT_INVALID);
-
 	if (gerr) {
 		error("Failed to connection details: %s", gerr->message);
 		g_error_free(gerr);
 		return;
 	}
 
-	/* Phys + uniq are the same size (hw address type) */
-	for (i = 0;
-	    i < (int)sizeof(ev.u.create2.phys) && ev.u.create2.phys[i] != 0;
-	    ++i) {
-		ev.u.create2.phys[i] = tolower(ev.u.create2.phys[i]);
-		ev.u.create2.uniq[i] = tolower(ev.u.create2.uniq[i]);
-	}
-
-	strncpy((char *) ev.u.create2.name, hog->name,
-						sizeof(ev.u.create2.name) - 1);
-	ev.u.create2.vendor = hog->vendor;
-	ev.u.create2.product = hog->product;
-	ev.u.create2.version = hog->version;
-	ev.u.create2.country = hog->bcountrycode;
-	ev.u.create2.bus = BUS_BLUETOOTH;
-	ev.u.create2.rd_size = vlen;
-
-	memcpy(ev.u.create2.rd_data, value, vlen);
-
-	err = bt_uhid_send(hog->uhid, &ev);
+	err = bt_uhid_create(hog->uhid, hog->name, &src, &dst,
+				hog->vendor, hog->product, hog->version,
+				hog->bcountrycode, hog->type, value, vlen);
 	if (err < 0) {
-		error("bt_uhid_send: %s", strerror(-err));
+		error("bt_uhid_create: %s", strerror(-err));
 		return;
 	}
 
@@ -1092,9 +1017,6 @@ static void uhid_create(struct bt_hog *hog, uint8_t *report_map,
 	bt_uhid_register(hog->uhid, UHID_OUTPUT, forward_report, hog);
 	bt_uhid_register(hog->uhid, UHID_GET_REPORT, get_report, hog);
 	bt_uhid_register(hog->uhid, UHID_SET_REPORT, set_report, hog);
-
-	hog->uhid_created = true;
-	hog->uhid_start = false;
 
 	DBG("HoG created uHID device");
 }
@@ -1146,7 +1068,8 @@ static void read_report_map(struct bt_hog *hog)
 {
 	uint16_t handle;
 
-	if (!hog->report_map_attr || hog->uhid_created || hog->report_map_id)
+	if (!hog->report_map_attr || bt_uhid_created(hog->uhid) ||
+			hog->report_map_id)
 		return;
 
 	handle = gatt_db_attribute_get_handle(hog->report_map_attr);
@@ -1209,7 +1132,7 @@ static void proto_mode_read_cb(guint8 status, const guint8 *pdu, guint16 plen,
 	if (value == HOG_PROTO_MODE_BOOT) {
 		uint8_t nval = HOG_PROTO_MODE_REPORT;
 
-		DBG("HoG is operating in Boot Procotol Mode");
+		DBG("HoG is operating in Boot Protocol Mode");
 
 		gatt_write_cmd(hog->attrib, hog->proto_mode_handle, &nval,
 						sizeof(nval), NULL, NULL);
@@ -1313,9 +1236,9 @@ static void hog_free(void *data)
 {
 	struct bt_hog *hog = data;
 
-	bt_hog_detach(hog);
+	bt_hog_detach(hog, true);
+	uhid_destroy(hog, true);
 
-	queue_destroy(hog->input, free);
 	queue_destroy(hog->bas, (void *) bt_bas_unref);
 	g_slist_free_full(hog->instances, hog_free);
 
@@ -1333,9 +1256,9 @@ static void hog_free(void *data)
 
 struct bt_hog *bt_hog_new_default(const char *name, uint16_t vendor,
 					uint16_t product, uint16_t version,
-					struct gatt_db *db)
+					uint8_t type, struct gatt_db *db)
 {
-	return bt_hog_new(-1, name, vendor, product, version, db);
+	return bt_hog_new(-1, name, vendor, product, version, type, db);
 }
 
 static void foreach_hog_report(struct gatt_db_attribute *attr, void *user_data)
@@ -1495,9 +1418,21 @@ static void foreach_hog_chrc(struct gatt_db_attribute *attr, void *user_data)
 
 static struct bt_hog *hog_new(int fd, const char *name, uint16_t vendor,
 					uint16_t product, uint16_t version,
+					uint8_t type,
 					struct gatt_db_attribute *attr)
 {
+	struct bt_uhid *uhid;
 	struct bt_hog *hog;
+
+	if (fd < 0)
+		uhid = bt_uhid_new_default();
+	else
+		uhid = bt_uhid_new(fd);
+
+	if (!uhid) {
+		DBG("Unable to create UHID");
+		return NULL;
+	}
 
 	hog = g_try_new0(struct bt_hog, 1);
 	if (!hog)
@@ -1505,15 +1440,10 @@ static struct bt_hog *hog_new(int fd, const char *name, uint16_t vendor,
 
 	hog->gatt_op = queue_new();
 	hog->bas = queue_new();
-
-	if (fd < 0)
-		hog->uhid = bt_uhid_new_default();
-	else
-		hog->uhid = bt_uhid_new(fd);
-
 	hog->uhid_fd = fd;
+	hog->uhid = uhid;
 
-	if (!hog->gatt_op || !hog->bas || !hog->uhid) {
+	if (!hog->gatt_op || !hog->bas) {
 		hog_free(hog);
 		return NULL;
 	}
@@ -1522,6 +1452,7 @@ static struct bt_hog *hog_new(int fd, const char *name, uint16_t vendor,
 	hog->vendor = vendor;
 	hog->product = product;
 	hog->version = version;
+	hog->type = type;
 	hog->attr = attr;
 
 	return hog;
@@ -1537,8 +1468,8 @@ static void hog_attach_instance(struct bt_hog *hog,
 		return;
 	}
 
-	instance = hog_new(hog->uhid_fd, hog->name, hog->vendor,
-					hog->product, hog->version, attr);
+	instance = hog_new(hog->uhid_fd, hog->name, hog->vendor, hog->product,
+				hog->version, hog->type, attr);
 	if (!instance)
 		return;
 
@@ -1574,11 +1505,11 @@ static void dis_notify(uint8_t source, uint16_t vendor, uint16_t product,
 
 struct bt_hog *bt_hog_new(int fd, const char *name, uint16_t vendor,
 					uint16_t product, uint16_t version,
-					struct gatt_db *db)
+					uint8_t type, struct gatt_db *db)
 {
 	struct bt_hog *hog;
 
-	hog = hog_new(fd, name, vendor, product, version, NULL);
+	hog = hog_new(fd, name, vendor, product, version, type, NULL);
 	if (!hog)
 		return NULL;
 
@@ -1701,7 +1632,7 @@ static void hog_attach_hog(struct bt_hog *hog, struct gatt_primary *primary)
 
 	instance = bt_hog_new(hog->uhid_fd, hog->name, hog->vendor,
 					hog->product, hog->version,
-					hog->gatt_db);
+					hog->type, hog->gatt_db);
 	if (!instance)
 		return;
 
@@ -1786,7 +1717,7 @@ bool bt_hog_attach(struct bt_hog *hog, void *gatt)
 		bt_hog_attach(instance, gatt);
 	}
 
-	if (!hog->uhid_created) {
+	if (!bt_uhid_created(hog->uhid)) {
 		DBG("HoG discovering characteristics");
 		if (hog->attr)
 			gatt_db_service_foreach_char(hog->attr,
@@ -1798,7 +1729,7 @@ bool bt_hog_attach(struct bt_hog *hog, void *gatt)
 					char_discovered_cb, hog);
 	}
 
-	if (!hog->uhid_created)
+	if (!bt_uhid_created(hog->uhid))
 		return true;
 
 	/* If UHID is already created, set up the report value handlers to
@@ -1820,45 +1751,30 @@ bool bt_hog_attach(struct bt_hog *hog, void *gatt)
 				"handle 0x%04x", r->value_handle);
 	}
 
+	/* Attempt to replay get/set report messages since the driver might not
+	 * be aware the device has been disconnected in the meantime.
+	 */
+	bt_uhid_replay(hog->uhid);
+
 	return true;
 }
 
-static void uhid_destroy(struct bt_hog *hog)
-{
-	int err;
-	struct uhid_event ev;
-
-	if (!hog->uhid_created)
-		return;
-
-	bt_uhid_unregister_all(hog->uhid);
-
-	memset(&ev, 0, sizeof(ev));
-	ev.type = UHID_DESTROY;
-
-	err = bt_uhid_send(hog->uhid, &ev);
-
-	if (err < 0) {
-		error("bt_uhid_send: %s", strerror(-err));
-		return;
-	}
-
-	hog->uhid_created = false;
-}
-
-void bt_hog_detach(struct bt_hog *hog)
+void bt_hog_detach(struct bt_hog *hog, bool force)
 {
 	GSList *l;
 
-	if (!hog->attrib)
+	if (!hog)
 		return;
+
+	if (!hog->attrib)
+		goto done;
 
 	queue_foreach(hog->bas, (void *) bt_bas_detach, NULL);
 
 	for (l = hog->instances; l; l = l->next) {
 		struct bt_hog *instance = l->data;
 
-		bt_hog_detach(instance);
+		bt_hog_detach(instance, force);
 	}
 
 	for (l = hog->reports; l; l = l->next) {
@@ -1879,7 +1795,9 @@ void bt_hog_detach(struct bt_hog *hog)
 	queue_remove_all(hog->gatt_op, cancel_gatt_req, hog, destroy_gatt_req);
 	g_attrib_unref(hog->attrib);
 	hog->attrib = NULL;
-	uhid_destroy(hog);
+
+done:
+	uhid_destroy(hog, force);
 }
 
 int bt_hog_set_control_point(struct bt_hog *hog, bool suspend)

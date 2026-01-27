@@ -408,6 +408,7 @@ static void get_message_cb(void *session, int err, gboolean fmore,
 	}
 
 	g_string_append(mas->buffer, chunk);
+	mas->finished = TRUE;
 
 proceed:
 	if (err != -EAGAIN)
@@ -612,10 +613,10 @@ static void *message_open(const char *name, int oflag, mode_t mode,
 		return NULL;
 	}
 
+	mas->buffer = g_string_new("");
+
 	*err = messages_get_message(mas->backend_data, name, 0,
 			get_message_cb, mas);
-
-	mas->buffer = g_string_new("");
 
 	if (*err < 0)
 		return NULL;
@@ -781,7 +782,37 @@ static void *notification_registration_open(const char *name, int oflag,
 	return mas;
 }
 
-static struct obex_service_driver mas = {
+static void *message_get_instance_open(const char *name, int oflag,
+					mode_t mode, void *driver_data,
+					size_t *size, int *err)
+{
+	struct mas_session *mas = driver_data;
+
+	DBG("");
+
+	mas->buffer = g_string_new("Mas Instance 0");
+	mas->finished = TRUE;
+	*err = 0;
+
+	return mas;
+}
+
+static void *message_notification_filter_open(const char *name, int oflag,
+					mode_t mode, void *driver_data,
+					size_t *size, int *err)
+{
+	struct mas_session *mas = driver_data;
+
+	DBG("");
+
+	/* TODO notification filter add */
+	mas->finished = TRUE;
+	*err = 0;
+
+	return mas;
+}
+
+static const struct obex_service_driver mas = {
 	.name = "Message Access server",
 	.service = OBEX_MAS,
 	.target = MAS_TARGET,
@@ -793,7 +824,7 @@ static struct obex_service_driver mas = {
 	.disconnect = mas_disconnect,
 };
 
-static struct obex_mime_type_driver mime_map = {
+static const struct obex_mime_type_driver mime_map = {
 	.target = MAS_TARGET,
 	.target_size = TARGET_SIZE,
 	.mimetype = NULL,
@@ -803,7 +834,7 @@ static struct obex_mime_type_driver mime_map = {
 	.write = any_write,
 };
 
-static struct obex_mime_type_driver mime_message = {
+static const struct obex_mime_type_driver mime_message = {
 	.target = MAS_TARGET,
 	.target_size = TARGET_SIZE,
 	.mimetype = "x-bt/message",
@@ -813,7 +844,7 @@ static struct obex_mime_type_driver mime_message = {
 	.write = any_write,
 };
 
-static struct obex_mime_type_driver mime_folder_listing = {
+static const struct obex_mime_type_driver mime_folder_listing = {
 	.target = MAS_TARGET,
 	.target_size = TARGET_SIZE,
 	.mimetype = "x-obex/folder-listing",
@@ -824,7 +855,7 @@ static struct obex_mime_type_driver mime_folder_listing = {
 	.write = any_write,
 };
 
-static struct obex_mime_type_driver mime_msg_listing = {
+static const struct obex_mime_type_driver mime_msg_listing = {
 	.target = MAS_TARGET,
 	.target_size = TARGET_SIZE,
 	.mimetype = "x-bt/MAP-msg-listing",
@@ -835,7 +866,7 @@ static struct obex_mime_type_driver mime_msg_listing = {
 	.write = any_write,
 };
 
-static struct obex_mime_type_driver mime_notification_registration = {
+static const struct obex_mime_type_driver mime_notification_registration = {
 	.target = MAS_TARGET,
 	.target_size = TARGET_SIZE,
 	.mimetype = "x-bt/MAP-NotificationRegistration",
@@ -845,7 +876,7 @@ static struct obex_mime_type_driver mime_notification_registration = {
 	.write = any_write,
 };
 
-static struct obex_mime_type_driver mime_message_status = {
+static const struct obex_mime_type_driver mime_message_status = {
 	.target = MAS_TARGET,
 	.target_size = TARGET_SIZE,
 	.mimetype = "x-bt/messageStatus",
@@ -855,7 +886,7 @@ static struct obex_mime_type_driver mime_message_status = {
 	.write = any_write,
 };
 
-static struct obex_mime_type_driver mime_message_update = {
+static const struct obex_mime_type_driver mime_message_update = {
 	.target = MAS_TARGET,
 	.target_size = TARGET_SIZE,
 	.mimetype = "x-bt/MAP-messageUpdate",
@@ -865,7 +896,27 @@ static struct obex_mime_type_driver mime_message_update = {
 	.write = any_write,
 };
 
-static struct obex_mime_type_driver *map_drivers[] = {
+static struct obex_mime_type_driver mime_message_instance = {
+	.target = MAS_TARGET,
+	.target_size = TARGET_SIZE,
+	.mimetype = "x-bt/MASInstanceInformation",
+	.open = message_get_instance_open,
+	.close = any_close,
+	.read = any_read,
+	.write = any_write,
+};
+
+static struct obex_mime_type_driver mime_message_notification_filter = {
+	.target = MAS_TARGET,
+	.target_size = TARGET_SIZE,
+	.mimetype = "x-bt/MAP-notification-filter",
+	.open = message_notification_filter_open,
+	.close = any_close,
+	.read = any_read,
+	.write = any_write,
+};
+
+static const struct obex_mime_type_driver *map_drivers[] = {
 	&mime_map,
 	&mime_message,
 	&mime_folder_listing,
@@ -873,6 +924,8 @@ static struct obex_mime_type_driver *map_drivers[] = {
 	&mime_notification_registration,
 	&mime_message_status,
 	&mime_message_update,
+	&mime_message_instance,
+	&mime_message_notification_filter,
 	NULL
 };
 

@@ -16,7 +16,7 @@ CLEANFILES =
 
 EXTRA_DIST =
 
-pkglibexecdir = $(libexecdir)/bluetooth
+pkglibexecdir = @PKGLIBEXECDIR@
 
 pkglibexec_PROGRAMS =
 
@@ -31,11 +31,21 @@ AM_LDFLAGS = $(MISC_LDFLAGS)
 confdir = $(sysconfdir)/bluetooth
 statedir = $(localstatedir)/lib/bluetooth
 
+bluetoothd-fix-permissions:
+	install -dm755 $(DESTDIR)$(confdir)
+	install -dm700 $(DESTDIR)$(statedir)
+
 if DATAFILES
 dbusdir = $(DBUS_CONFDIR)/dbus-1/system.d
 dbus_DATA = src/bluetooth.conf
 
-conf_DATA =
+if OBEX
+dbus_DATA += obexd/src/obex.conf
+endif
+
+conf_DATA = src/main.conf
+conf_DATA += profiles/input/input.conf
+conf_DATA += profiles/network/network.conf
 state_DATA =
 endif
 
@@ -43,19 +53,18 @@ if SYSTEMD
 systemdsystemunitdir = $(SYSTEMD_SYSTEMUNITDIR)
 systemdsystemunit_DATA = src/bluetooth.service
 
+systemduserunitdir = $(SYSTEMD_USERUNITDIR)
+systemduserunit_DATA =
+
 dbussystembusdir = $(DBUS_SYSTEMBUSDIR)
 dbussystembus_DATA = src/org.bluez.service
 endif
 
-EXTRA_DIST += src/bluetooth.service.in src/org.bluez.service
+EXTRA_DIST += src/org.bluez.service
 
 plugindir = $(libdir)/bluetooth/plugins
 
-if MAINTAINER_MODE
-build_plugindir = $(abs_top_srcdir)/plugins/.libs
-else
 build_plugindir = $(plugindir)
-endif
 
 if MANPAGES
 man_MANS =
@@ -64,17 +73,15 @@ manual_pages =
 
 plugin_LTLIBRARIES =
 
-lib_sources = lib/bluetooth.c lib/hci.c lib/sdp.c
-lib_headers = lib/bluetooth.h lib/hci.h lib/hci_lib.h \
-		lib/sco.h lib/l2cap.h lib/sdp.h lib/sdp_lib.h \
-		lib/rfcomm.h lib/bnep.h lib/cmtp.h lib/hidp.h
+lib_sources = lib/bluetooth/bluetooth.c lib/bluetooth/hci.c lib/bluetooth/sdp.c
+lib_headers = lib/bluetooth/bluetooth.h lib/bluetooth/hci.h lib/bluetooth/hci_lib.h \
+		lib/bluetooth/sco.h lib/bluetooth/l2cap.h lib/bluetooth/sdp.h lib/bluetooth/sdp_lib.h \
+		lib/bluetooth/rfcomm.h lib/bluetooth/bnep.h lib/bluetooth/cmtp.h lib/bluetooth/hidp.h
 
-extra_headers = lib/mgmt.h lib/uuid.h lib/a2mp.h lib/amp.h lib/iso.h
-extra_sources = lib/uuid.c
+extra_headers = lib/bluetooth/mgmt.h lib/bluetooth/uuid.h lib/bluetooth/iso.h
+extra_sources = lib/bluetooth/uuid.c
 
-local_headers = $(foreach file,$(lib_headers), lib/bluetooth/$(notdir $(file)))
-
-BUILT_SOURCES = $(local_headers) $(ell_built_sources) src/builtin.h
+BUILT_SOURCES = $(ell_built_sources) src/builtin.h
 
 if LIBRARY
 pkginclude_HEADERS += $(lib_headers)
@@ -82,8 +89,7 @@ pkginclude_HEADERS += $(lib_headers)
 lib_LTLIBRARIES += lib/libbluetooth.la
 
 lib_libbluetooth_la_SOURCES = $(lib_headers) $(lib_sources)
-lib_libbluetooth_la_LDFLAGS = $(AM_LDFLAGS) -version-info 22:11:19
-lib_libbluetooth_la_DEPENDENCIES = $(local_headers)
+lib_libbluetooth_la_LDFLAGS = $(AM_LDFLAGS) -version-info 22:15:19
 endif
 
 noinst_LTLIBRARIES += lib/libbluetooth-internal.la
@@ -100,12 +106,10 @@ gdbus_libgdbus_internal_la_SOURCES = gdbus/gdbus.h \
 if EXTERNAL_ELL
 ell_cflags = @ELL_CFLAGS@
 ell_ldadd = @ELL_LIBS@
-ell_dependencies =
 ell_built_sources = ell/shared
 else
 ell_cflags =
 ell_ldadd = ell/libell-internal.la
-ell_dependencies = $(ell_ldadd)
 ell_built_sources = ell/shared ell/internal ell/ell.h
 
 noinst_LTLIBRARIES += ell/libell-internal.la
@@ -237,7 +241,11 @@ shared_sources = src/shared/io.h src/shared/timeout.h \
 			src/shared/micp.c src/shared/micp.h \
 			src/shared/csip.c src/shared/csip.h \
 			src/shared/bass.h src/shared/bass.c \
-			src/shared/lc3.h src/shared/tty.h
+			src/shared/ccp.h src/shared/ccp.c \
+			src/shared/lc3.h src/shared/tty.h \
+			src/shared/bap-defs.h \
+			src/shared/asha.h src/shared/asha.c \
+			src/shared/battery.h src/shared/battery.c
 
 if READLINE
 shared_sources += src/shared/shell.c src/shared/shell.h
@@ -288,24 +296,14 @@ gobex_sources = gobex/gobex.h gobex/gobex.c \
 builtin_modules =
 builtin_sources =
 builtin_cppflags =
-builtin_nodist =
 builtin_ldadd =
 
 include Makefile.plugins
-
-if MAINTAINER_MODE
-plugin_LTLIBRARIES += plugins/external-dummy.la
-plugins_external_dummy_la_SOURCES = plugins/external-dummy.c
-plugins_external_dummy_la_LDFLAGS = $(AM_LDFLAGS) -module -avoid-version \
-				    -no-undefined
-plugins_external_dummy_la_CFLAGS = $(AM_CFLAGS) -fvisibility=hidden
-endif
 
 pkglibexec_PROGRAMS += src/bluetoothd
 
 src_bluetoothd_SOURCES = $(builtin_sources) \
 			$(attrib_sources) $(btio_sources) \
-			src/bluetooth.ver \
 			src/main.c src/log.h src/log.c \
 			src/backtrace.h src/backtrace.c \
 			src/rfkill.c src/btd.h src/sdpd.h \
@@ -331,34 +329,36 @@ src_bluetoothd_SOURCES = $(builtin_sources) \
 			src/adv_monitor.h src/adv_monitor.c \
 			src/battery.h src/battery.c \
 			src/settings.h src/settings.c \
-			src/set.h src/set.c
+			src/set.h src/set.c \
+			src/bearer.h src/bearer.c
 src_bluetoothd_LDADD = lib/libbluetooth-internal.la \
 			gdbus/libgdbus-internal.la \
 			src/libshared-glib.la \
 			$(BACKTRACE_LIBS) $(GLIB_LIBS) $(DBUS_LIBS) -ldl -lrt \
 			$(builtin_ldadd)
+
+if EXTERNAL_PLUGINS
+src_bluetoothd_SOURCES += src/bluetooth.ver
 src_bluetoothd_LDFLAGS = $(AM_LDFLAGS) -Wl,--export-dynamic \
 				-Wl,--version-script=$(srcdir)/src/bluetooth.ver
-
-src_bluetoothd_DEPENDENCIES = lib/libbluetooth-internal.la \
-				gdbus/libgdbus-internal.la \
-				src/libshared-glib.la \
-				src/bluetooth.service
+endif
 
 src_bluetoothd_CPPFLAGS = $(AM_CPPFLAGS) -DBLUETOOTH_PLUGIN_BUILTIN \
 					-DPLUGINDIR=\""$(build_plugindir)"\" \
 					$(BACKTRACE_CFLAGS) $(builtin_cppflags)
 src_bluetoothd_SHORTNAME = bluetoothd
 
-builtin_files = src/builtin.h $(builtin_nodist)
+builtin_files = src/builtin.h
 
 nodist_src_bluetoothd_SOURCES = $(builtin_files)
 
-CLEANFILES += $(builtin_files) src/bluetooth.service
+CLEANFILES += $(builtin_files)
 
 if MANPAGES
 man_MANS += src/bluetoothd.8
+man_MANS += doc/hci.7 doc/mgmt.7 doc/l2cap.7 doc/rfcomm.7 doc/sco.7 doc/iso.7
 man_MANS += doc/org.bluez.Adapter.5 doc/org.bluez.Device.5 \
+		doc/org.bluez.Bearer.LE.5 doc/org.bluez.Bearer.BREDR.5 \
 		doc/org.bluez.DeviceSet.5 doc/org.bluez.AgentManager.5 \
 		doc/org.bluez.Agent.5 doc/org.bluez.ProfileManager.5 \
 		doc/org.bluez.Profile.5 doc/org.bluez.NetworkServer.5 \
@@ -370,7 +370,7 @@ man_MANS += doc/org.bluez.Adapter.5 doc/org.bluez.Device.5 \
 man_MANS += doc/org.bluez.Media.5 doc/org.bluez.MediaControl.5 \
 		doc/org.bluez.MediaPlayer.5 doc/org.bluez.MediaFolder.5 \
 		doc/org.bluez.MediaItem.5 doc/org.bluez.MediaEndpoint.5 \
-		doc/org.bluez.MediaTransport.5
+		doc/org.bluez.MediaTransport.5 doc/org.bluez.MediaAssistant.5
 man_MANS += doc/org.bluez.GattManager.5 doc/org.bluez.GattProfile.5 \
 		doc/org.bluez.GattService.5 \
 		doc/org.bluez.GattCharacteristic.5 \
@@ -387,10 +387,14 @@ man_MANS += doc/org.bluez.obex.Client.5 doc/org.bluez.obex.Session.5 \
 		doc/org.bluez.obex.PhonebookAccess.5 \
 		doc/org.bluez.obex.MessageAccess.5 \
 		doc/org.bluez.obex.Message.5 \
-		doc/org.bluez.obex.AgentManager.5 doc/org.bluez.obex.Agent.5
+		doc/org.bluez.obex.AgentManager.5 doc/org.bluez.obex.Agent.5 \
+		doc/org.bluez.obex.Image.5
 endif
 manual_pages += src/bluetoothd.8
+manual_pages += doc/hci.7 doc/mgmt.7 doc/l2cap.7 doc/rfcomm.7 doc/sco.7 \
+		doc/iso.7
 manual_pages += doc/org.bluez.Adapter.5 doc/org.bluez.Device.5 \
+		doc/org.bluez.Bearer.LE.5 doc/org.bluez.Bearer.BREDR.5 \
 		doc/org.bluez.DeviceSet.5 doc/org.bluez.AgentManager.5 \
 		doc/org.bluez.Agent.5 doc/org.bluez.ProfileManager.5 \
 		doc/org.bluez.Profile.5 doc/org.bluez.NetworkServer.5 \
@@ -402,7 +406,7 @@ manual_pages += doc/org.bluez.Adapter.5 doc/org.bluez.Device.5 \
 manual_pages += doc/org.bluez.Media.5 doc/org.bluez.MediaControl.5 \
 		doc/org.bluez.MediaPlayer.5 doc/org.bluez.MediaFolder.5 \
 		doc/org.bluez.MediaItem.5 doc/org.bluez.MediaEndpoint.5 \
-		doc/org.bluez.MediaTransport.5
+		doc/org.bluez.MediaTransport.5 doc/org.bluez.MediaAssistant.5
 manual_pages += doc/org.bluez.GattManager.5 doc/org.bluez.GattProfile.5 \
 		doc/org.bluez.GattService.5 \
 		doc/org.bluez.GattCharacteristic.5 \
@@ -419,19 +423,27 @@ manual_pages += doc/org.bluez.obex.Client.5 doc/org.bluez.obex.Session.5 \
 		doc/org.bluez.obex.PhonebookAccess.5 \
 		doc/org.bluez.obex.MessageAccess.5 \
 		doc/org.bluez.obex.Message.5 \
-		doc/org.bluez.obex.AgentManager.5 doc/org.bluez.obex.Agent.5
+		doc/org.bluez.obex.AgentManager.5 doc/org.bluez.obex.Agent.5 \
+		doc/org.bluez.obex.Image.5
 
 EXTRA_DIST += src/genbuiltin src/bluetooth.conf \
 			src/main.conf profiles/network/network.conf \
-			profiles/input/input.conf
+			profiles/input/input.conf obexd/src/obex.conf
 
 test_scripts =
 unit_tests =
 
 include Makefile.tools
 include Makefile.obexd
-include android/Makefile.am
 include Makefile.mesh
+
+if SYSTEMD
+install-data-hook: obexd-add-service-symlink
+else
+install-data-hook: bluetoothd-fix-permissions obexd-add-service-symlink
+endif
+
+uninstall-hook: obexd-remove-service-symlink
 
 if HID2HCI
 rulesdir = $(UDEV_DIR)/rules.d
@@ -455,11 +467,14 @@ EXTRA_DIST += doc/assigned-numbers.txt doc/supported-features.txt \
 				doc/test-runner.rst \
 				doc/settings-storage.txt
 
-EXTRA_DIST += doc/mgmt-api.txt \
-		doc/health-api.txt \
+EXTRA_DIST += doc/health-api.txt \
 		doc/sap-api.txt
 
+EXTRA_DIST += doc/hci.rst doc/mgmt.rst doc/l2cap.rst doc/rfcomm.rst \
+	      doc/sco.rst doc/iso.rst
+
 EXTRA_DIST += doc/org.bluez.Adapter.rst doc/org.bluez.Device.rst \
+		doc/org.bluez.Bearer.LE.rst doc/org.bluez.Bearer.BREDR.rst \
 		doc/org.bluez.DeviceSet.rst doc/org.bluez.AgentManager.rst \
 		doc/org.bluez.Agent.rst doc/org.bluez.ProfileManager.rst \
 		doc/org.bluez.Profile.rst doc/org.bluez.NetworkServer.rst \
@@ -472,7 +487,7 @@ EXTRA_DIST += doc/org.bluez.Adapter.rst doc/org.bluez.Device.rst \
 EXTRA_DIST += doc/org.bluez.Media.rst doc/org.bluez.MediaControl.rst \
 		doc/org.bluez.MediaPlayer.rst doc/org.bluez.MediaFolder.rst \
 		doc/org.bluez.MediaItem.rst doc/org.bluez.MediaEndpoint.rst \
-		doc/org.bluez.MediaTransport.rst
+		doc/org.bluez.MediaTransport.rst doc/org.bluez.MediaAssistant.rst
 
 EXTRA_DIST += doc/org.bluez.GattManager.rst doc/org.bluez.GattProfile.rst\
 		doc/org.bluez.GattService.rst \
@@ -491,7 +506,8 @@ EXTRA_DIST += doc/org.bluez.obex.Client.rst doc/org.bluez.obex.Session.rst \
 		doc/org.bluez.obex.PhonebookAccess.rst \
 		doc/org.bluez.obex.MessageAccess.rst \
 		doc/org.bluez.obex.Message.rst \
-		doc/org.bluez.obex.AgentManager.rst doc/org.bluez.obex.Agent.rst
+		doc/org.bluez.obex.AgentManager.rst doc/org.bluez.obex.Agent.rst \
+		doc/org.bluez.obex.Image.rst
 
 EXTRA_DIST += doc/pics-opp.txt doc/pixit-opp.txt \
 		doc/pts-opp.txt
@@ -500,7 +516,7 @@ EXTRA_DIST += doc/btsnoop.txt
 
 EXTRA_DIST += tools/magic.btsnoop
 
-AM_CPPFLAGS += $(DBUS_CFLAGS) $(GLIB_CFLAGS) -I$(builddir)/lib
+AM_CPPFLAGS += $(DBUS_CFLAGS) $(GLIB_CFLAGS) -I$(srcdir)/lib
 
 unit_tests += unit/test-tester
 
@@ -571,22 +587,22 @@ unit_tests += unit/test-avdtp
 
 unit_test_avdtp_SOURCES = unit/test-avdtp.c \
 				src/log.h src/log.c \
-				android/avdtp.c android/avdtp.h
+				unit/avdtp.c unit/avdtp.h
 unit_test_avdtp_LDADD = src/libshared-glib.la $(GLIB_LIBS)
 
 unit_tests += unit/test-avctp
 
 unit_test_avctp_SOURCES = unit/test-avctp.c \
 				src/log.h src/log.c \
-				android/avctp.c android/avctp.h
+				unit/avctp.c unit/avctp.h
 unit_test_avctp_LDADD = src/libshared-glib.la $(GLIB_LIBS)
 
 unit_tests += unit/test-avrcp
 
 unit_test_avrcp_SOURCES = unit/test-avrcp.c \
 				src/log.h src/log.c \
-				android/avctp.c android/avctp.h \
-				android/avrcp-lib.c android/avrcp-lib.h
+				unit/avctp.c unit/avctp.h \
+				unit/avrcp-lib.c unit/avrcp-lib.h
 unit_test_avrcp_LDADD = lib/libbluetooth-internal.la \
 				src/libshared-glib.la $(GLIB_LIBS)
 
@@ -685,6 +701,12 @@ unit_test_vcp_SOURCES = unit/test-vcp.c $(btio_sources)
 unit_test_vcp_LDADD = src/libshared-glib.la \
 				lib/libbluetooth-internal.la $(GLIB_LIBS)
 
+unit_tests += unit/test-battery
+
+unit_test_battery_SOURCES = unit/test-battery.c
+unit_test_battery_LDADD = src/libshared-glib.la \
+				lib/libbluetooth-internal.la $(GLIB_LIBS)
+
 if MIDI
 unit_tests += unit/test-midi
 unit_test_midi_CPPFLAGS = $(AM_CPPFLAGS) $(ALSA_CFLAGS) -DMIDI_TEST
@@ -729,28 +751,27 @@ endif
 EXTRA_DIST += $(manual_pages) $(patsubst %.1,%.rst, \
 				$(patsubst %.8,%.rst,$(manual_pages)))
 
-DISTCHECK_CONFIGURE_FLAGS = --disable-datafiles --enable-library \
+# pkg-config gives absolute paths that do not work with distcheck that wants to use its own $(prefix)
+AM_DISTCHECK_CONFIGURE_FLAGS = --disable-datafiles --enable-library \
 						--enable-health \
 						--enable-midi \
 						--enable-manpages \
-						--enable-android \
 						--enable-mesh \
 						--enable-btpclient \
 						--disable-systemd \
-						--disable-udev
+						--disable-udev \
+						--disable-cups \
+						--with-dbusconfdir=$${dc_install_base}/$(DBUS_CONFDIR) \
+						--with-dbussystembusdir=$${dc_install_base}/$(DBUS_SYSTEMBUSDIR) \
+						--with-dbussessionbusdir=$${dc_install_base}/$(DBUS_SESSIONBUSDIR)
+
+
 
 DISTCLEANFILES = $(pkgconfig_DATA) $(unit_tests) $(manual_pages)
 
 MAINTAINERCLEANFILES = Makefile.in \
 	aclocal.m4 configure config.h.in config.sub config.guess \
 	ltmain.sh depcomp compile missing install-sh mkinstalldirs test-driver
-
-SED_PROCESS = $(AM_V_GEN)$(MKDIR_P) $(dir $@) && \
-		$(SED) -e 's,@pkglibexecdir\@,$(pkglibexecdir),g' \
-		       -e 's,@libexecdir\@,$(libexecdir),g' \
-		       -e 's,@statedir\@,$(statedir),g' \
-		       -e 's,@confdir\@,$(confdir),g' \
-		< $< > $@
 
 if RUN_RST2MAN
 RST2MAN_PROCESS = $(AM_V_GEN)$(MKDIR_P) $(dir $@) && \
@@ -761,13 +782,13 @@ RST2MAN_PROCESS = $(AM_V_GEN)test -f $@ || \
 		{ echo "Generated manual page $@ does not exist"; false; }
 endif
 
-%.service: %.service.in Makefile
-	$(SED_PROCESS)
-
 %.1: %.rst Makefile
 	$(RST2MAN_PROCESS)
 
 %.5: %.rst Makefile
+	$(RST2MAN_PROCESS)
+
+%.7: %.rst Makefile
 	$(RST2MAN_PROCESS)
 
 %.8: %.rst Makefile
@@ -779,12 +800,6 @@ src/builtin.h: src/genbuiltin $(builtin_sources)
 tools/%.rules:
 	$(AM_V_at)$(MKDIR_P) tools
 	$(AM_V_GEN)cp $(srcdir)/$(subst 97-,,$@) $@
-
-$(lib_libbluetooth_la_OBJECTS): $(local_headers)
-
-lib/bluetooth/%.h: lib/%.h
-	$(AM_V_at)$(MKDIR_P) lib/bluetooth
-	$(AM_V_GEN)$(LN_S) -f $(abspath $<) $@
 
 ell/shared: Makefile
 	$(AM_V_at)$(MKDIR_P) ell
@@ -811,8 +826,8 @@ ell/ell.h: Makefile
 maintainer-clean-local:
 	-rm -rf ell
 
-if COVERAGE
 clean-coverage:
+if COVERAGE
 	@lcov --directory $(top_builddir) --zerocounters
 	$(RM) -r coverage $(top_builddir)/coverage.info
 
@@ -821,15 +836,8 @@ coverage: check
 				--output-file $(top_builddir)/coverage.info
 	$(AM_V_at)$(MKDIR_P) coverage
 	@genhtml -o coverage/ $(top_builddir)/coverage.info
+endif
 
 clean-local: clean-coverage
 	-find $(top_builddir) -name "*.gcno" -delete
 	-find $(top_builddir) -name "*.gcda" -delete
-	$(RM) -r lib/bluetooth
-
-else
-clean-local:
-	-find $(top_builddir) -name "*.gcno" -delete
-	-find $(top_builddir) -name "*.gcda" -delete
-	$(RM) -r lib/bluetooth
-endif

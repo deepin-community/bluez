@@ -88,6 +88,7 @@ struct media_player {
 	struct player_callback	*cb;
 	GSList			*pending;
 	GSList			*folders;
+	uint16_t		obex_port;
 };
 
 static void append_track(void *key, void *value, void *user_data)
@@ -437,6 +438,28 @@ static gboolean get_playlist(const GDBusPropertyTable *property,
 	return TRUE;
 }
 
+static gboolean obexport_exists(const GDBusPropertyTable *property,
+								void *data)
+{
+	struct media_player *mp = data;
+
+	return mp->obex_port != 0;
+}
+
+static gboolean get_obexport(const GDBusPropertyTable *property,
+					DBusMessageIter *iter, void *data)
+{
+	struct media_player *mp = data;
+
+	if (mp->obex_port == 0)
+		return FALSE;
+
+	dbus_message_iter_append_basic(iter, DBUS_TYPE_UINT16,
+							&mp->obex_port);
+
+	return TRUE;
+}
+
 static DBusMessage *media_player_play(DBusConnection *conn, DBusMessage *msg,
 								void *data)
 {
@@ -778,6 +801,8 @@ static const GDBusPropertyTable media_player_properties[] = {
 	{ "Browsable", "b", get_browsable, NULL, browsable_exists },
 	{ "Searchable", "b", get_searchable, NULL, searchable_exists },
 	{ "Playlist", "o", get_playlist, NULL, playlist_exists },
+	{ "ObexPort", "q", get_obexport, NULL, obexport_exists,
+			G_DBUS_PROPERTY_FLAG_EXPERIMENTAL },
 	{ }
 };
 
@@ -1252,13 +1277,14 @@ void media_player_destroy(struct media_player *mp)
 }
 
 struct media_player *media_player_controller_create(const char *path,
-								uint16_t id)
+							const char *type,
+							uint16_t id)
 {
 	struct media_player *mp;
 
 	mp = g_new0(struct media_player, 1);
 	mp->device = g_strdup(path);
-	mp->path = g_strdup_printf("%s/player%u", path, id);
+	mp->path = g_strdup_printf("%s/%s/player%u", path, type, id);
 	mp->settings = g_hash_table_new_full(g_str_hash, g_str_equal,
 							g_free, g_free);
 	mp->track = g_hash_table_new_full(g_str_hash, g_str_equal,
@@ -1295,9 +1321,9 @@ void media_player_set_duration(struct media_player *mp, uint32_t duration)
 	if (g_hash_table_size(mp->track) == 0)
 		return;
 
-	/* Ignore if duration is already set */
+	/* Ignore if duration is already set to value > 0 */
 	curval = g_hash_table_lookup(mp->track, "Duration");
-	if (curval != NULL)
+	if (curval != NULL && atoi(curval) != 0)
 		return;
 
 	value = g_strdup_printf("%u", duration);
@@ -1413,18 +1439,19 @@ void media_player_set_metadata(struct media_player *mp,
 				void *data, size_t len)
 {
 	char *value, *curval;
+	GHashTable *metadata = item ? item->metadata : mp->track;
 
 	value = g_strndup(data, len);
 
 	DBG("%s: %s", key, value);
 
-	curval = g_hash_table_lookup(mp->track, key);
+	curval = g_hash_table_lookup(metadata, key);
 	if (g_strcmp0(curval, value) == 0) {
 		g_free(value);
 		return;
 	}
 
-	g_hash_table_replace(mp->track, g_strdup(key), value);
+	g_hash_table_replace(metadata, g_strdup(key), value);
 }
 
 void media_player_metadata_changed(struct media_player *mp)
@@ -1996,4 +2023,20 @@ struct media_item *media_player_set_playlist_item(struct media_player *mp,
 	g_hash_table_replace(mp->track, g_strdup("Item"), g_strdup(item->path));
 
 	return item;
+}
+
+void media_player_clear_playlist(struct media_player *mp)
+{
+	if (mp->playlist) {
+		g_slist_free_full(mp->playlist->items, media_item_destroy);
+		mp->playlist->items = NULL;
+	}
+
+	g_dbus_emit_property_changed(btd_get_dbus_connection(), mp->path,
+					MEDIA_PLAYER_INTERFACE, "Playlist");
+}
+
+void media_player_set_obex_port(struct media_player *mp, uint16_t port)
+{
+	mp->obex_port = port;
 }

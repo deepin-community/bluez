@@ -22,11 +22,11 @@
 #include <sys/ioctl.h>
 #include <sys/uio.h>
 
-#include "lib/bluetooth.h"
-#include "lib/hidp.h"
-#include "lib/sdp.h"
-#include "lib/sdp_lib.h"
-#include "lib/uuid.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/hidp.h"
+#include "bluetooth/sdp.h"
+#include "bluetooth/sdp_lib.h"
+#include "bluetooth/uuid.h"
 
 #include "gdbus/gdbus.h"
 
@@ -42,9 +42,12 @@
 #include "src/sdp-client.h"
 #include "src/shared/timeout.h"
 #include "src/shared/uhid.h"
+#include "src/shared/util.h"
+#include "src/shared/queue.h"
 
 #include "device.h"
 #include "hidp_defs.h"
+#include "server.h"
 
 #define INPUT_INTERFACE "org.bluez.Input1"
 
@@ -53,6 +56,11 @@ enum reconnect_mode_t {
 	RECONNECT_DEVICE,
 	RECONNECT_HOST,
 	RECONNECT_ANY
+};
+
+struct hidp_msg {
+	uint8_t hdr;
+	struct iovec *iov;
 };
 
 struct input_device {
@@ -73,15 +81,16 @@ struct input_device {
 	unsigned int		reconnect_timer;
 	uint32_t		reconnect_attempt;
 	struct bt_uhid		*uhid;
-	bool			uhid_created;
 	uint8_t			report_req_pending;
 	unsigned int		report_req_timer;
 	uint32_t		report_rsp_id;
 	bool			virtual_cable_unplug;
+	uint8_t			type;
+	unsigned int		idle_timer;
 };
 
 static int idle_timeout = 0;
-static bool uhid_enabled = false;
+static uhid_state_t uhid_state = UHID_ENABLED;
 static bool classic_bonded_only = true;
 
 void input_set_idle_timeout(int timeout)
@@ -89,9 +98,18 @@ void input_set_idle_timeout(int timeout)
 	idle_timeout = timeout;
 }
 
-void input_enable_userspace_hid(bool state)
+void input_set_userspace_hid(char *state)
 {
-	uhid_enabled = state;
+	if (!strcasecmp(state, "false") || !strcasecmp(state, "no") ||
+			!strcasecmp(state, "off"))
+		uhid_state = UHID_DISABLED;
+	else if (!strcasecmp(state, "true") || !strcasecmp(state, "yes") ||
+			!strcasecmp(state, "on"))
+		uhid_state = UHID_ENABLED;
+	else if (!strcasecmp(state, "persist"))
+		uhid_state = UHID_PERSIST;
+	else
+		error("Unknown value '%s'", state);
 }
 
 void input_set_classic_bonded_only(bool state)
@@ -106,7 +124,6 @@ bool input_get_classic_bonded_only(void)
 
 static void input_device_enter_reconnect_mode(struct input_device *idev);
 static int connection_disconnect(struct input_device *idev, uint32_t flags);
-static int uhid_disconnect(struct input_device *idev);
 
 static bool input_device_bonded(struct input_device *idev)
 {
@@ -141,6 +158,9 @@ static void input_device_free(struct input_device *idev)
 		g_free(idev->req);
 	}
 
+	if (idev->idle_timer)
+		timeout_remove(idev->idle_timer);
+
 	if (idev->reconnect_timer > 0)
 		timeout_remove(idev->reconnect_timer);
 
@@ -158,8 +178,58 @@ static void virtual_cable_unplug(struct input_device *idev)
 	idev->virtual_cable_unplug = false;
 }
 
-static bool hidp_send_message(GIOChannel *chan, uint8_t hdr,
-					const uint8_t *data, size_t size)
+static int uhid_disconnect(struct input_device *idev, bool force)
+{
+	int err;
+
+	if (!bt_uhid_created(idev->uhid))
+		return 0;
+
+	/* Force destroy the node if virtual cable unplug flag has been set */
+	if (idev->virtual_cable_unplug && !force)
+		force = true;
+
+	if (!force && uhid_state != UHID_PERSIST)
+		force = true;
+
+	err = bt_uhid_destroy(idev->uhid, force);
+	if (err < 0) {
+		error("bt_uhid_destroy: %s", strerror(-err));
+		return err;
+	}
+
+	if (!bt_uhid_created(idev->uhid))
+		bt_uhid_unregister_all(idev->uhid);
+
+	return err;
+}
+
+static bool input_device_idle_timeout(gpointer user_data)
+{
+	struct input_device *idev = user_data;
+
+	idev->idle_timer = 0;
+
+	DBG("path=%s", idev->path);
+
+	uhid_disconnect(idev, true);
+	connection_disconnect(idev, 0);
+
+	return false;
+}
+
+static void input_device_idle_reset(struct input_device *idev)
+{
+	timeout_remove(idev->idle_timer);
+
+	if (idle_timeout)
+		idev->idle_timer = timeout_add_seconds(idle_timeout,
+					input_device_idle_timeout, idev,
+					NULL);
+}
+
+static bool hidp_send_message(struct input_device *idev, GIOChannel *chan,
+				uint8_t hdr, const uint8_t *data, size_t size)
 {
 	int fd;
 	ssize_t len;
@@ -193,6 +263,8 @@ static bool hidp_send_message(GIOChannel *chan, uint8_t hdr,
 		return false;
 	}
 
+	input_device_idle_reset(idev);
+
 	return true;
 }
 
@@ -202,45 +274,33 @@ static bool hidp_send_ctrl_message(struct input_device *idev, uint8_t hdr,
 	if (hdr == (HIDP_TRANS_HID_CONTROL | HIDP_CTRL_VIRTUAL_CABLE_UNPLUG))
 		idev->virtual_cable_unplug = true;
 
-	return hidp_send_message(idev->ctrl_io, hdr, data, size);
+	return hidp_send_message(idev, idev->ctrl_io, hdr, data, size);
 }
 
 static bool hidp_send_intr_message(struct input_device *idev, uint8_t hdr,
 					const uint8_t *data, size_t size)
 {
-	return hidp_send_message(idev->intr_io, hdr, data, size);
+	return hidp_send_message(idev, idev->intr_io, hdr, data, size);
 }
 
 static bool uhid_send_get_report_reply(struct input_device *idev,
 					const uint8_t *data, size_t size,
 					uint32_t id, uint16_t err)
 {
-	struct uhid_event ev;
 	int ret;
 
 	if (data == NULL)
 		size = 0;
 
-	if (size > sizeof(ev.u.get_report_reply.data))
-		size = sizeof(ev.u.get_report_reply.data);
-
-	if (!idev->uhid_created) {
+	if (!bt_uhid_created(idev->uhid)) {
 		DBG("HID report (%zu bytes) dropped", size);
 		return false;
 	}
 
-	memset(&ev, 0, sizeof(ev));
-	ev.type = UHID_GET_REPORT_REPLY;
-	ev.u.get_report_reply.id = id;
-	ev.u.get_report_reply.err = err;
-	ev.u.get_report_reply.size = size;
-
-	if (size > 0)
-		memcpy(ev.u.get_report_reply.data, data, size);
-
-	ret = bt_uhid_send(idev->uhid, &ev);
+	ret = bt_uhid_get_report_reply(idev->uhid, id, 0, err, data, size);
 	if (ret < 0) {
-		error("bt_uhid_send: %s (%d)", strerror(-ret), -ret);
+		error("bt_uhid_get_report_reply: %s (%d)", strerror(-ret),
+			-ret);
 		return false;
 	}
 
@@ -252,20 +312,15 @@ static bool uhid_send_get_report_reply(struct input_device *idev,
 static bool uhid_send_set_report_reply(struct input_device *idev,
 					uint32_t id, uint16_t err)
 {
-	struct uhid_event ev;
 	int ret;
 
-	if (!idev->uhid_created)
+	if (!bt_uhid_created(idev->uhid))
 		return false;
 
-	memset(&ev, 0, sizeof(ev));
-	ev.type = UHID_SET_REPORT_REPLY;
-	ev.u.set_report_reply.id = id;
-	ev.u.set_report_reply.err = err;
-
-	ret = bt_uhid_send(idev->uhid, &ev);
+	ret = bt_uhid_set_report_reply(idev->uhid, id, err);
 	if (ret < 0) {
-		error("bt_uhid_send: %s (%d)", strerror(-ret), -ret);
+		error("bt_uhid_set_report_reply: %s (%d)", strerror(-ret),
+			-ret);
 		return false;
 	}
 
@@ -275,30 +330,19 @@ static bool uhid_send_set_report_reply(struct input_device *idev,
 static bool uhid_send_input_report(struct input_device *idev,
 					const uint8_t *data, size_t size)
 {
-	struct uhid_event ev;
 	int err;
 
 	if (data == NULL)
 		size = 0;
 
-	if (size > sizeof(ev.u.input.data))
-		size = sizeof(ev.u.input.data);
-
-	if (!idev->uhid_created) {
+	if (!bt_uhid_created(idev->uhid)) {
 		DBG("HID report (%zu bytes) dropped", size);
 		return false;
 	}
 
-	memset(&ev, 0, sizeof(ev));
-	ev.type = UHID_INPUT;
-	ev.u.input.size = size;
-
-	if (size > 0)
-		memcpy(ev.u.input.data, data, size);
-
-	err = bt_uhid_send(idev->uhid, &ev);
+	err = bt_uhid_input(idev->uhid, 0, data, size);
 	if (err < 0) {
-		error("bt_uhid_send: %s (%d)", strerror(-err), -err);
+		error("bt_uhid_input: %s (%d)", strerror(-err), -err);
 		return false;
 	}
 
@@ -326,6 +370,8 @@ static bool hidp_recv_intr_data(GIOChannel *chan, struct input_device *idev)
 		DBG("BT socket read returned 0 bytes");
 		return true;
 	}
+
+	input_device_idle_reset(idev);
 
 	hdr = data[0];
 	if (hdr != (HIDP_TRANS_DATA | HIDP_DATA_RTYPE_INPUT)) {
@@ -385,8 +431,7 @@ static gboolean intr_watch_cb(GIOChannel *chan, GIOCondition cond, gpointer data
 		virtual_cable_unplug(idev);
 
 	/* If connection abruptly ended, uhid might be not yet disconnected */
-	if (idev->uhid_created)
-		uhid_disconnect(idev);
+	uhid_disconnect(idev, false);
 
 	return FALSE;
 }
@@ -445,6 +490,7 @@ static void hidp_recv_ctrl_handshake(struct input_device *idev, uint8_t param)
 			timeout_remove(idev->report_req_timer);
 			idev->report_req_timer = 0;
 		}
+		uhid_send_set_report_reply(idev, idev->report_rsp_id, 0);
 		idev->report_rsp_id = 0;
 	}
 }
@@ -527,6 +573,8 @@ static bool hidp_recv_ctrl_message(GIOChannel *chan, struct input_device *idev)
 		DBG("BT socket read returned 0 bytes");
 		return true;
 	}
+
+	input_device_idle_reset(idev);
 
 	hdr = data[0];
 	type = hdr & HIDP_HEADER_TRANS_MASK;
@@ -625,7 +673,7 @@ static bool hidp_report_req_timeout(gpointer data)
 		break;
 	}
 
-	DBG("Device %s HIDP %s request timed out", address, req_type_str);
+	error("Device %s HIDP %s request timed out", address, req_type_str);
 
 	idev->report_req_pending = 0;
 	idev->report_req_timer = 0;
@@ -638,11 +686,14 @@ static void hidp_send_output(struct uhid_event *ev, void *user_data)
 {
 	struct input_device *idev = user_data;
 	uint8_t hdr = HIDP_TRANS_DATA | HIDP_DATA_RTYPE_OUTPUT;
+	bool sent;
 
 	DBG("");
 
-	hidp_send_intr_message(idev, hdr, ev->u.output.data,
+	sent = hidp_send_intr_message(idev, hdr, ev->u.output.data,
 						ev->u.output.size);
+	if (!sent)
+		uhid_disconnect(idev, true);
 }
 
 static void hidp_send_set_report(struct uhid_event *ev, void *user_data)
@@ -682,8 +733,11 @@ static void hidp_send_set_report(struct uhid_event *ev, void *user_data)
 			timeout_add_seconds(REPORT_REQ_TIMEOUT,
 					hidp_report_req_timeout, idev, NULL);
 		idev->report_rsp_id = ev->u.set_report.id;
-	} else
+	} else {
 		uhid_send_set_report_reply(idev, ev->u.set_report.id, EIO);
+		/* Force UHID_DESTROY on error */
+		uhid_disconnect(idev, true);
+	}
 }
 
 static void hidp_send_get_report(struct uhid_event *ev, void *user_data)
@@ -726,9 +780,12 @@ static void hidp_send_get_report(struct uhid_event *ev, void *user_data)
 						hidp_report_req_timeout, idev,
 						NULL);
 		idev->report_rsp_id = ev->u.get_report.id;
-	} else
+	} else {
 		uhid_send_get_report_reply(idev, NULL, 0, ev->u.get_report.id,
 									EIO);
+		/* Force UHID_DESTROY on error */
+		uhid_disconnect(idev, true);
+	}
 }
 
 static void epox_endian_quirk(unsigned char *data, int size)
@@ -941,28 +998,16 @@ static int ioctl_disconnect(struct input_device *idev, uint32_t flags)
 static int uhid_connadd(struct input_device *idev, struct hidp_connadd_req *req)
 {
 	int err;
-	struct uhid_event ev;
 
-	if (idev->uhid_created)
-		return 0;
+	if (bt_uhid_created(idev->uhid))
+		return bt_uhid_replay(idev->uhid);
 
-	/* create uHID device */
-	memset(&ev, 0, sizeof(ev));
-	ev.type = UHID_CREATE;
-	strncpy((char *) ev.u.create.name, req->name, sizeof(ev.u.create.name));
-	ba2strlc(&idev->src, (char *) ev.u.create.phys);
-	ba2strlc(&idev->dst, (char *) ev.u.create.uniq);
-	ev.u.create.vendor = req->vendor;
-	ev.u.create.product = req->product;
-	ev.u.create.version = req->version;
-	ev.u.create.country = req->country;
-	ev.u.create.bus = BUS_BLUETOOTH;
-	ev.u.create.rd_data = req->rd_data;
-	ev.u.create.rd_size = req->rd_size;
-
-	err = bt_uhid_send(idev->uhid, &ev);
+	err = bt_uhid_create(idev->uhid, req->name, &idev->src, &idev->dst,
+				req->vendor, req->product, req->version,
+				req->country, idev->type,
+				req->rd_data, req->rd_size);
 	if (err < 0) {
-		error("bt_uhid_send: %s", strerror(-err));
+		error("bt_uhid_create: %s", strerror(-err));
 		return err;
 	}
 
@@ -971,32 +1016,6 @@ static int uhid_connadd(struct input_device *idev, struct hidp_connadd_req *req)
 									idev);
 	bt_uhid_register(idev->uhid, UHID_SET_REPORT, hidp_send_set_report,
 									idev);
-
-	idev->uhid_created = true;
-
-	return err;
-}
-
-static int uhid_disconnect(struct input_device *idev)
-{
-	int err;
-	struct uhid_event ev;
-
-	if (!idev->uhid_created)
-		return 0;
-
-	bt_uhid_unregister_all(idev->uhid);
-
-	memset(&ev, 0, sizeof(ev));
-	ev.type = UHID_DESTROY;
-
-	err = bt_uhid_send(idev->uhid, &ev);
-	if (err < 0) {
-		error("bt_uhid_send: %s", strerror(-err));
-		return err;
-	}
-
-	idev->uhid_created = false;
 
 	return err;
 }
@@ -1042,6 +1061,7 @@ static gboolean encrypt_notify(GIOChannel *io, GIOCondition condition,
 static int hidp_add_connection(struct input_device *idev)
 {
 	struct hidp_connadd_req *req;
+	bool cable_pairing;
 	GError *gerr = NULL;
 	int err;
 
@@ -1065,8 +1085,11 @@ static int hidp_add_connection(struct input_device *idev)
 	if (device_name_known(idev->device))
 		device_get_name(idev->device, req->name, sizeof(req->name));
 
+	cable_pairing = device_is_cable_pairing(idev->device);
+
 	/* Make sure the device is bonded if required */
-	if (classic_bonded_only && !input_device_bonded(idev)) {
+	if (!cable_pairing && classic_bonded_only &&
+			!input_device_bonded(idev)) {
 		error("Rejected connection from !bonded device %s", idev->path);
 		goto cleanup;
 	}
@@ -1075,7 +1098,10 @@ static int hidp_add_connection(struct input_device *idev)
 	/* Some platforms may choose to require encryption for all devices */
 	/* Note that this only matters for pre 2.1 devices as otherwise the */
 	/* device is encrypted by default by the lower layers */
-	if (classic_bonded_only || req->subclass & 0x40) {
+	/* Don't enforce encryption for cable paired devices because they */
+	/* don't support it */
+	if (!cable_pairing && (classic_bonded_only ||
+				idev->type == BT_UHID_KEYBOARD)) {
 		if (!bt_io_set(idev->intr_io, &gerr,
 					BT_IO_OPT_SEC_LEVEL, BT_IO_SEC_MEDIUM,
 					BT_IO_OPT_INVALID)) {
@@ -1128,11 +1154,16 @@ static int connection_disconnect(struct input_device *idev, uint32_t flags)
 		shutdown(sock, SHUT_WR);
 	}
 
-	if (flags & (1 << HIDP_VIRTUAL_CABLE_UNPLUG))
+	if (flags & (1 << HIDP_VIRTUAL_CABLE_UNPLUG)) {
 		idev->virtual_cable_unplug = true;
+		if (idev->uhid)
+			hidp_send_ctrl_message(idev, HIDP_TRANS_HID_CONTROL |
+						HIDP_CTRL_VIRTUAL_CABLE_UNPLUG,
+						NULL, 0);
+	}
 
 	if (idev->uhid)
-		return uhid_disconnect(idev);
+		return uhid_disconnect(idev, false);
 	else
 		return ioctl_disconnect(idev, flags);
 }
@@ -1465,6 +1496,7 @@ static struct input_device *input_device_new(struct btd_service *service)
 	idev->service = btd_service_ref(service);
 	idev->device = btd_device_ref(device);
 	idev->path = g_strdup(path);
+	idev->type = bt_uhid_icon_to_type(btd_device_get_icon(device));
 
 	input_device_update_rec(idev);
 
@@ -1500,12 +1532,12 @@ int input_device_register(struct btd_service *service)
 	if (!idev)
 		return -EINVAL;
 
-	if (uhid_enabled) {
+	if (uhid_state) {
 		idev->uhid = bt_uhid_new_default();
 		if (!idev->uhid) {
-			error("bt_uhid_new_default: failed");
-			input_device_free(idev);
-			return -EIO;
+			DBG("bt_uhid_new_default failed, switching to kernel "
+			    "mode");
+			uhid_state = UHID_DISABLED;
 		}
 	}
 
@@ -1521,6 +1553,13 @@ int input_device_register(struct btd_service *service)
 
 	btd_service_set_user_data(service, idev);
 	device_set_wake_support(device, true);
+
+	if (device_is_cable_pairing(device)) {
+		struct btd_adapter *adapter = device_get_adapter(device);
+		const bdaddr_t *bdaddr = btd_adapter_get_address(adapter);
+
+		server_set_cable_pairing(bdaddr, true);
+	}
 
 	return 0;
 }
@@ -1598,7 +1637,7 @@ int input_device_set_channel(const bdaddr_t *src, const bdaddr_t *dst, int psm,
 	if (!idev)
 		return -ENOENT;
 
-	if (uhid_enabled)
+	if (uhid_state)
 		cond |= G_IO_IN;
 
 	switch (psm) {

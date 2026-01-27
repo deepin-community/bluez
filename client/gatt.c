@@ -4,6 +4,7 @@
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2014  Intel Corporation. All rights reserved.
+ *  Copyright 2024 NXP
  *
  *
  */
@@ -164,6 +165,7 @@ static void print_service_proxy(GDBusProxy *proxy, const char *description)
 	DBusMessageIter iter;
 	const char *uuid;
 	dbus_bool_t primary;
+	uint16_t handle;
 
 	if (g_dbus_proxy_get_property(proxy, "UUID", &iter) == FALSE)
 		return;
@@ -175,10 +177,16 @@ static void print_service_proxy(GDBusProxy *proxy, const char *description)
 
 	dbus_message_iter_get_basic(&iter, &primary);
 
+	if (g_dbus_proxy_get_property(proxy, "Handle", &iter) == FALSE)
+		return;
+
+	dbus_message_iter_get_basic(&iter, &handle);
+
 	memset(&service, 0, sizeof(service));
 	service.path = (char *) g_dbus_proxy_get_path(proxy);
 	service.uuid = (char *) uuid;
 	service.primary = primary;
+	service.handle = handle;
 
 	print_service(&service, description);
 }
@@ -252,15 +260,22 @@ static void print_characteristic(GDBusProxy *proxy, const char *description)
 	struct chrc chrc;
 	DBusMessageIter iter;
 	const char *uuid;
+	uint16_t handle;
 
 	if (g_dbus_proxy_get_property(proxy, "UUID", &iter) == FALSE)
 		return;
 
 	dbus_message_iter_get_basic(&iter, &uuid);
 
+	if (g_dbus_proxy_get_property(proxy, "Handle", &iter) == FALSE)
+		return;
+
+	dbus_message_iter_get_basic(&iter, &handle);
+
 	memset(&chrc, 0, sizeof(chrc));
 	chrc.path = (char *) g_dbus_proxy_get_path(proxy);
 	chrc.uuid = (char *) uuid;
+	chrc.handle = handle;
 
 	print_chrc(&chrc, description);
 }
@@ -346,15 +361,22 @@ static void print_descriptor(GDBusProxy *proxy, const char *description)
 	struct desc desc;
 	DBusMessageIter iter;
 	const char *uuid;
+	uint16_t handle;
 
 	if (g_dbus_proxy_get_property(proxy, "UUID", &iter) == FALSE)
 		return;
 
 	dbus_message_iter_get_basic(&iter, &uuid);
 
+	if (g_dbus_proxy_get_property(proxy, "Handle", &iter) == FALSE)
+		return;
+
+	dbus_message_iter_get_basic(&iter, &handle);
+
 	memset(&desc, 0, sizeof(desc));
 	desc.path = (char *) g_dbus_proxy_get_path(proxy);
 	desc.uuid = (char *) uuid;
+	desc.handle = handle;
 
 	print_desc(&desc, description);
 }
@@ -674,6 +696,8 @@ void gatt_read_local_attribute(char *data, int argc, char *argv[])
 		bt_shell_hexdump(&d->value[offset], d->value_len - offset);
 		return bt_shell_noninteractive_quit(EXIT_SUCCESS);
 	}
+
+	return bt_shell_noninteractive_quit(EXIT_FAILURE);
 }
 
 static uint8_t *str2bytearray(char *arg, size_t *val_len)
@@ -787,6 +811,8 @@ void gatt_write_local_attribute(char *data, int argc, char *argv[])
 	}
 
 	free(value);
+
+	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
 static char *attribute_generator(const char *text, int state, GList *source)
@@ -965,11 +991,15 @@ static int sock_send(struct io *io, struct iovec *iov, size_t iovlen)
 	struct msghdr msg;
 	int ret;
 
+	ret = io_get_fd(io);
+	if (ret < 0)
+		return ret;
+
 	memset(&msg, 0, sizeof(msg));
 	msg.msg_iov = iov;
 	msg.msg_iovlen = iovlen;
 
-	ret = sendmsg(io_get_fd(io), &msg, MSG_NOSIGNAL);
+	ret = sendmsg(ret, &msg, MSG_NOSIGNAL);
 	if (ret < 0) {
 		ret = -errno;
 		bt_shell_printf("sendmsg: %s", strerror(-ret));
@@ -1050,6 +1080,11 @@ static bool sock_read(struct io *io, void *user_data)
 
 	if (io != notify_io.io && !chrc)
 		return true;
+
+	if (fd < 0) {
+		bt_shell_printf("recvmsg: %s", strerror(-fd));
+		return false;
+	}
 
 	iov.iov_base = buf;
 	iov.iov_len = sizeof(buf);
@@ -1401,7 +1436,7 @@ static gboolean get_uuids(const GDBusPropertyTable *property,
 	dbus_message_iter_open_container(iter, DBUS_TYPE_ARRAY,
 				DBUS_TYPE_STRING_AS_STRING, &entry);
 
-	for (uuid = uuids; uuid; uuid = g_list_next(uuid->next))
+	for (uuid = uuids; uuid; uuid = g_list_next(uuid))
 		dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING,
 							&uuid->data);
 
@@ -1427,7 +1462,7 @@ void gatt_register_app(DBusConnection *conn, GDBusProxy *proxy,
 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
 	}
 
-	for (i = 0; i < argc; i++)
+	for (i = 1; i < argc; i++)
 		uuids = g_list_append(uuids, g_strdup(argv[i]));
 
 	if (uuids) {
@@ -1685,6 +1720,8 @@ static void service_set_primary(const char *input, void *user_data)
 		g_dbus_unregister_interface(service->conn, service->path,
 						SERVICE_INTERFACE);
 	}
+
+	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
 static uint16_t parse_handle(const char *arg)
@@ -1737,8 +1774,6 @@ void gatt_register_service(DBusConnection *conn, GDBusProxy *proxy,
 
 	bt_shell_prompt_input(service->path, "Primary (yes/no):",
 		 service_set_primary, service);
-
-	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
 static struct service *service_find(const char *pattern)
@@ -2761,6 +2796,8 @@ static void chrc_set_value(const char *input, void *user_data)
 	}
 
 	chrc->max_val_len = chrc->value_len;
+
+	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
 static gboolean attr_authorization_flag_exists(char **flags)
@@ -2817,8 +2854,6 @@ void gatt_register_chrc(DBusConnection *conn, GDBusProxy *proxy,
 	print_chrc(chrc, COLORED_NEW);
 
 	bt_shell_prompt_input(chrc->path, "Enter value:", chrc_set_value, chrc);
-
-	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
 static struct chrc *chrc_find(const char *pattern)
@@ -3176,7 +3211,7 @@ static void proxy_property_changed(GDBusProxy *proxy, const char *name,
 			chrc->path, bt_uuidstr_to_str(chrc->uuid), name);
 
 	if (!strcmp(name, "Value")) {
-		uint8_t *value = '\0';  /* don't pass NULL to write_value() */
+		uint8_t *value = NULL;
 		int len = 0;
 
 		if (iter && dbus_message_iter_get_arg_type(iter) ==
@@ -3187,9 +3222,13 @@ static void proxy_property_changed(GDBusProxy *proxy, const char *name,
 			dbus_message_iter_get_fixed_array(&array, &value, &len);
 		}
 
-		write_value(&chrc->value_len, &chrc->value, value, len,
-				0, chrc->max_val_len);
-		bt_shell_hexdump(value, len);
+		if (write_value(&chrc->value_len, &chrc->value, value, len,
+				0, chrc->max_val_len)) {
+			bt_shell_printf("Unable to update property value for "
+					"%s\n", name);
+		} else {
+			bt_shell_hexdump(value, len);
+		}
 	}
 
 	g_dbus_emit_property_changed(conn, chrc->path, CHRC_INTERFACE, name);

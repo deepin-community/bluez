@@ -122,7 +122,7 @@ struct setpath_data {
 	guint8 constants;
 } __attribute__ ((packed));
 
-static struct error_code {
+static const struct error_code {
 	guint8 code;
 	const char *name;
 } obex_errors[] = {
@@ -169,7 +169,7 @@ static struct error_code {
 
 const char *g_obex_strerror(guint8 err_code)
 {
-	struct error_code *error;
+	const struct error_code *error;
 
 	for (error = obex_errors; error->name != NULL; error++) {
 		if (error->code == err_code)
@@ -304,7 +304,7 @@ static void set_srmp(GObex *obex, guint8 srmp, gboolean outgoing)
 	if (config == NULL)
 		return;
 
-	/* Dont't reset if direction doesn't match */
+	/* Don't reset if direction doesn't match */
 	if (srmp > G_OBEX_SRMP_NEXT_WAIT && config->outgoing != outgoing)
 		return;
 
@@ -316,6 +316,15 @@ static void set_srm(GObex *obex, guint8 op, guint8 srm)
 {
 	struct srm_config *config = obex->srm;
 	gboolean enable;
+
+	switch (srm) {
+	case G_OBEX_SRM_ENABLE:
+	case G_OBEX_SRM_DISABLE:
+	case G_OBEX_SRM_INDICATE:
+		break;
+	default:
+		return;
+	}
 
 	if (config == NULL) {
 		if (srm == G_OBEX_SRM_DISABLE)
@@ -373,7 +382,7 @@ static void check_srm_final(GObex *obex, guint8 op)
 	case G_OBEX_OP_CONNECT:
 		return;
 	default:
-		if (op <= G_OBEX_RSP_CONTINUE)
+		if (op <= G_OBEX_RSP_CONTINUE || op == G_OBEX_OP_ABORT)
 			return;
 	}
 
@@ -1096,7 +1105,7 @@ static gboolean parse_response(GObex *obex, GObexPacket *rsp)
 		return final;
 
 	/*
-	 * Resposes have final bit set but in case of GET with SRM
+	 * Responses have final bit set but in case of GET with SRM
 	 * we should not remove the request since the remote side will
 	 * continue sending responses until the transfer is finished
 	 */
@@ -1423,7 +1432,7 @@ failed:
 	return FALSE;
 }
 
-static GDebugKey keys[] = {
+static const GDebugKey keys[] = {
 	{ "error",	G_OBEX_DEBUG_ERROR },
 	{ "command",	G_OBEX_DEBUG_COMMAND },
 	{ "transfer",	G_OBEX_DEBUG_TRANSFER },
@@ -1443,7 +1452,8 @@ GObex *g_obex_new(GIOChannel *io, GObexTransportType transport_type,
 		const char *env = g_getenv("GOBEX_DEBUG");
 
 		if (env) {
-			gobex_debug = g_parse_debug_string(env, keys, 7);
+			gobex_debug = g_parse_debug_string(env, keys,
+							G_N_ELEMENTS(keys));
 			g_setenv("G_MESSAGES_DEBUG", "gobex", FALSE);
 		} else
 			gobex_debug = G_OBEX_DEBUG_NONE;
@@ -1610,7 +1620,7 @@ guint g_obex_setpath(GObex *obex, const char *path, GObexResponseFunc func,
 
 	memset(&data, 0, sizeof(data));
 
-	if (path != NULL && strncmp("..", path, 2) == 0) {
+	if (path != NULL && strlen(path) >= 2 && strncmp("..", path, 2) == 0) {
 		data.flags = 0x03;
 		folder = (path[2] == '/') ? &path[3] : NULL;
 	} else {

@@ -10,7 +10,7 @@ Configure Bluetooth devices
           - Marcel Holtmann <marcel@holtmann.org>
           - Fabrizio Gennari <fabrizio.gennari@philips.com>
 :Version: BlueZ
-:Copyright: Free use of this software is granted under ther terms of the GNU
+:Copyright: Free use of this software is granted under the terms of the GNU
             Lesser General Public Licenses (LGPL).
 :Date: Nov 11, 2002
 :Manual section: 1
@@ -102,7 +102,7 @@ name [*name*]
 class [*class*]
     With  no *class*, prints class of device. Otherwise, sets class of device
     to *class*. *class* is a 24-bit hex number describing the class of device,
-    as specified in section 1.2 of the Bluetooth Assigned Numers document.
+    as specified in section 1.2 of the Bluetooth Assigned Numbers document.
 
 voice [*voice*]
     With no *voice*, prints voice setting. Otherwise, sets voice setting to

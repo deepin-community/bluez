@@ -1,0 +1,8 @@
+Tests: bluez-response
+Depends: bluez,
+         bluez-test-scripts,
+         python3-dbus:native
+Restrictions: allow-stderr,
+              isolation-container,
+              needs-root,
+              superficial

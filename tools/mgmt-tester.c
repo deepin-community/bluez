@@ -24,11 +24,11 @@
 
 #include <glib.h>
 
-#include "lib/bluetooth.h"
-#include "lib/hci.h"
-#include "lib/hci_lib.h"
-#include "lib/mgmt.h"
-#include "lib/l2cap.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/hci.h"
+#include "bluetooth/hci_lib.h"
+#include "bluetooth/mgmt.h"
+#include "bluetooth/l2cap.h"
 
 #include "monitor/bt.h"
 #include "emulator/vhci.h"
@@ -343,6 +343,7 @@ struct generic_data {
 	const void * (*expect_func)(uint16_t *len);
 	uint32_t expect_settings_set;
 	uint32_t expect_settings_unset;
+	uint32_t expect_settings_spontaneous;
 	uint16_t expect_alt_ev;
 	const void *expect_alt_ev_param;
 	bool (*verify_alt_ev_func)(const void *param, uint16_t length);
@@ -575,6 +576,20 @@ static void test_condition_complete(struct test_data *data)
 
 #define test_bredrle50(name, data, setup, func) \
 	test_bredrle50_full(name, data, setup, func, 2)
+
+#define test_bredrle52_full(name, data, setup, func, timeout) \
+	test_full(name, data, setup, func, timeout, HCIEMU_TYPE_BREDRLE52, \
+					0x0b, 0x0001beff, 0x00000080)
+
+#define test_bredrle52(name, data, setup, func) \
+	test_bredrle52_full(name, data, setup, func, 2)
+
+#define test_bredrle60_full(name, data, setup, func, timeout) \
+	test_full(name, data, setup, func, timeout, HCIEMU_TYPE_BREDRLE60, \
+					0x0e, 0x0001beff, 0x00000080)
+
+#define test_bredrle60(name, data, setup, func) \
+	test_bredrle60_full(name, data, setup, func, 2)
 
 #define test_hs_full(name, data, setup, func, timeout) \
 	test_full(name, data, setup, func, timeout, HCIEMU_TYPE_BREDRLE, \
@@ -1192,6 +1207,7 @@ static const struct generic_data set_bondable_on_invalid_index_test = {
 
 static const uint8_t set_discoverable_on_param[] = { 0x01, 0x00, 0x00 };
 static const uint8_t set_discoverable_timeout_param[] = { 0x01, 0x0a, 0x00 };
+static const uint8_t set_discoverable_timeout_1_param[] = { 0x01, 0x01, 0x00 };
 static const uint8_t set_discoverable_invalid_param[] = { 0x02, 0x00, 0x00 };
 static const uint8_t set_discoverable_off_param[] = { 0x00, 0x00, 0x00 };
 static const uint8_t set_discoverable_offtimeout_param[] = { 0x00, 0x01, 0x00 };
@@ -1288,6 +1304,36 @@ static const struct generic_data set_discoverable_on_success_test_2 = {
 	.expect_param = set_discoverable_on_settings_param_2,
 	.expect_len = sizeof(set_discoverable_on_settings_param_2),
 	.expect_settings_set = MGMT_SETTING_DISCOVERABLE,
+	.expect_hci_command = BT_HCI_CMD_WRITE_SCAN_ENABLE,
+	.expect_hci_param = set_discoverable_on_scan_enable_param,
+	.expect_hci_len = sizeof(set_discoverable_on_scan_enable_param),
+};
+
+static const struct generic_data set_discoverable_on_timeout_success_test_1 = {
+	.setup_settings = settings_powered_connectable,
+	.send_opcode = MGMT_OP_SET_DISCOVERABLE,
+	.send_param = set_discoverable_timeout_param,
+	.send_len = sizeof(set_discoverable_timeout_param),
+	.expect_status = MGMT_STATUS_SUCCESS,
+	.expect_param = set_discoverable_on_settings_param_2,
+	.expect_len = sizeof(set_discoverable_on_settings_param_2),
+	.expect_hci_command = BT_HCI_CMD_WRITE_SCAN_ENABLE,
+	.expect_hci_param = set_discoverable_on_scan_enable_param,
+	.expect_hci_len = sizeof(set_discoverable_on_scan_enable_param),
+};
+
+static const struct generic_data set_discoverable_on_timeout_success_test_2 = {
+	.setup_settings = settings_powered_connectable,
+	.send_opcode = MGMT_OP_SET_DISCOVERABLE,
+	.send_param = set_discoverable_timeout_1_param,
+	.send_len = sizeof(set_discoverable_timeout_1_param),
+	.expect_status = MGMT_STATUS_SUCCESS,
+	.expect_settings_set = MGMT_SETTING_DISCOVERABLE,
+	.expect_settings_spontaneous = MGMT_SETTING_POWERED |
+					MGMT_SETTING_CONNECTABLE |
+					MGMT_SETTING_BREDR,
+	.expect_param = set_discoverable_on_settings_param_2,
+	.expect_len = sizeof(set_discoverable_on_settings_param_2),
 	.expect_hci_command = BT_HCI_CMD_WRITE_SCAN_ENABLE,
 	.expect_hci_param = set_discoverable_on_scan_enable_param,
 	.expect_hci_len = sizeof(set_discoverable_on_scan_enable_param),
@@ -1688,53 +1734,6 @@ static const struct generic_data set_sc_only_on_success_test_2 = {
 	.expect_hci_len = sizeof(set_sc_on_write_sc_support_param),
 };
 
-static const char set_hs_on_param[] = { 0x01 };
-static const char set_hs_invalid_param[] = { 0x02 };
-static const char set_hs_garbage_param[] = { 0x01, 0x00 };
-static const char set_hs_settings_param_1[] = { 0xc0, 0x01, 0x00, 0x00 };
-
-static const struct generic_data set_hs_on_success_test = {
-	.setup_settings = settings_ssp,
-	.send_opcode = MGMT_OP_SET_HS,
-	.send_param = set_hs_on_param,
-	.send_len = sizeof(set_hs_on_param),
-	.expect_status = MGMT_STATUS_SUCCESS,
-	.expect_param = set_hs_settings_param_1,
-	.expect_len = sizeof(set_hs_settings_param_1),
-	.expect_settings_set = MGMT_SETTING_HS,
-};
-
-static const struct generic_data set_hs_on_invalid_param_test_1 = {
-	.setup_settings = settings_ssp,
-	.send_opcode = MGMT_OP_SET_HS,
-	.expect_status = MGMT_STATUS_INVALID_PARAMS,
-};
-
-static const struct generic_data set_hs_on_invalid_param_test_2 = {
-	.setup_settings = settings_ssp,
-	.send_opcode = MGMT_OP_SET_HS,
-	.send_param = set_hs_invalid_param,
-	.send_len = sizeof(set_hs_invalid_param),
-	.expect_status = MGMT_STATUS_INVALID_PARAMS,
-};
-
-static const struct generic_data set_hs_on_invalid_param_test_3 = {
-	.setup_settings = settings_ssp,
-	.send_opcode = MGMT_OP_SET_HS,
-	.send_param = set_hs_garbage_param,
-	.send_len = sizeof(set_hs_garbage_param),
-	.expect_status = MGMT_STATUS_INVALID_PARAMS,
-};
-
-static const struct generic_data set_hs_on_invalid_index_test = {
-	.setup_settings = settings_ssp,
-	.send_index_none = true,
-	.send_opcode = MGMT_OP_SET_HS,
-	.send_param = set_hs_on_param,
-	.send_len = sizeof(set_hs_on_param),
-	.expect_status = MGMT_STATUS_INVALID_INDEX,
-};
-
 static uint16_t settings_le[] = { MGMT_OP_SET_LE, 0 };
 
 static const char set_le_on_param[] = { 0x01 };
@@ -1743,6 +1742,7 @@ static const char set_le_invalid_param[] = { 0x02 };
 static const char set_le_garbage_param[] = { 0x01, 0x00 };
 static const char set_le_settings_param_1[] = { 0x80, 0x02, 0x00, 0x00 };
 static const char set_le_settings_param_2[] = { 0x81, 0x02, 0x00, 0x00 };
+static const char set_le_settings_param_4[] = { 0x81, 0x02, 0xfc, 0x01 };
 static const char set_le_on_write_le_host_param[] = { 0x01, 0x00 };
 
 static const struct generic_data set_le_on_success_test_1 = {
@@ -1777,6 +1777,20 @@ static const struct generic_data set_le_on_success_test_3 = {
 	.expect_status = MGMT_STATUS_SUCCESS,
 	.expect_param = set_le_settings_param_2,
 	.expect_len = sizeof(set_le_settings_param_2),
+	.expect_settings_set = MGMT_SETTING_LE,
+	.expect_hci_command = BT_HCI_CMD_WRITE_LE_HOST_SUPPORTED,
+	.expect_hci_param = set_le_on_write_le_host_param,
+	.expect_hci_len = sizeof(set_le_on_write_le_host_param),
+};
+
+static const struct generic_data set_le_on_success_test_4 = {
+	.setup_settings = settings_le,
+	.send_opcode = MGMT_OP_SET_POWERED,
+	.send_param = set_powered_on_param,
+	.send_len = sizeof(set_powered_on_param),
+	.expect_status = MGMT_STATUS_SUCCESS,
+	.expect_param = set_le_settings_param_4,
+	.expect_len = sizeof(set_le_settings_param_4),
 	.expect_settings_set = MGMT_SETTING_LE,
 	.expect_hci_command = BT_HCI_CMD_WRITE_LE_HOST_SUPPORTED,
 	.expect_hci_param = set_le_on_write_le_host_param,
@@ -1886,14 +1900,13 @@ static const char set_adv_set_local_name_param[260] = { 'T', 'e', 's', 't', ' ',
 							'n', 'a', 'm', 'e' };
 
 static const uint8_t set_adv_scan_rsp_data_name_1[] = {
-	0x0c, /* Scan rsp data len */
-	0x0b, /* Local name data len */
+	0x0b, /* Scan rsp data len */
+	0x0a, /* Local name data len */
 	0x09, /* Complete name */
 	0x54, 0x65, 0x73, 0x74, 0x20, 0x6e, 0x61, 0x6d, 0x65, /* "Test name" */
-	0x00, /* null */
 	/* padding */
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
 static const struct generic_data set_adv_on_local_name_test_1 = {
@@ -1926,17 +1939,16 @@ static const struct setup_mgmt_cmd set_advertising_mgmt_cmd_arr[] = {
 };
 
 static const uint8_t set_adv_scan_rsp_data_name_and_appearance[] = {
-	0x10, /* scan rsp data len */
+	0x0f, /* scan rsp data len */
 	0x03, /* appearance data len */
 	0x19, /* eir_appearance */
 	0x54, 0x65, /* appearance value */
-	0x0b, /* local name data len */
+	0x0a, /* local name data len */
 	0x09, /* complete name */
 	0x54, 0x65, 0x73, 0x74, 0x20, 0x6e, 0x61, 0x6d, 0x65, /* "test name" */
-	0x00, /* null */
 	/* padding */
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
 
@@ -3155,7 +3167,7 @@ static const void *pair_device_expect_param_func(uint16_t *len)
 
 static uint16_t settings_powered_bondable[] = { MGMT_OP_SET_BONDABLE,
 						MGMT_OP_SET_POWERED, 0 };
-static uint8_t auth_req_param[] = { 0x2a, 0x00 };
+static uint8_t auth_req_param[] = { 0x01, 0x00 };
 static uint8_t pair_device_pin[] = { 0x30, 0x30, 0x30, 0x30 }; /* "0000" */
 
 static const struct generic_data pair_device_success_test_1 = {
@@ -3216,7 +3228,7 @@ static const struct generic_data pair_device_power_off_test_1 = {
 	.send_opcode = MGMT_OP_PAIR_DEVICE,
 	.send_func = pair_device_send_param_func,
 	.force_power_off = true,
-	.expect_status = MGMT_STATUS_NOT_POWERED,
+	.expect_status = MGMT_STATUS_DISCONNECTED,
 	.expect_func = pair_device_expect_param_func,
 };
 
@@ -5668,7 +5680,7 @@ static const char ext_ctrl_info1[] = {
 	0x00, 0x00, 0x00, 0x01, 0xaa, 0x00, /* btaddr */
 	0x09, /* version */
 	0xf1, 0x05, /* manufacturer */
-	0xff, 0xbf, 0x01, 0x00, /* supported settings */
+	0xff, 0xbe, 0x01, 0x00, /* supported settings */
 	0x80, 0x00, 0x00, 0x00, /* current settings */
 	0x09, 0x00, /* eir length */
 	0x04, /* dev class length */
@@ -5708,7 +5720,7 @@ static const char ext_ctrl_info2[] = {
 	0x00, 0x00, 0x00, 0x01, 0xaa, 0x00, /* btaddr */
 	0x09, /* version */
 	0xf1, 0x05, /* manufacturer */
-	0xff, 0xbf, 0x01, 0x00, /* supported settings */
+	0xff, 0xbe, 0x01, 0x00, /* supported settings */
 	0x81, 0x02, 0x00, 0x00, /* current settings */
 	0x0D, 0x00, /* eir length */
 	0x04, /* dev class length */
@@ -5740,7 +5752,7 @@ static const char ext_ctrl_info3[] = {
 	0x00, 0x00, 0x00, 0x01, 0xaa, 0x00, /* btaddr */
 	0x09, /* version */
 	0xf1, 0x05, /* manufacturer */
-	0xff, 0xbf, 0x01, 0x00, /* supported settings */
+	0xff, 0xbe, 0x01, 0x00, /* supported settings */
 	0x80, 0x02, 0x00, 0x00, /* current settings */
 	0x16, 0x00, /* eir length */
 	0x04, /* dev class length */
@@ -5775,7 +5787,7 @@ static const char ext_ctrl_info4[] = {
 	0x00, 0x00, 0x00, 0x01, 0xaa, 0x00, /* btaddr */
 	0x09, /* version */
 	0xf1, 0x05, /* manufacturer */
-	0xff, 0xbf, 0x01, 0x00, /* supported settings */
+	0xff, 0xbe, 0x01, 0x00, /* supported settings */
 	0x80, 0x02, 0x00, 0x00, /* current settings */
 	0x1a, 0x00, /* eir length */
 	0x04, /* dev class length */
@@ -5829,7 +5841,7 @@ static const char ext_ctrl_info5[] = {
 	0x00, 0x00, 0x00, 0x01, 0xaa, 0x00, /* btaddr */
 	0x09, /* version */
 	0xf1, 0x05, /* manufacturer */
-	0xff, 0xbf, 0x01, 0x00, /* supported settings */
+	0xff, 0xbe, 0x01, 0x00, /* supported settings */
 	0x81, 0x02, 0x00, 0x00, /* current settings */
 	0x1a, 0x00, /* eir len */
 	0x04, /* dev class len */
@@ -6217,7 +6229,7 @@ static void setup_bthost(void)
 	if (data->hciemu_type == HCIEMU_TYPE_LE ||
 		test->client_enable_adv) {
 		if (data->hciemu_type >= HCIEMU_TYPE_BREDRLE50) {
-			bthost_set_ext_adv_params(bthost);
+			bthost_set_ext_adv_params(bthost, 0x00);
 			bthost_set_ext_adv_enable(bthost, 0x01);
 		} else
 			bthost_set_adv_enable(bthost, 0x01);
@@ -6240,7 +6252,7 @@ static void setup_pairing_acceptor(const void *test_data)
 	setup_bthost();
 }
 
-/* Generic callback for checking the mgmt evnet status
+/* Generic callback for checking the mgmt event status
  */
 static void generic_mgmt_status_callback(uint8_t status, uint16_t length,
 					const void *param, void *user_data)
@@ -7353,12 +7365,27 @@ static void command_generic_new_settings(uint16_t index, uint16_t length,
 					const void *param, void *user_data)
 {
 	struct test_data *data = tester_get_data();
+	const struct generic_data *test = data->test_data;
+	uint32_t settings;
 
-	tester_print("New settings event received");
+	if (length != 4) {
+		tester_warn("Invalid parameter size for new settings event");
+		tester_test_failed();
+		return;
+	}
+
+	settings = get_le32(param);
+	tester_print("New settings 0x%08x received (local)", settings);
 
 	mgmt_unregister(data->mgmt, data->mgmt_settings_id);
 
-	tester_test_failed();
+	if (!test->expect_settings_spontaneous) {
+		tester_test_failed();
+		return;
+	}
+
+	if (settings == test->expect_settings_spontaneous)
+		test_condition_complete(data);
 }
 
 static void command_generic_new_settings_alt(uint16_t index, uint16_t length,
@@ -7899,8 +7926,8 @@ static const uint8_t add_advertising_param_name[] = {
 };
 
 static const uint8_t set_scan_rsp_data_name_fits_in_scrsp[] = {
-	0x0c, /* Scan rsp data len */
-	0x0b, /* Local name data len */
+	0x0b, /* Scan rsp data len */
+	0x0a, /* Local name data len */
 	0x09, /* Complete name */
 	0x54, 0x65, 0x73, 0x74, 0x20, 0x6e, 0x61, 0x6d, 0x65, /* "Test name" */
 	/* padding */
@@ -7925,8 +7952,8 @@ static const struct generic_data add_advertising_name_fits_in_scrsp = {
 };
 
 static const uint8_t set_scan_rsp_data_shortened_name_fits[] = {
-	0x0d, /* Scan rsp data len */
-	0x0c, /* Local name data len */
+	0x0c, /* Scan rsp data len */
+	0x0b, /* Local name data len */
 	0x08, /* Short name */
 	0x54, 0x65, 0x73, 0x74, 0x20, 0x6e, 0x61, 0x6d, 0x65, 0x31,
 	/* "Test name1" */
@@ -7952,8 +7979,8 @@ static const struct generic_data add_advertising_shortened_name_in_scrsp = {
 };
 
 static const uint8_t set_scan_rsp_data_short_name_fits[] = {
-	0x07, /* Scan rsp data len */
-	0x06, /* Local name data len */
+	0x06, /* Scan rsp data len */
+	0x05, /* Local name data len */
 	0x08, /* Short name */
 	0x54, 0x65, 0x73, 0x74,
 	/* "Test*/
@@ -7993,16 +8020,16 @@ static const uint8_t add_advertising_param_name_data_ok[] = {
 };
 
 static const uint8_t set_scan_rsp_data_param_name_data_ok[] = {
-	0x1e, /* Scan rsp data len */
+	0x1d, /* Scan rsp data len */
 	/* scan rsp data */
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	0x0b, /* Local name data len */
+	0x0a, /* Local name data len */
 	0x09, /* Complete name */
-	0x54, 0x65, 0x73, 0x74, 0x20, 0x6e, 0x61, 0x6d, 0x65, 0x00,
+	0x54, 0x65, 0x73, 0x74, 0x20, 0x6e, 0x61, 0x6d, 0x65,
 	/* "Test name" */
 	/* padding */
-	0x00,
+	0x00, 0x00,
 };
 
 static const struct generic_data add_advertising_name_data_ok = {
@@ -8097,19 +8124,19 @@ static const struct setup_mgmt_cmd add_advertising_mgmt_cmd_arr[] = {
 };
 
 static const uint8_t set_scan_rsp_data_name_data_appear[] = {
-	0x1e, /* Scan rsp data len */
+	0x1d, /* Scan rsp data len */
 	0x03, /* appearance len */
 	0x19, /* EIR_APPEARANCE */
 	0x54, 0x65, /* appearance value */
 	/* scan rsp data */
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	0x00, 0x00, 0x00, 0x00,
-	0x0b, /* Local name data len */
+	0x0a, /* Local name data len */
 	0x09, /* Complete name */
-	0x54, 0x65, 0x73, 0x74, 0x20, 0x6e, 0x61, 0x6d, 0x65, 0x00,
+	0x54, 0x65, 0x73, 0x74, 0x20, 0x6e, 0x61, 0x6d, 0x65,
 	/* "Test name" */
 	/* padding */
-	0x00,
+	0x00, 0x00,
 };
 
 static const struct generic_data add_advertising_name_data_appear = {
@@ -8263,13 +8290,17 @@ static const uint8_t set_ext_adv_data_test1[] = {
 	0x74, 0x65, 0x73, 0x74, 0x31,	/* "test1" */
 };
 
+static const char set_powered_ext_adv_instance_settings_param[] = {
+	0x81, 0x02, 0x40, 0x00,
+};
+
 static const struct generic_data add_ext_advertising_success_pwron_data = {
 	.send_opcode = MGMT_OP_SET_POWERED,
 	.send_param = set_powered_on_param,
 	.send_len = sizeof(set_powered_on_param),
 	.expect_status = MGMT_STATUS_SUCCESS,
-	.expect_param = set_powered_adv_instance_settings_param,
-	.expect_len = sizeof(set_powered_adv_instance_settings_param),
+	.expect_param = set_powered_ext_adv_instance_settings_param,
+	.expect_len = sizeof(set_powered_ext_adv_instance_settings_param),
 	.expect_hci_command = BT_HCI_CMD_LE_SET_EXT_ADV_DATA,
 	.expect_hci_param = set_ext_adv_data_test1,
 	.expect_hci_len = sizeof(set_ext_adv_data_test1),
@@ -8288,7 +8319,7 @@ static const struct generic_data add_ext_advertising_success_pwron_enabled = {
 	.send_param = set_powered_on_param,
 	.send_len = sizeof(set_powered_on_param),
 	.expect_status = MGMT_STATUS_SUCCESS,
-	.expect_param = set_powered_adv_instance_settings_param,
+	.expect_param = set_powered_ext_adv_instance_settings_param,
 	.expect_len = sizeof(set_powered_adv_instance_settings_param),
 	.expect_hci_command = BT_HCI_CMD_LE_SET_EXT_ADV_ENABLE,
 	.expect_hci_param = set_ext_adv_on_set_adv_enable_param,
@@ -8305,13 +8336,15 @@ static const uint8_t set_ext_adv_data_txpwr[] = {
 	0x00,			/* tx power */
 };
 
+static const char set_ext_adv_settings_param[] = { 0x81, 0x06, 0x40, 0x00 };
+
 static const struct generic_data add_ext_advertising_success_4 = {
 	.send_opcode = MGMT_OP_SET_ADVERTISING,
 	.send_param = set_adv_on_param,
 	.send_len = sizeof(set_adv_on_param),
 	.expect_status = MGMT_STATUS_SUCCESS,
-	.expect_param = set_adv_settings_param_2,
-	.expect_len = sizeof(set_adv_settings_param_2),
+	.expect_param = set_ext_adv_settings_param,
+	.expect_len = sizeof(set_ext_adv_settings_param),
 	.expect_hci_command = BT_HCI_CMD_LE_SET_EXT_ADV_DATA,
 	.expect_hci_param = set_ext_adv_data_txpwr,
 	.expect_hci_len = sizeof(set_ext_adv_data_txpwr),
@@ -8322,8 +8355,8 @@ static const struct generic_data add_ext_advertising_success_5 = {
 	.send_param = set_adv_off_param,
 	.send_len = sizeof(set_adv_off_param),
 	.expect_status = MGMT_STATUS_SUCCESS,
-	.expect_param = set_powered_adv_instance_settings_param,
-	.expect_len = sizeof(set_powered_adv_instance_settings_param),
+	.expect_param = set_powered_ext_adv_instance_settings_param,
+	.expect_len = sizeof(set_powered_ext_adv_instance_settings_param),
 	.expect_hci_command = BT_HCI_CMD_LE_SET_EXT_ADV_DATA,
 	.expect_hci_param = set_ext_adv_data_test1,
 	.expect_hci_len = sizeof(set_ext_adv_data_test1),
@@ -8594,13 +8627,16 @@ static uint8_t preset_connectable_on_ext_adv_param[] = {
 	0x00,					/* Scan req notification */
 };
 
+static const char set_connectable_settings_param_4[] = {
+						0x83, 0x02, 0x40, 0x00 };
+
 static const struct generic_data add_ext_advertising_success_16 = {
 	.send_opcode = MGMT_OP_SET_CONNECTABLE,
 	.send_param = set_connectable_on_param,
 	.send_len = sizeof(set_connectable_on_param),
 	.expect_status = MGMT_STATUS_SUCCESS,
-	.expect_param = set_connectable_settings_param_3,
-	.expect_len = sizeof(set_connectable_settings_param_3),
+	.expect_param = set_connectable_settings_param_4,
+	.expect_len = sizeof(set_connectable_settings_param_4),
 	.expect_hci_command = BT_HCI_CMD_LE_SET_EXT_ADV_PARAMS,
 	.expect_hci_param = preset_connectable_on_ext_adv_param,
 	.expect_hci_len = sizeof(preset_connectable_on_ext_adv_param),
@@ -8624,13 +8660,15 @@ static uint8_t preset_connectable_off_ext_adv_param[] = {
 	0x00,					/* Scan req notification */
 };
 
+static const char set_le_settings_param_3[] = { 0x81, 0x02, 0x40, 0x00 };
+
 static const struct generic_data add_ext_advertising_success_17 = {
 	.send_opcode = MGMT_OP_SET_CONNECTABLE,
 	.send_param = set_connectable_off_param,
 	.send_len = sizeof(set_connectable_off_param),
 	.expect_status = MGMT_STATUS_SUCCESS,
-	.expect_param = set_le_settings_param_2,
-	.expect_len = sizeof(set_le_settings_param_2),
+	.expect_param = set_le_settings_param_3,
+	.expect_len = sizeof(set_le_settings_param_3),
 	.expect_hci_command = BT_HCI_CMD_LE_SET_EXT_ADV_PARAMS,
 	.expect_hci_param = preset_connectable_off_ext_adv_param,
 	.expect_hci_len = sizeof(preset_connectable_off_ext_adv_param),
@@ -8798,6 +8836,7 @@ static const struct hci_cmd_data multi_ext_adv_add_second_hci_cmds[] = {
 		.len = sizeof(le_set_ext_adv_enable_inst_2),
 		.param = le_set_ext_adv_enable_inst_2,
 	},
+	{},
 };
 
 static const struct generic_data multi_ext_advertising_add_second_2 = {
@@ -8845,6 +8884,7 @@ static const struct hci_cmd_data multi_ext_adv_remove_adv_hci_cmds[] = {
 		.len = sizeof(advertising_instance1_param),
 		.param = advertising_instance1_param,
 	},
+	{},
 };
 
 static const struct generic_data multi_ext_advertising_remove = {
@@ -8877,6 +8917,7 @@ static const struct hci_cmd_data multi_ext_adv_remove_all_adv_hci_cmds[] = {
 	{
 		.opcode = BT_HCI_CMD_LE_CLEAR_ADV_SETS,
 	},
+	{},
 };
 
 static const struct generic_data multi_ext_advertising_remove_all = {
@@ -8913,6 +8954,7 @@ static const struct hci_cmd_data multi_ext_adv_add_2_advs_hci_cmds[] = {
 		.len = sizeof(set_ext_adv_data_test1),
 		.param = set_ext_adv_data_test1,
 	},
+	{},
 };
 
 static const struct generic_data multi_ext_advertising_add_no_power = {
@@ -8920,8 +8962,8 @@ static const struct generic_data multi_ext_advertising_add_no_power = {
 	.send_param = set_powered_on_param,
 	.send_len = sizeof(set_powered_on_param),
 	.expect_status = MGMT_STATUS_SUCCESS,
-	.expect_param = set_powered_adv_instance_settings_param,
-	.expect_len = sizeof(set_powered_adv_instance_settings_param),
+	.expect_param = set_powered_ext_adv_instance_settings_param,
+	.expect_len = sizeof(set_powered_ext_adv_instance_settings_param),
 	.expect_hci_list = multi_ext_adv_add_2_advs_hci_cmds,
 };
 
@@ -9019,11 +9061,11 @@ static const uint8_t set_ext_scan_rsp_data_name_fits_in_scrsp[] = {
 	0x01,				/* handle */
 	0x03,				/* complete data */
 	0x01,				/* controller should not fragment */
-	0x0c, /* Scan rsp data len */
-	0x0b, /* Local name data len */
+	0x0b, /* Scan rsp data len */
+	0x0a, /* Local name data len */
 	0x09, /* Complete name */
 	/* "Test name" */
-	0x54, 0x65, 0x73, 0x74, 0x20, 0x6e, 0x61, 0x6d, 0x65, 0x00,
+	0x54, 0x65, 0x73, 0x74, 0x20, 0x6e, 0x61, 0x6d, 0x65,
 };
 
 static const struct generic_data add_ext_advertising_name_fits_in_scrsp = {
@@ -9046,11 +9088,11 @@ static const uint8_t set_ext_scan_rsp_data_shortened_name_fits[] = {
 	0x01,				/* handle */
 	0x03,				/* complete data */
 	0x01,				/* controller should not fragment */
-	0x0d, /* Scan rsp data len */
-	0x0c, /* Local name data len */
+	0x0c, /* Scan rsp data len */
+	0x0b, /* Local name data len */
 	0x08, /* Short name */
 	/* "Test name1" */
-	0x54, 0x65, 0x73, 0x74, 0x20, 0x6e, 0x61, 0x6d, 0x65, 0x31, 0x00,
+	0x54, 0x65, 0x73, 0x74, 0x20, 0x6e, 0x61, 0x6d, 0x65, 0x31,
 };
 
 static const struct generic_data add_ext_advertising_shortened_name_in_scrsp = {
@@ -9073,13 +9115,13 @@ static const uint8_t set_ext_scan_rsp_data_param_name_data_ok[] = {
 	0x01,				/* handle */
 	0x03,				/* complete data */
 	0x01,				/* controller should not fragment */
-	0x1e, /* Scan rsp data len */
+	0x1d, /* Scan rsp data len */
 	/* scan rsp data */
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	0x0b, /* Local name data len */
+	0x0a, /* Local name data len */
 	0x09, /* Complete name */
-	0x54, 0x65, 0x73, 0x74, 0x20, 0x6e, 0x61, 0x6d, 0x65, 0x00,
+	0x54, 0x65, 0x73, 0x74, 0x20, 0x6e, 0x61, 0x6d, 0x65,
 	/* "Test name" */
 };
 
@@ -9116,16 +9158,16 @@ static const uint8_t set_ext_scan_rsp_data_name_data_appear[] = {
 	0x01,				/* handle */
 	0x03,				/* complete data */
 	0x01,				/* controller should not fragment */
-	0x1e, /* Scan rsp data len */
+	0x1d, /* Scan rsp data len */
 	0x03, /* appearance len */
 	0x19, /* EIR_APPEARANCE */
 	0x54, 0x65, /* appearance value */
 	/* scan rsp data */
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	0x00, 0x00, 0x00, 0x00,
-	0x0b, /* Local name data len */
+	0x0a, /* Local name data len */
 	0x09, /* Complete name */
-	0x54, 0x65, 0x73, 0x74, 0x20, 0x6e, 0x61, 0x6d, 0x65, 0x00,
+	0x54, 0x65, 0x73, 0x74, 0x20, 0x6e, 0x61, 0x6d, 0x65,
 	/* "Test name" */
 };
 
@@ -9448,8 +9490,8 @@ static const struct generic_data add_ext_advertising_conn_on_1m = {
 	.send_param = set_connectable_on_param,
 	.send_len = sizeof(set_connectable_on_param),
 	.expect_status = MGMT_STATUS_SUCCESS,
-	.expect_param = set_connectable_settings_param_3,
-	.expect_len = sizeof(set_connectable_settings_param_3),
+	.expect_param = set_connectable_settings_param_4,
+	.expect_len = sizeof(set_connectable_settings_param_4),
 	.expect_hci_command = BT_HCI_CMD_LE_SET_EXT_ADV_PARAMS,
 	.expect_hci_param = preset_connectable_on_ext_pdu_adv_param,
 	.expect_hci_len = sizeof(preset_connectable_on_ext_pdu_adv_param),
@@ -9508,8 +9550,8 @@ static const struct generic_data add_ext_advertising_conn_off_1m = {
 	.send_param = set_connectable_off_param,
 	.send_len = sizeof(set_connectable_off_param),
 	.expect_status = MGMT_STATUS_SUCCESS,
-	.expect_param = set_le_settings_param_2,
-	.expect_len = sizeof(set_le_settings_param_2),
+	.expect_param = set_le_settings_param_3,
+	.expect_len = sizeof(set_le_settings_param_3),
 	.expect_hci_command = BT_HCI_CMD_LE_SET_EXT_ADV_PARAMS,
 	.expect_hci_param = preset_connectable_off_ext_1m_adv_param,
 	.expect_hci_len = sizeof(preset_connectable_off_ext_1m_adv_param),
@@ -9696,8 +9738,8 @@ static const char start_discovery_ext_scan_param[] = {
 	0x12, 0x00,		/* Interval */
 	0x12, 0x00,		/* Window */
 	0x01,			/* Type */
-	0x12, 0x00,		/* Interval */
-	0x12, 0x00,		/* Window */
+	0x36, 0x00,		/* Interval */
+	0x36, 0x00,		/* Window */
 };
 
 static const struct generic_data start_discovery_le_ext_scan_param = {
@@ -9778,8 +9820,8 @@ static const char start_discovery_valid_coded_scan_param[] = {
 	0x12, 0x00,		/* Interval */
 	0x12, 0x00,		/* Window */
 	0x01,			/* Type */
-	0x12, 0x00,		/* Interval */
-	0x12, 0x00,		/* Window */
+	0x36, 0x00,		/* Interval */
+	0x36, 0x00,		/* Window */
 };
 
 static const struct generic_data start_discovery_le_coded_scan_param = {
@@ -9809,8 +9851,8 @@ static const char start_discovery_valid_1m_2m_coded_scan_param[] = {
 	0x12, 0x00,		/* Interval */
 	0x12, 0x00,		/* Window */
 	0x01,			/* Type */
-	0x12, 0x00,		/* Interval */
-	0x12, 0x00,		/* Window */
+	0x36, 0x00,		/* Interval */
+	0x36, 0x00,		/* Window */
 };
 
 static const struct generic_data start_discovery_le_1m_coded_scan_param = {
@@ -9871,8 +9913,8 @@ static const uint8_t get_dev_flags_param[] = {
 static const uint8_t get_dev_flags_rsp_param[] = {
 	0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc,	/* Address */
 	0x00,					/* Type */
-	0x01, 0x00, 0x00, 0x00,			/* Supported Flages */
-	0x00, 0x00, 0x00, 0x00,			/* Current Flages */
+	0x07, 0x00, 0x00, 0x00,			/* Supported Flags */
+	0x00, 0x00, 0x00, 0x00,			/* Current Flags */
 };
 
 static const struct generic_data get_dev_flags_success = {
@@ -9923,7 +9965,7 @@ static void setup_get_dev_flags(const void *test_data)
 static const uint8_t set_dev_flags_param[] = {
 	0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc,	/* Address */
 	0x00,					/* Type */
-	0x01, 0x00, 0x00, 0x00,			/* Current Flages */
+	0x01, 0x00, 0x00, 0x00,			/* Current Flags */
 };
 
 static const uint8_t set_dev_flags_rsp_param[] = {
@@ -9934,8 +9976,8 @@ static const uint8_t set_dev_flags_rsp_param[] = {
 static const uint8_t dev_flags_changed_param[] = {
 	0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc,	/* Address */
 	0x00,					/* Type */
-	0x01, 0x00, 0x00, 0x00,			/* Supported Flages */
-	0x01, 0x00, 0x00, 0x00,			/* Current Flages */
+	0x07, 0x00, 0x00, 0x00,			/* Supported Flags */
+	0x01, 0x00, 0x00, 0x00,			/* Current Flags */
 };
 
 static const struct generic_data set_dev_flags_success = {
@@ -9965,7 +10007,7 @@ static const struct generic_data set_dev_flags_fail_1 = {
 static const uint8_t set_dev_flags_param_fail_2[] = {
 	0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc,	/* Address */
 	0x00,					/* Type */
-	0x03, 0x00, 0x00, 0x00,			/* Current Flages */
+	0xff, 0x00, 0x00, 0x00,			/* Current Flags */
 };
 
 static const struct generic_data set_dev_flags_fail_2 = {
@@ -9980,7 +10022,7 @@ static const struct generic_data set_dev_flags_fail_2 = {
 static const uint8_t set_dev_flags_param_fail_3[] = {
 	0x11, 0x34, 0x56, 0x78, 0x9a, 0xbc,	/* Address */
 	0x00,					/* Type */
-	0x01, 0x00, 0x00, 0x00,			/* Current Flages */
+	0x01, 0x00, 0x00, 0x00,			/* Current Flags */
 };
 
 static const uint8_t set_dev_flags_rsp_param_fail_3[] = {
@@ -9998,15 +10040,11 @@ static const struct generic_data set_dev_flags_fail_3 = {
 };
 
 static const uint8_t read_exp_feat_param_success[] = {
-	0x05, 0x00,				/* Feature Count */
+	0x04, 0x00,				/* Feature Count */
 	0xd6, 0x49, 0xb0, 0xd1, 0x28, 0xeb,	/* UUID - Simultaneous */
 	0x27, 0x92, 0x96, 0x46, 0xc0, 0x42,	/* Central Peripheral */
 	0xb5, 0x10, 0x1b, 0x67,
 	0x00, 0x00, 0x00, 0x00,			/* Flags */
-	0x04, 0x00, 0x13, 0xac, 0x42, 0x02,	/* UUID - LL Privacy */
-	0xde, 0xb3, 0xea, 0x11, 0x73, 0xc2,
-	0x48, 0xa1, 0xc0, 0x15,
-	0x02, 0x00, 0x00, 0x00,			/* Flags */
 	0xaf, 0x29, 0xc6, 0x66, 0xac, 0x5f,	/* UUID - Codec Offload */
 	0x1a, 0x88, 0xb9, 0x4f, 0x7f, 0xee,
 	0xce, 0x5a, 0x69, 0xa6,
@@ -10049,24 +10087,6 @@ static const struct generic_data read_exp_feat_success_index_none = {
 	.expect_len = sizeof(read_exp_feat_param_success_index_none),
 };
 
-static uint16_t settings_powered_le_privacy[] = { MGMT_OP_SET_LE,
-						MGMT_OP_SET_PRIVACY,
-						MGMT_OP_SET_POWERED, 0 };
-
-static const uint8_t set_exp_feat_param_ll_privacy[] = {
-	0x04, 0x00, 0x13, 0xac, 0x42, 0x02,	/* UUID - LL Privacy */
-	0xde, 0xb3, 0xea, 0x11, 0x73, 0xc2,
-	0x48, 0xa1, 0xc0, 0x15,
-	0x01,					/* Action - enable */
-};
-
-static const uint8_t set_exp_feat_rsp_param_ll_privacy[] = {
-	0x04, 0x00, 0x13, 0xac, 0x42, 0x02,	/* UUID - LL Privacy */
-	0xde, 0xb3, 0xea, 0x11, 0x73, 0xc2,
-	0x48, 0xa1, 0xc0, 0x15,
-	0x03, 0x00, 0x00, 0x00,			/* Action - enable */
-};
-
 static const uint8_t set_exp_feat_param_offload_codec[] = {
 	0xaf, 0x29, 0xc6, 0x66, 0xac, 0x5f,	/* UUID - Codec Offload */
 	0x1a, 0x88, 0xb9, 0x4f, 0x7f, 0xee,
@@ -10079,17 +10099,6 @@ static const uint8_t set_exp_feat_rsp_param_offload_codec[] = {
 	0x1a, 0x88, 0xb9, 0x4f, 0x7f, 0xee,
 	0xce, 0x5a, 0x69, 0xa6,
 	0x01, 0x00, 0x00, 0x00,			/* Action - enable */
-};
-
-static const struct generic_data set_exp_feat_enable_ll_privacy = {
-	.send_opcode = MGMT_OP_SET_EXP_FEATURE,
-	.send_param = set_exp_feat_param_ll_privacy,
-	.send_len = sizeof(set_exp_feat_param_ll_privacy),
-	.expect_status = MGMT_STATUS_SUCCESS,
-	.expect_param = set_exp_feat_rsp_param_ll_privacy,
-	.expect_len = sizeof(set_exp_feat_rsp_param_ll_privacy),
-	.expect_alt_ev = MGMT_EV_EXP_FEATURE_CHANGE,
-	.expect_alt_ev_len = sizeof(struct mgmt_ev_exp_feature_changed),
 };
 
 static void read_exp_feature_callback(uint8_t status, uint16_t length,
@@ -10109,8 +10118,8 @@ static void setup_set_exp_feature_alt(const void *test_data)
 {
 	struct test_data *data = tester_get_data();
 
-	/* Send the Read Experiemental Features Information command to receive
-	 * the Experiemental Feature Changed event
+	/* Send the Read Experimental Features Information command to receive
+	 * the Experimental Feature Changed event
 	 */
 	mgmt_send(data->mgmt_alt, MGMT_OP_READ_EXP_FEATURES_INFO,
 			data->mgmt_index, 0, NULL,
@@ -10140,18 +10149,10 @@ static const struct generic_data set_exp_feat_disable = {
 	.expect_len = sizeof(set_exp_feat_rsp_param_disable),
 };
 
-static const struct generic_data set_exp_feat_rejected = {
-	.setup_settings = settings_powered_le_privacy,
-	.send_opcode = MGMT_OP_SET_EXP_FEATURE,
-	.send_param = set_exp_feat_param_ll_privacy,
-	.send_len = sizeof(set_exp_feat_param_ll_privacy),
-	.expect_status = MGMT_STATUS_REJECTED,
-};
-
 static const uint8_t set_exp_feat_param_invalid[] = {
-	0x04, 0x00, 0x13, 0xac, 0x42, 0x02,	/* UUID - LL Privacy */
-	0xde, 0xb3, 0xea, 0x11, 0x73, 0xc2,
-	0x48, 0xa1, 0xc0, 0x15,
+	0xaf, 0x29, 0xc6, 0x66, 0xac, 0x5f,	/* UUID - Codec Offload */
+	0x1a, 0x88, 0xb9, 0x4f, 0x7f, 0xee,
+	0xce, 0x5a, 0x69, 0xa6,
 	0xff,					/* Action - invalid */
 };
 
@@ -10220,11 +10221,6 @@ static const uint8_t add_device_le_public_param_4[] = {
 	0x44, 0x44, 0x44, 0x44, 0x55, 0x66,	/* BDADDR */
 	0x01,					/* Type - LE Public */
 	0x00,					/* Action - Background scan */
-};
-
-static const uint8_t add_device_rsp_le_public_4[] =  {
-	0x44, 0x44, 0x44, 0x44, 0x55, 0x66,	/* BDADDR */
-	0x01,					/* Type - LE Public */
 };
 
 static const char load_irks_2_devices_param[] = {
@@ -10337,21 +10333,40 @@ static const struct generic_data ll_privacy_add_device_1 = {
 };
 
 static uint16_t settings_le_privacy_ll_privacy[] = { MGMT_OP_SET_LE,
-					MGMT_OP_SET_PRIVACY,
-					MGMT_OP_SET_EXP_FEATURE, 0 };
+					MGMT_OP_SET_PRIVACY, 0 };
 
-static const struct generic_data ll_privacy_add_device_2 = {
+static const uint8_t set_device_flags_param_1[] = {
+	0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc,	/* BDADDR */
+	0x01,					/* Type - LE Public */
+	0x06, 0x00, 0x00, 0x00			/* Flags -
+						 * Device Privacy
+						 * Address Resolution
+						 */
+};
+
+static const uint8_t set_device_flags_rsp[] =  {
+	0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc,	/* BDADDR */
+	0x01					/* Type - LE Public */
+};
+
+static const uint8_t device_flags_changed_params_1[] = {
+	0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc,	/* BDADDR */
+	0x01,					/* Type - LE Public */
+	0x07, 0x00, 0x00, 0x00,			/* Supported Flags */
+	0x06, 0x00, 0x00, 0x00			/* Current Flags */
+};
+
+static const struct generic_data ll_privacy_set_flags_1 = {
 	.setup_settings = settings_le_privacy_ll_privacy,
-	.setup_exp_feat_param = set_exp_feat_param_ll_privacy,
-	.send_opcode = MGMT_OP_ADD_DEVICE,
-	.send_param = add_device_le_public_param_1,
-	.send_len = sizeof(add_device_le_public_param_1),
-	.expect_param = add_device_rsp_le_public,
-	.expect_len = sizeof(add_device_rsp_le_public),
+	.send_opcode = MGMT_OP_SET_DEVICE_FLAGS,
+	.send_param = set_device_flags_param_1,
+	.send_len = sizeof(set_device_flags_param_1),
+	.expect_param = set_device_flags_rsp,
+	.expect_len = sizeof(set_device_flags_rsp),
 	.expect_status = MGMT_STATUS_SUCCESS,
-	.expect_alt_ev = MGMT_EV_DEVICE_ADDED,
-	.expect_alt_ev_param = add_device_le_public_param_1,
-	.expect_alt_ev_len = sizeof(add_device_le_public_param_1),
+	.expect_alt_ev = MGMT_EV_DEVICE_FLAGS_CHANGED,
+	.expect_alt_ev_param = device_flags_changed_params_1,
+	.expect_alt_ev_len = sizeof(device_flags_changed_params_1),
 	.expect_hci_command = BT_HCI_CMD_LE_ADD_TO_RESOLV_LIST,
 	.expect_hci_param = le_add_to_resolv_list_param,
 	.expect_hci_len = sizeof(le_add_to_resolv_list_param),
@@ -10369,35 +10384,29 @@ static const struct hci_cmd_data ll_privacy_add_device_3_hci_list[] = {
 		.len = sizeof(le_add_to_resolv_list_param),
 	},
 	{
-		.opcode = BT_HCI_CMD_LE_ADD_TO_ACCEPT_LIST,
-		.param = le_add_to_accept_list_param,
-		.len = sizeof(le_add_to_accept_list_param),
-	},
-	{
 		.opcode = BT_HCI_CMD_LE_SET_RESOLV_ENABLE,
 		.param = set_resolv_on_param,
 		.len = sizeof(set_resolv_on_param),
 	},
+	{},
 };
 
-static const struct generic_data ll_privacy_add_device_3 = {
+static const struct generic_data ll_privacy_set_flags_2 = {
 	.setup_settings = settings_le_privacy_ll_privacy,
-	.setup_exp_feat_param = set_exp_feat_param_ll_privacy,
-	.send_opcode = MGMT_OP_ADD_DEVICE,
-	.send_param = add_device_le_public_param_1,
-	.send_len = sizeof(add_device_le_public_param_1),
-	.expect_param = add_device_rsp_le,
-	.expect_len = sizeof(add_device_rsp_le),
+	.send_opcode = MGMT_OP_SET_DEVICE_FLAGS,
+	.send_param = set_device_flags_param_1,
+	.send_len = sizeof(set_device_flags_param_1),
+	.expect_param = set_device_flags_rsp,
+	.expect_len = sizeof(set_device_flags_rsp),
 	.expect_status = MGMT_STATUS_SUCCESS,
-	.expect_alt_ev = MGMT_EV_DEVICE_ADDED,
-	.expect_alt_ev_param = add_device_le_public_param_1,
-	.expect_alt_ev_len = sizeof(add_device_le_public_param_1),
+	.expect_alt_ev = MGMT_EV_DEVICE_FLAGS_CHANGED,
+	.expect_alt_ev_param = device_flags_changed_params_1,
+	.expect_alt_ev_len = sizeof(device_flags_changed_params_1),
 	.expect_hci_list = ll_privacy_add_device_3_hci_list,
 };
 
-static const struct generic_data ll_privacy_add_device_4 = {
+static const struct generic_data ll_privacy_add_device_2 = {
 	.setup_settings = settings_le_privacy_ll_privacy,
-	.setup_exp_feat_param = set_exp_feat_param_ll_privacy,
 	.send_opcode = MGMT_OP_ADD_DEVICE,
 	.send_param = add_device_le_public_param_2,
 	.send_len = sizeof(add_device_le_public_param_2),
@@ -10412,43 +10421,82 @@ static const struct generic_data ll_privacy_add_device_4 = {
 	.expect_hci_len = sizeof(le_add_to_white_list_param_2),
 };
 
-static const struct generic_data ll_privacy_add_device_5 = {
+static const uint8_t set_device_flags_param_2[] = {
+	0x11, 0x22, 0x33, 0x44, 0x55, 0x66,	/* BDADDR */
+	0x01,					/* Type - LE Public */
+	0x06, 0x00, 0x00, 0x00			/* Flags -
+						 * Device Privacy
+						 * Address Resolution
+						 */
+};
+
+static const uint8_t device_flags_changed_params_2[] = {
+	0x11, 0x22, 0x33, 0x44, 0x55, 0x66,	/* BDADDR */
+	0x01,					/* Type - LE Public */
+	0x07, 0x00, 0x00, 0x00,			/* Supported Flags */
+	0x06, 0x00, 0x00, 0x00			/* Current Flags */
+};
+
+static const uint8_t set_device_flags_rsp_2[] =  {
+	0x11, 0x22, 0x33, 0x44, 0x55, 0x66,	/* BDADDR */
+	0x01					/* Type - LE Public */
+};
+
+static const struct generic_data ll_privacy_set_flags_3 = {
 	.setup_settings = settings_le_privacy_ll_privacy,
-	.setup_exp_feat_param = set_exp_feat_param_ll_privacy,
-	.send_opcode = MGMT_OP_ADD_DEVICE,
-	.send_param = add_device_le_public_param_2,
-	.send_len = sizeof(add_device_le_public_param_2),
-	.expect_param = add_device_rsp_le_public_2,
-	.expect_len = sizeof(add_device_rsp_le_public_2),
+	.send_opcode = MGMT_OP_SET_DEVICE_FLAGS,
+	.send_param = set_device_flags_param_2,
+	.send_len = sizeof(set_device_flags_param_2),
+	.expect_param = set_device_flags_rsp_2,
+	.expect_len = sizeof(set_device_flags_rsp_2),
 	.expect_status = MGMT_STATUS_SUCCESS,
-	.expect_alt_ev = MGMT_EV_DEVICE_ADDED,
-	.expect_alt_ev_param = add_device_le_public_param_2,
-	.expect_alt_ev_len = sizeof(add_device_le_public_param_2),
+	.expect_alt_ev = MGMT_EV_DEVICE_FLAGS_CHANGED,
+	.expect_alt_ev_param = device_flags_changed_params_2,
+	.expect_alt_ev_len = sizeof(device_flags_changed_params_2),
 	.expect_hci_command = BT_HCI_CMD_LE_ADD_TO_RESOLV_LIST,
 	.expect_hci_param = le_add_to_resolv_list_param_2,
 	.expect_hci_len = sizeof(le_add_to_resolv_list_param_2),
 };
 
-static const struct generic_data ll_privacy_add_device_6 = {
+static const uint8_t set_device_flags_param_4[] = {
+	0x44, 0x44, 0x44, 0x44, 0x55, 0x66,	/* BDADDR */
+	0x01,					/* Type - LE Public */
+	0x06, 0x00, 0x00, 0x00			/* Flags -
+						 * Device Privacy
+						 * Address Resolution
+						 */
+};
+
+static const uint8_t device_flags_changed_params_4[] = {
+	0x44, 0x44, 0x44, 0x44, 0x55, 0x66,	/* BDADDR */
+	0x01,					/* Type - LE Public */
+	0x07, 0x00, 0x00, 0x00,			/* Supported Flags */
+	0x06, 0x00, 0x00, 0x00			/* Current Flags */
+};
+
+static const uint8_t set_device_flags_rsp_4[] =  {
+	0x44, 0x44, 0x44, 0x44, 0x55, 0x66,	/* BDADDR */
+	0x01					/* Type - LE Public */
+};
+
+static const struct generic_data ll_privacy_set_flags_4 = {
 	.setup_settings = settings_le_privacy_ll_privacy,
-	.setup_exp_feat_param = set_exp_feat_param_ll_privacy,
-	.send_opcode = MGMT_OP_ADD_DEVICE,
-	.send_param = add_device_le_public_param_4,
-	.send_len = sizeof(add_device_le_public_param_4),
-	.expect_param = add_device_rsp_le_public_4,
-	.expect_len = sizeof(add_device_rsp_le_public_4),
+	.send_opcode = MGMT_OP_SET_DEVICE_FLAGS,
+	.send_param = set_device_flags_param_4,
+	.send_len = sizeof(set_device_flags_param_4),
+	.expect_param = set_device_flags_rsp_4,
+	.expect_len = sizeof(set_device_flags_rsp_4),
 	.expect_status = MGMT_STATUS_SUCCESS,
-	.expect_alt_ev = MGMT_EV_DEVICE_ADDED,
-	.expect_alt_ev_param = add_device_le_public_param_4,
-	.expect_alt_ev_len = sizeof(add_device_le_public_param_4),
+	.expect_alt_ev = MGMT_EV_DEVICE_FLAGS_CHANGED,
+	.expect_alt_ev_param = device_flags_changed_params_4,
+	.expect_alt_ev_len = sizeof(device_flags_changed_params_4),
 	.expect_hci_command = BT_HCI_CMD_LE_ADD_TO_RESOLV_LIST,
 	.expect_hci_param = le_add_to_resolv_list_param_4,
 	.expect_hci_len = sizeof(le_add_to_resolv_list_param_4),
 };
 
-static const struct generic_data ll_privacy_add_device_7 = {
+static const struct generic_data ll_privacy_add_device_3 = {
 	.setup_settings = settings_le_privacy_ll_privacy,
-	.setup_exp_feat_param = set_exp_feat_param_ll_privacy,
 	.send_opcode = MGMT_OP_ADD_DEVICE,
 	.send_param = add_device_le_public_param_3,
 	.send_len = sizeof(add_device_le_public_param_3),
@@ -10467,9 +10515,8 @@ static const char set_ext_adv_disable[] = {
 	0x00, 0x00,
 };
 
-static const struct generic_data ll_privacy_add_device_8 = {
+static const struct generic_data ll_privacy_add_4 = {
 	.setup_settings = settings_le_privacy_ll_privacy,
-	.setup_exp_feat_param = set_exp_feat_param_ll_privacy,
 	.send_opcode = MGMT_OP_ADD_DEVICE,
 	.send_param = add_device_le_public_param_3,
 	.send_len = sizeof(add_device_le_public_param_3),
@@ -10484,7 +10531,7 @@ static const struct generic_data ll_privacy_add_device_8 = {
 	.expect_hci_len = sizeof(set_ext_adv_disable),
 };
 
-static const struct hci_cmd_data ll_privacy_add_device_9_hci_list[] = {
+static const struct hci_cmd_data ll_privacy_set_flags_5_hci_list[] = {
 	{
 		.opcode = BT_HCI_CMD_LE_SET_EXT_ADV_ENABLE,
 		.len = sizeof(set_ext_adv_disable),
@@ -10495,26 +10542,25 @@ static const struct hci_cmd_data ll_privacy_add_device_9_hci_list[] = {
 		.len = sizeof(le_add_to_resolv_list_param),
 		.param = le_add_to_resolv_list_param
 	},
+	{},
 };
 
-static const struct generic_data ll_privacy_add_device_9 = {
+static const struct generic_data ll_privacy_set_flags_5 = {
 	.setup_settings = settings_le_privacy_ll_privacy,
-	.setup_exp_feat_param = set_exp_feat_param_ll_privacy,
-	.send_opcode = MGMT_OP_ADD_DEVICE,
-	.send_param = add_device_le_public_param_1,
-	.send_len = sizeof(add_device_le_public_param_1),
-	.expect_param = add_device_rsp_le_public,
-	.expect_len = sizeof(add_device_rsp_le_public),
+	.send_opcode = MGMT_OP_SET_DEVICE_FLAGS,
+	.send_param = set_device_flags_param_1,
+	.send_len = sizeof(set_device_flags_param_1),
+	.expect_param = set_device_flags_rsp,
+	.expect_len = sizeof(set_device_flags_rsp),
 	.expect_status = MGMT_STATUS_SUCCESS,
-	.expect_alt_ev = MGMT_EV_DEVICE_ADDED,
-	.expect_alt_ev_param = add_device_le_public_param_1,
-	.expect_alt_ev_len = sizeof(add_device_le_public_param_1),
-	.expect_hci_list = ll_privacy_add_device_9_hci_list,
+	.expect_alt_ev = MGMT_EV_DEVICE_FLAGS_CHANGED,
+	.expect_alt_ev_param = device_flags_changed_params_1,
+	.expect_alt_ev_len = sizeof(device_flags_changed_params_1),
+	.expect_hci_list = ll_privacy_set_flags_5_hci_list,
 };
 
 static const struct generic_data ll_privacy_remove_device_1 = {
 	.setup_settings = settings_le_privacy_ll_privacy,
-	.setup_exp_feat_param = set_exp_feat_param_ll_privacy,
 	.send_opcode = MGMT_OP_REMOVE_DEVICE,
 	.send_param = remove_device_param_2,
 	.send_len = sizeof(remove_device_param_2),
@@ -10531,7 +10577,6 @@ static const struct generic_data ll_privacy_remove_device_1 = {
 
 static const struct generic_data ll_privacy_remove_device_2 = {
 	.setup_settings = settings_le_privacy_ll_privacy,
-	.setup_exp_feat_param = set_exp_feat_param_ll_privacy,
 	.send_opcode = MGMT_OP_REMOVE_DEVICE,
 	.send_param = remove_device_param_2,
 	.send_len = sizeof(remove_device_param_2),
@@ -10548,7 +10593,6 @@ static const struct generic_data ll_privacy_remove_device_2 = {
 
 static const struct generic_data ll_privacy_remove_device_3 = {
 	.setup_settings = settings_le_privacy_ll_privacy,
-	.setup_exp_feat_param = set_exp_feat_param_ll_privacy,
 	.send_opcode = MGMT_OP_REMOVE_DEVICE,
 	.send_param = remove_device_param_2,
 	.send_len = sizeof(remove_device_param_2),
@@ -10565,7 +10609,6 @@ static const struct generic_data ll_privacy_remove_device_3 = {
 
 static const struct generic_data ll_privacy_remove_device_4 = {
 	.setup_settings = settings_le_privacy_ll_privacy,
-	.setup_exp_feat_param = set_exp_feat_param_ll_privacy,
 	.send_opcode = MGMT_OP_REMOVE_DEVICE,
 	.send_param = remove_device_param_2,
 	.send_len = sizeof(remove_device_param_2),
@@ -10582,7 +10625,6 @@ static const struct generic_data ll_privacy_remove_device_4 = {
 
 static const struct generic_data ll_privacy_remove_device_5 = {
 	.setup_settings = settings_le_privacy_ll_privacy,
-	.setup_exp_feat_param = set_exp_feat_param_ll_privacy,
 	.send_opcode = MGMT_OP_REMOVE_DEVICE,
 	.send_param = remove_device_param_2,
 	.send_len = sizeof(remove_device_param_2),
@@ -10599,7 +10641,6 @@ static const struct generic_data ll_privacy_remove_device_5 = {
 
 static const struct generic_data ll_privacy_start_discovery_ll_privacy_1 = {
 	.setup_settings = settings_le_privacy_ll_privacy,
-	.setup_exp_feat_param = set_exp_feat_param_ll_privacy,
 	.setup_expect_hci_command = BT_HCI_CMD_LE_SET_RESOLV_ENABLE,
 	.setup_expect_hci_param = set_resolv_on_param,
 	.setup_expect_hci_len = sizeof(set_resolv_on_param),
@@ -10616,7 +10657,6 @@ static const struct generic_data ll_privacy_start_discovery_ll_privacy_1 = {
 
 static const struct generic_data ll_privacy_start_discovery_ll_privacy_2 = {
 	.setup_settings = settings_le_privacy_ll_privacy,
-	.setup_exp_feat_param = set_exp_feat_param_ll_privacy,
 	.setup_expect_hci_command = BT_HCI_CMD_LE_REMOVE_FROM_RESOLV_LIST,
 	.setup_expect_hci_param = le_add_to_accept_list_param,
 	.setup_expect_hci_len = sizeof(le_add_to_accept_list_param),
@@ -10636,7 +10676,6 @@ static const struct generic_data ll_privacy_start_discovery_ll_privacy_2 = {
 
 static const struct generic_data ll_privacy_advertising_1 = {
 	.setup_settings = settings_le_privacy_ll_privacy,
-	.setup_exp_feat_param = set_exp_feat_param_ll_privacy,
 	.send_opcode = MGMT_OP_SET_ADVERTISING,
 	.send_param = set_adv_on_param2,
 	.send_len = sizeof(set_adv_on_param2),
@@ -10646,7 +10685,6 @@ static const struct generic_data ll_privacy_advertising_1 = {
 
 static const struct generic_data ll_privacy_acceptor_1 = {
 	.setup_settings = settings_le_privacy_ll_privacy,
-	.setup_exp_feat_param = set_exp_feat_param_ll_privacy,
 	.io_cap = 0x04, /* KeyboardDisplay */
 	.client_io_cap = 0x04, /* KeyboardDisplay */
 	.client_auth_req = 0x05, /* Bonding - MITM */
@@ -10657,7 +10695,6 @@ static const struct generic_data ll_privacy_acceptor_1 = {
 
 static const struct generic_data ll_privacy_acceptor_2 = {
 	.setup_settings = settings_le_privacy_ll_privacy,
-	.setup_exp_feat_param = set_exp_feat_param_ll_privacy,
 	.io_cap = 0x04, /* KeyboardDisplay */
 	.client_io_cap = 0x04, /* KeyboardDisplay */
 	.just_works = true,
@@ -10704,7 +10741,6 @@ static uint16_t settings_powered_le_sc_bondable_privacy_ll_privacy[] = {
 
 static const struct generic_data ll_privacy_pair_1 = {
 	.setup_settings = settings_powered_le_sc_bondable_privacy_ll_privacy,
-	.setup_exp_feat_param = set_exp_feat_param_ll_privacy,
 	.send_opcode = MGMT_OP_PAIR_DEVICE,
 	.send_func = pair_device_send_param_func,
 	.addr_type_avail = true,
@@ -10725,7 +10761,6 @@ static const struct generic_data ll_privacy_pair_1 = {
 
 static const struct generic_data ll_privacy_pair_2 = {
 	.setup_settings = settings_powered_le_sc_bondable_privacy_ll_privacy,
-	.setup_exp_feat_param = set_exp_feat_param_ll_privacy,
 	.send_opcode = MGMT_OP_PAIR_DEVICE,
 	.send_func = pair_device_send_param_func,
 	.addr_type_avail = true,
@@ -10749,7 +10784,6 @@ static const struct generic_data ll_privacy_pair_2 = {
 
 static const struct generic_data ll_privacy_unpair_1 = {
 	.setup_settings = settings_powered_le_sc_bondable_privacy_ll_privacy,
-	.setup_exp_feat_param = set_exp_feat_param_ll_privacy,
 	.send_opcode = MGMT_OP_PAIR_DEVICE,
 	.send_func = pair_device_send_param_func,
 	.addr_type_avail = true,
@@ -10769,7 +10803,6 @@ static const struct generic_data ll_privacy_unpair_1 = {
 
 static const struct generic_data ll_privacy_unpair_2 = {
 	.setup_settings = settings_powered_le_sc_bondable_privacy_ll_privacy,
-	.setup_exp_feat_param = set_exp_feat_param_ll_privacy,
 	.send_opcode = MGMT_OP_PAIR_DEVICE,
 	.send_func = pair_device_send_param_func,
 	.addr_type_avail = true,
@@ -10788,17 +10821,6 @@ static const struct generic_data ll_privacy_unpair_2 = {
 	.expect_hci_command = BT_HCI_CMD_LE_REMOVE_FROM_ACCEPT_LIST,
 	.expect_hci_param = add_to_al_client,
 	.expect_hci_len = sizeof(add_to_al_client),
-};
-
-static const uint8_t set_device_flags_param_1[] = {
-	0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc,	/* BDADDR */
-	0x01,					/* Type - LE Public */
-	0x02, 0x00, 0x00, 0x00			/* Flags - Device Privacy */
-};
-
-static const uint8_t set_device_flags_rsp[] =  {
-	0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc,	/* BDADDR */
-	0x01					/* Type - LE Public */
 };
 
 static const uint8_t le_set_priv_mode_param[] = {
@@ -10823,18 +10845,11 @@ static const struct hci_cmd_data ll_privacy_set_device_flags_1_hci_list[] = {
 		.param = set_resolv_on_param,
 		.len = sizeof(set_resolv_on_param),
 	},
-};
-
-static const uint8_t device_flags_changed_params_1[] = {
-	0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc,	/* BDADDR */
-	0x01,					/* Type - LE Public */
-	0x03, 0x00, 0x00, 0x00,			/* Supported Flags */
-	0x02, 0x00, 0x00, 0x00			/* Current Flags */
+	{},
 };
 
 static const struct generic_data ll_privacy_set_device_flag_1 = {
 	.setup_settings = settings_le_privacy_ll_privacy,
-	.setup_exp_feat_param = set_exp_feat_param_ll_privacy,
 	.send_opcode = MGMT_OP_SET_DEVICE_FLAGS,
 	.send_param = set_device_flags_param_1,
 	.send_len = sizeof(set_device_flags_param_1),
@@ -10927,7 +10942,7 @@ static void setup_add_adv_callback_adv(uint8_t status, uint16_t length,
 					NULL, NULL);
 }
 
-static void setup_ll_privacy_with_irk1(const void *test_data)
+static void setup_ll_privacy_set_flags_1(const void *test_data)
 {
 	struct test_data *data = tester_get_data();
 	unsigned char param[] = { 0x01 };
@@ -10937,13 +10952,30 @@ static void setup_ll_privacy_with_irk1(const void *test_data)
 					load_irks_le_public_param_1,
 					setup_load_irks_callback, NULL, NULL);
 
+	/* Set Powered On */
 	mgmt_send(data->mgmt, MGMT_OP_SET_POWERED, data->mgmt_index,
 					sizeof(param), param,
 					setup_powered_callback, NULL, NULL);
 
+	/* Add Device 1 */
+	mgmt_send(data->mgmt, MGMT_OP_ADD_DEVICE, data->mgmt_index,
+					sizeof(add_device_le_public_param_1),
+					add_device_le_public_param_1,
+					setup_add_device_callback, NULL, NULL);
 }
 
-static void setup_ll_privacy_dev1_and_irk2(const void *test_data)
+static void setup_set_device_flags_callback(uint8_t status, uint16_t length,
+					const void *param, void *user_data)
+{
+	if (status != MGMT_STATUS_SUCCESS) {
+		tester_setup_failed();
+		return;
+	}
+
+	tester_print("Device Flags are set");
+}
+
+static void setup_ll_privacy_add_2(const void *test_data)
 {
 	struct test_data *data = tester_get_data();
 	unsigned char param[] = { 0x01 };
@@ -10954,16 +10986,68 @@ static void setup_ll_privacy_dev1_and_irk2(const void *test_data)
 					load_irks_2_devices_param,
 					setup_load_irks_callback, NULL, NULL);
 
+	/* Set Powered On */
+	mgmt_send(data->mgmt, MGMT_OP_SET_POWERED, data->mgmt_index,
+					sizeof(param), param,
+					setup_powered_callback, NULL, NULL);
+
+	/* Add Device 1 */
+	mgmt_send(data->mgmt, MGMT_OP_ADD_DEVICE, data->mgmt_index,
+					sizeof(add_device_le_public_param_1),
+					add_device_le_public_param_1,
+					setup_add_device_callback, NULL, NULL);
+	/* Device 1 Flags */
+	mgmt_send(data->mgmt, MGMT_OP_SET_DEVICE_FLAGS, data->mgmt_index,
+					sizeof(set_device_flags_param_1),
+					set_device_flags_param_1,
+					setup_set_device_flags_callback, NULL,
+					NULL);
+}
+
+static void setup_ll_privacy_set_flags_3(const void *test_data)
+{
+	struct test_data *data = tester_get_data();
+	unsigned char param[] = { 0x01 };
+
+	/* Add IRKs of Device1 and Device2 */
+	mgmt_send(data->mgmt, MGMT_OP_LOAD_IRKS, data->mgmt_index,
+					sizeof(load_irks_2_devices_param),
+					load_irks_2_devices_param,
+					setup_load_irks_callback, NULL, NULL);
+
+	/* Set Powered On */
+	mgmt_send(data->mgmt, MGMT_OP_SET_POWERED, data->mgmt_index,
+					sizeof(param), param,
+					setup_powered_callback, NULL, NULL);
+
 	/* Add Device 1 */
 	mgmt_send(data->mgmt, MGMT_OP_ADD_DEVICE, data->mgmt_index,
 					sizeof(add_device_le_public_param_1),
 					add_device_le_public_param_1,
 					setup_add_device_callback, NULL, NULL);
 
-	mgmt_send(data->mgmt, MGMT_OP_SET_POWERED, data->mgmt_index,
-					sizeof(param), param,
-					setup_powered_callback, NULL, NULL);
+	/* Device 1 Flags */
+	mgmt_send(data->mgmt, MGMT_OP_SET_DEVICE_FLAGS, data->mgmt_index,
+					sizeof(set_device_flags_param_1),
+					set_device_flags_param_1,
+					setup_set_device_flags_callback, NULL,
+					NULL);
+
+	/* Add Device 2 */
+	mgmt_send(data->mgmt, MGMT_OP_ADD_DEVICE, data->mgmt_index,
+					sizeof(add_device_le_public_param_2),
+					add_device_le_public_param_2,
+					setup_add_device_callback, NULL, NULL);
 }
+
+static const uint8_t set_device_flags_param_3[] = {
+	0x33, 0x33, 0x33, 0x44, 0x55, 0x66,	/* BDADDR */
+	0x01,					/* Type - LE Public */
+	0x06, 0x00, 0x00, 0x00			/* Flags -
+						 * Device Privacy
+						 * Address Resolution
+						 */
+};
 
 static void setup_ll_privacy_3_devices(const void *test_data)
 {
@@ -10982,11 +11066,25 @@ static void setup_ll_privacy_3_devices(const void *test_data)
 					add_device_le_public_param_1,
 					setup_add_device_callback, NULL, NULL);
 
+	/* Device 1 Flags */
+	mgmt_send(data->mgmt, MGMT_OP_SET_DEVICE_FLAGS, data->mgmt_index,
+					sizeof(set_device_flags_param_1),
+					set_device_flags_param_1,
+					setup_set_device_flags_callback, NULL,
+					NULL);
+
 	/* Add Device 2 */
 	mgmt_send(data->mgmt, MGMT_OP_ADD_DEVICE, data->mgmt_index,
 					sizeof(add_device_le_public_param_2),
 					add_device_le_public_param_2,
 					setup_add_device_callback, NULL, NULL);
+
+	/* Device 2 Flags */
+	mgmt_send(data->mgmt, MGMT_OP_SET_DEVICE_FLAGS, data->mgmt_index,
+					sizeof(set_device_flags_param_2),
+					set_device_flags_param_2,
+					setup_set_device_flags_callback, NULL,
+					NULL);
 
 	/* Add Device 3 */
 	mgmt_send(data->mgmt, MGMT_OP_ADD_DEVICE, data->mgmt_index,
@@ -10994,17 +11092,24 @@ static void setup_ll_privacy_3_devices(const void *test_data)
 					add_device_le_public_param_3,
 					setup_add_device_callback, NULL, NULL);
 
+	/* Device 3 Flags */
+	mgmt_send(data->mgmt, MGMT_OP_SET_DEVICE_FLAGS, data->mgmt_index,
+					sizeof(set_device_flags_param_3),
+					set_device_flags_param_3,
+					setup_set_device_flags_callback, NULL,
+					NULL);
+
 	mgmt_send(data->mgmt, MGMT_OP_SET_POWERED, data->mgmt_index,
 					sizeof(param), param,
 					setup_powered_callback, NULL, NULL);
 }
 
-static void setup_ll_privacy_2_devices_extra_rl(const void *test_data)
+static void setup_ll_privacy_set_flags_4(const void *test_data)
 {
 	struct test_data *data = tester_get_data();
 	unsigned char param[] = { 0x01 };
 
-	hciemu_set_central_le_rl_len(data->hciemu, 2);
+	hciemu_set_central_le_rl_len(data->hciemu, 4);
 
 	/* Add IRKs of 4 Devices */
 	mgmt_send(data->mgmt, MGMT_OP_LOAD_IRKS, data->mgmt_index,
@@ -11018,10 +11123,43 @@ static void setup_ll_privacy_2_devices_extra_rl(const void *test_data)
 					add_device_le_public_param_1,
 					setup_add_device_callback, NULL, NULL);
 
+	/* Device 1 Flags */
+	mgmt_send(data->mgmt, MGMT_OP_SET_DEVICE_FLAGS, data->mgmt_index,
+					sizeof(set_device_flags_param_1),
+					set_device_flags_param_1,
+					setup_set_device_flags_callback, NULL,
+					NULL);
+
 	/* Add Device 2 */
 	mgmt_send(data->mgmt, MGMT_OP_ADD_DEVICE, data->mgmt_index,
 					sizeof(add_device_le_public_param_2),
 					add_device_le_public_param_2,
+					setup_add_device_callback, NULL, NULL);
+
+	/* Device 2 Flags */
+	mgmt_send(data->mgmt, MGMT_OP_SET_DEVICE_FLAGS, data->mgmt_index,
+					sizeof(set_device_flags_param_2),
+					set_device_flags_param_2,
+					setup_set_device_flags_callback, NULL,
+					NULL);
+
+	/* Add Device 3 */
+	mgmt_send(data->mgmt, MGMT_OP_ADD_DEVICE, data->mgmt_index,
+					sizeof(add_device_le_public_param_3),
+					add_device_le_public_param_3,
+					setup_add_device_callback, NULL, NULL);
+
+	/* Device 3 Flags */
+	mgmt_send(data->mgmt, MGMT_OP_SET_DEVICE_FLAGS, data->mgmt_index,
+					sizeof(set_device_flags_param_3),
+					set_device_flags_param_3,
+					setup_set_device_flags_callback, NULL,
+					NULL);
+
+	/* Add Device 4 */
+	mgmt_send(data->mgmt, MGMT_OP_ADD_DEVICE, data->mgmt_index,
+					sizeof(add_device_le_public_param_4),
+					add_device_le_public_param_4,
 					setup_add_device_callback, NULL, NULL);
 
 	mgmt_send(data->mgmt, MGMT_OP_SET_POWERED, data->mgmt_index,
@@ -11029,7 +11167,7 @@ static void setup_ll_privacy_2_devices_extra_rl(const void *test_data)
 					setup_powered_callback, NULL, NULL);
 }
 
-static void setup_ll_privacy_2_devices_extra_al(const void *test_data)
+static void setup_ll_privacy_add_3(const void *test_data)
 {
 	struct test_data *data = tester_get_data();
 	unsigned char param[] = { 0x01 };
@@ -11042,11 +11180,23 @@ static void setup_ll_privacy_2_devices_extra_al(const void *test_data)
 					load_irks_3_devices_param,
 					setup_load_irks_callback, NULL, NULL);
 
+	/* Set Powered On */
+	mgmt_send(data->mgmt, MGMT_OP_SET_POWERED, data->mgmt_index,
+					sizeof(param), param,
+					setup_powered_callback, NULL, NULL);
+
 	/* Add Device 1 */
 	mgmt_send(data->mgmt, MGMT_OP_ADD_DEVICE, data->mgmt_index,
 					sizeof(add_device_le_public_param_1),
 					add_device_le_public_param_1,
 					setup_add_device_callback, NULL, NULL);
+
+	/* Device 1 Flags */
+	mgmt_send(data->mgmt, MGMT_OP_SET_DEVICE_FLAGS, data->mgmt_index,
+					sizeof(set_device_flags_param_1),
+					set_device_flags_param_1,
+					setup_set_device_flags_callback, NULL,
+					NULL);
 
 	/* Add Device 2 */
 	mgmt_send(data->mgmt, MGMT_OP_ADD_DEVICE, data->mgmt_index,
@@ -11054,9 +11204,12 @@ static void setup_ll_privacy_2_devices_extra_al(const void *test_data)
 					add_device_le_public_param_2,
 					setup_add_device_callback, NULL, NULL);
 
-	mgmt_send(data->mgmt, MGMT_OP_SET_POWERED, data->mgmt_index,
-					sizeof(param), param,
-					setup_powered_callback, NULL, NULL);
+	/* Device 2 Flags */
+	mgmt_send(data->mgmt, MGMT_OP_SET_DEVICE_FLAGS, data->mgmt_index,
+					sizeof(set_device_flags_param_2),
+					set_device_flags_param_2,
+					setup_set_device_flags_callback, NULL,
+					NULL);
 }
 
 /* Enable LL Privacy and Add 2 devices */
@@ -11102,7 +11255,7 @@ static void setup_ll_privacy_device2_discovry(const void *test_data)
 }
 
 /* Enable LL Privacy and Add Advertising */
-static void setup_ll_privacy_adv(const void *test_data)
+static void setup_ll_privacy_add_4(const void *test_data)
 {
 	struct test_data *data = tester_get_data();
 	struct mgmt_cp_add_advertising *cp;
@@ -11122,7 +11275,7 @@ static void setup_ll_privacy_adv(const void *test_data)
 }
 
 /* Enable LL Privacy and Add Advertising */
-static void setup_ll_privacy_2_advs(const void *test_data)
+static void setup_ll_privacy_set_flags_5(const void *test_data)
 {
 	struct test_data *data = tester_get_data();
 	struct mgmt_cp_add_advertising *cp;
@@ -11132,21 +11285,30 @@ static void setup_ll_privacy_2_advs(const void *test_data)
 	cp = (struct mgmt_cp_add_advertising *) adv_param;
 	setup_add_adv_param(cp, 1);
 
+	/* Add IRKs of Device1 */
 	mgmt_send(data->mgmt, MGMT_OP_LOAD_IRKS, data->mgmt_index,
 					sizeof(load_irks_le_public_param_1),
 					load_irks_le_public_param_1,
 					setup_load_irks_callback, NULL, NULL);
 
+	/* Set Powered On */
 	mgmt_send(data->mgmt, MGMT_OP_SET_POWERED, data->mgmt_index,
 					sizeof(param), param,
 					NULL, NULL, NULL);
 
+	/* Add Advertising Instance */
 	mgmt_send(data->mgmt, MGMT_OP_ADD_ADVERTISING, data->mgmt_index,
 					sizeof(adv_param), adv_param,
 					setup_add_adv_callback_adv, NULL, NULL);
+
+	/* Add Device 1 */
+	mgmt_send(data->mgmt, MGMT_OP_ADD_DEVICE, data->mgmt_index,
+					sizeof(add_device_le_public_param_1),
+					add_device_le_public_param_1,
+					setup_add_device_callback, NULL, NULL);
 }
 
-static void setup_ll_privacy_dev_2_advs(const void *test_data)
+static void setup_ll_privacy_set_flags_6(const void *test_data)
 {
 	struct test_data *data = tester_get_data();
 	struct mgmt_cp_add_advertising *cp;
@@ -11156,14 +11318,21 @@ static void setup_ll_privacy_dev_2_advs(const void *test_data)
 	cp = (struct mgmt_cp_add_advertising *) adv_param;
 	setup_add_adv_param(cp, 1);
 
+	/* Add IRKs of Device1 and Device2 */
 	mgmt_send(data->mgmt, MGMT_OP_LOAD_IRKS, data->mgmt_index,
-					sizeof(load_irks_le_public_param_1),
-					load_irks_le_public_param_1,
+					sizeof(load_irks_2_devices_param),
+					load_irks_2_devices_param,
 					setup_load_irks_callback, NULL, NULL);
 
+	/* Set Powered On */
 	mgmt_send(data->mgmt, MGMT_OP_SET_POWERED, data->mgmt_index,
 					sizeof(param), param,
 					NULL, NULL, NULL);
+
+	/* Add Advertising Instance 1 */
+	mgmt_send(data->mgmt, MGMT_OP_ADD_ADVERTISING, data->mgmt_index,
+					sizeof(adv_param), adv_param,
+					setup_add_adv_callback_adv, NULL, NULL);
 
 	/* Add Device 2 */
 	mgmt_send(data->mgmt, MGMT_OP_ADD_DEVICE, data->mgmt_index,
@@ -11171,9 +11340,18 @@ static void setup_ll_privacy_dev_2_advs(const void *test_data)
 					add_device_le_public_param_2,
 					setup_add_device_callback, NULL, NULL);
 
-	mgmt_send(data->mgmt, MGMT_OP_ADD_ADVERTISING, data->mgmt_index,
-					sizeof(adv_param), adv_param,
-					setup_add_adv_callback_adv, NULL, NULL);
+	/* Device 2 Flags */
+	mgmt_send(data->mgmt, MGMT_OP_SET_DEVICE_FLAGS, data->mgmt_index,
+					sizeof(set_device_flags_param_2),
+					set_device_flags_param_2,
+					setup_set_device_flags_callback, NULL,
+					NULL);
+
+	/* Add Device 1 */
+	mgmt_send(data->mgmt, MGMT_OP_ADD_DEVICE, data->mgmt_index,
+					sizeof(add_device_le_public_param_1),
+					add_device_le_public_param_1,
+					setup_add_device_callback, NULL, NULL);
 }
 
 static void setup_ll_privacy_adv_3_devices(const void *test_data)
@@ -11202,17 +11380,38 @@ static void setup_ll_privacy_adv_3_devices(const void *test_data)
 					add_device_le_public_param_1,
 					setup_add_device_callback, NULL, NULL);
 
+	/* Device 1 Flags */
+	mgmt_send(data->mgmt, MGMT_OP_SET_DEVICE_FLAGS, data->mgmt_index,
+					sizeof(set_device_flags_param_1),
+					set_device_flags_param_1,
+					setup_set_device_flags_callback, NULL,
+					NULL);
+
 	/* Add Device 2 */
 	mgmt_send(data->mgmt, MGMT_OP_ADD_DEVICE, data->mgmt_index,
 					sizeof(add_device_le_public_param_2),
 					add_device_le_public_param_2,
 					setup_add_device_callback, NULL, NULL);
 
+	/* Device 2 Flags */
+	mgmt_send(data->mgmt, MGMT_OP_SET_DEVICE_FLAGS, data->mgmt_index,
+					sizeof(set_device_flags_param_2),
+					set_device_flags_param_2,
+					setup_set_device_flags_callback, NULL,
+					NULL);
+
 	/* Add Device 3 */
 	mgmt_send(data->mgmt, MGMT_OP_ADD_DEVICE, data->mgmt_index,
 					sizeof(add_device_le_public_param_3),
 					add_device_le_public_param_3,
 					setup_add_device_callback, NULL, NULL);
+
+	/* Device 3 Flags */
+	mgmt_send(data->mgmt, MGMT_OP_SET_DEVICE_FLAGS, data->mgmt_index,
+					sizeof(set_device_flags_param_3),
+					set_device_flags_param_3,
+					setup_set_device_flags_callback, NULL,
+					NULL);
 
 	mgmt_send(data->mgmt, MGMT_OP_SET_POWERED, data->mgmt_index,
 					sizeof(param), param,
@@ -11245,11 +11444,25 @@ static void setup_ll_privacy_adv_1_device_2_advs(const void *test_data)
 					add_device_le_public_param_1,
 					setup_add_device_callback, NULL, NULL);
 
+	/* Device 1 Flags */
+	mgmt_send(data->mgmt, MGMT_OP_SET_DEVICE_FLAGS, data->mgmt_index,
+					sizeof(set_device_flags_param_1),
+					set_device_flags_param_1,
+					setup_set_device_flags_callback, NULL,
+					NULL);
+
 	/* Add Device 2 */
 	mgmt_send(data->mgmt, MGMT_OP_ADD_DEVICE, data->mgmt_index,
 					sizeof(add_device_le_public_param_2),
 					add_device_le_public_param_2,
 					setup_add_device_callback, NULL, NULL);
+
+	/* Device 2 Flags */
+	mgmt_send(data->mgmt, MGMT_OP_SET_DEVICE_FLAGS, data->mgmt_index,
+					sizeof(set_device_flags_param_2),
+					set_device_flags_param_2,
+					setup_set_device_flags_callback, NULL,
+					NULL);
 
 	mgmt_send(data->mgmt, MGMT_OP_ADD_ADVERTISING, data->mgmt_index,
 					sizeof(adv_param), adv_param,
@@ -11426,7 +11639,8 @@ static void test_command_generic(const void *test_data)
 
 	index = test->send_index_none ? MGMT_INDEX_NONE : data->mgmt_index;
 
-	if (test->expect_settings_set || test->expect_settings_unset) {
+	if (test->expect_settings_set || test->expect_settings_unset ||
+					test->expect_settings_spontaneous) {
 		tester_print("Registering new settings notification");
 
 		id = mgmt_register(data->mgmt, MGMT_EV_NEW_SETTINGS, index,
@@ -11437,6 +11651,9 @@ static void test_command_generic(const void *test_data)
 				command_generic_new_settings_alt, NULL, NULL);
 		data->mgmt_alt_settings_id = id;
 		test_add_condition(data);
+
+		if (test->expect_settings_spontaneous)
+			test_add_condition(data);
 	}
 
 	if (test->expect_alt_ev) {
@@ -11584,7 +11801,7 @@ static void trigger_device_found(void *user_data)
 
 		bthost_set_adv_enable(bthost, 0x01);
 	} else if (data->hciemu_type >= HCIEMU_TYPE_BREDRLE50) {
-		bthost_set_ext_adv_params(bthost);
+		bthost_set_ext_adv_params(bthost, 0x00);
 		if (test->set_adv)
 			bthost_set_ext_adv_data(bthost, test->adv_data,
 							test->adv_data_len);
@@ -12698,18 +12915,22 @@ static void verify_devcd(void *user_data)
 	struct test_data *data = tester_get_data();
 	const struct generic_data *test = data->test_data;
 	struct vhci *vhci = hciemu_get_vhci(data->hciemu);
-	char buf[MAX_COREDUMP_BUF_LEN] = {0};
+	char buf[MAX_COREDUMP_BUF_LEN + 1] = {0};
+	int read;
 	char delim[] = "\n";
 	char *line;
 	char *saveptr;
 	int i = 0;
 
 	/* Read the generated devcoredump file */
-	if (vhci_read_devcd(vhci, buf, sizeof(buf)) <= 0) {
+	read = vhci_read_devcd(vhci, buf, MAX_COREDUMP_BUF_LEN);
+	if (read <= 0) {
 		tester_warn("Unable to read devcoredump");
 		tester_test_failed();
 		return;
 	}
+	/* Make sure buf is nul-terminated */
+	buf[read] = '\0';
 
 	/* Verify if all devcoredump header fields are present */
 	line = strtok_r(buf, delim, &saveptr);
@@ -12976,6 +13197,12 @@ int main(int argc, char *argv[])
 	test_bredrle("Set discoverable on - Success 2",
 				&set_discoverable_on_success_test_2,
 				NULL, test_command_generic);
+	test_bredrle("Set discoverable on timeout - Success 1",
+				&set_discoverable_on_timeout_success_test_1,
+				NULL, test_command_generic);
+	test_bredrle_full("Set discoverable on timeout - Success 2 (Timeout)",
+				&set_discoverable_on_timeout_success_test_2,
+				NULL, test_command_generic, 8);
 	test_le("Set discoverable on (LE) - Success 1",
 				&set_discov_on_le_success_1,
 				NULL, test_command_generic);
@@ -13081,22 +13308,6 @@ int main(int argc, char *argv[])
 				&set_sc_only_on_success_test_2,
 				NULL, test_command_generic);
 
-	test_hs("Set High Speed on - Success",
-				&set_hs_on_success_test,
-				NULL, test_command_generic);
-	test_hs("Set High Speed on - Invalid parameters 1",
-				&set_hs_on_invalid_param_test_1,
-				NULL, test_command_generic);
-	test_hs("Set High Speed on - Invalid parameters 2",
-				&set_hs_on_invalid_param_test_2,
-				NULL, test_command_generic);
-	test_hs("Set High Speed on - Invalid parameters 3",
-				&set_hs_on_invalid_param_test_3,
-				NULL, test_command_generic);
-	test_hs("Set High Speed on - Invalid index",
-				&set_hs_on_invalid_index_test,
-				NULL, test_command_generic);
-
 	test_bredrle("Set Low Energy on - Success 1",
 				&set_le_on_success_test_1,
 				NULL, test_command_generic);
@@ -13105,6 +13316,12 @@ int main(int argc, char *argv[])
 				NULL, test_command_generic);
 	test_bredrle("Set Low Energy on - Success 3",
 				&set_le_on_success_test_3,
+				NULL, test_command_generic);
+	test_bredrle52("Set Low Energy on 5.2 - Success 4",
+				&set_le_on_success_test_4,
+				NULL, test_command_generic);
+	test_bredrle60("Set Low Energy on 6.0 - Success 5",
+				&set_le_on_success_test_4,
 				NULL, test_command_generic);
 	test_bredrle("Set Low Energy on - Invalid parameters 1",
 				&set_le_on_invalid_param_test_1,
@@ -14268,7 +14485,7 @@ int main(int argc, char *argv[])
 	test_bredrle50("Set PHY 2m Success", &set_phy_2m_success,
 					NULL, test_command_generic);
 
-	test_bredrle50("Set PHY coded Succcess", &set_phy_coded_success,
+	test_bredrle50("Set PHY coded Success", &set_phy_coded_success,
 					NULL, test_command_generic);
 
 	test_bredrle50("Set PHY 2m tx success", &set_phy_2m_tx_success,
@@ -14597,14 +14814,6 @@ int main(int argc, char *argv[])
 				NULL, test_command_generic);
 
 	/* MGMT_OP_SET_EXP_FEATURE
-	 * Enable LL Privacy
-	 */
-	test_bredrle50("Set Exp Feature - Enable LL Privacy",
-				&set_exp_feat_enable_ll_privacy,
-				setup_set_exp_feature_alt,
-				test_command_generic);
-
-	/* MGMT_OP_SET_EXP_FEATURE
 	 * Offload Codec
 	 */
 	test_bredrle50("Set Exp Feature - Offload Codec",
@@ -14619,12 +14828,6 @@ int main(int argc, char *argv[])
 				&set_exp_feat_disable,
 				NULL, test_command_generic);
 
-	/* MGMT_OP_SET_EXP_FEATURE
-	 * Rejected - If the power is on, the command should be rejected
-	 */
-	test_bredrle50("Set Exp Feature - Rejected",
-				&set_exp_feat_rejected,
-				NULL, test_command_generic);
 
 	/* MGMT_OP_SET_EXP_FEATURE
 	 * Invalid parameter
@@ -14651,57 +14854,14 @@ int main(int argc, char *argv[])
 				NULL, test_command_generic);
 
 	/* LL Privacy
-	 * Setup: Enable LL Privacy and add IRK of new device
-	 * Run: Add new device
-	 * Expect: Device is added to the resolving list
-	 */
-	test_bredrle50("LL Privacy - Add Device 2 (Add to RL)",
-				&ll_privacy_add_device_2,
-				setup_ll_privacy_with_irk1,
-				test_command_generic);
-	/* LL Privacy
-	 * Setup: Enable LL Privacy and add IRK of new device
-	 * Run: Add new device
-	 * Expect: Device is added to the resolving list and resolving list
-	 *         is enabled
-	 */
-	test_bredrle50("LL Privacy - Add Device 3 (Enable RL)",
-				&ll_privacy_add_device_3,
-				setup_ll_privacy_with_irk1,
-				test_command_generic);
-
-	/* LL Privacy
 	 * Setup: Enable LL Privacy, add device1 with IRK, and add IRK of
 	 *        device2
 	 * Run: Add new device2
 	 * Expect: Device2 is added to the accept list
 	 */
-	test_bredrle50("LL Privacy - Add Device 4 (2 Devices to AL)",
-				&ll_privacy_add_device_4,
-				setup_ll_privacy_dev1_and_irk2,
-				test_command_generic);
-
-	/* LL Privacy
-	 * Setup: Enable LL Privacy, add device1 with IRK, and add IRK of
-	 *        device2
-	 * Run: Add new device2
-	 * Expect: Device2 is added to the resolv list
-	 */
-	test_bredrle50("LL Privacy - Add Device 5 (2 Devices to RL)",
-				&ll_privacy_add_device_5,
-				setup_ll_privacy_dev1_and_irk2,
-				test_command_generic);
-
-	/* LL Privacy
-	 * Setup: Enable LL Privacy, add 3 devices with IRKs, and add IRK of
-	 *        device4
-	 * Run: Add new device4
-	 * Expect: Device4 is added but failed to add to resolv list because
-	 *         btdev resolv list is full.
-	 */
-	test_bredrle50("LL Privacy - Add Device 6 (RL is full)",
-				&ll_privacy_add_device_6,
-				setup_ll_privacy_2_devices_extra_rl,
+	test_bredrle50("LL Privacy - Add Device 2 (2 Devices to AL)",
+				&ll_privacy_add_device_2,
+				setup_ll_privacy_add_2,
 				test_command_generic);
 
 	/* LL Privacy
@@ -14711,9 +14871,9 @@ int main(int argc, char *argv[])
 	 * Expect: Device4 is added but failed to add to accept list, and it
 	 *         is removed from the resolv list.
 	 */
-	test_bredrle50("LL Privacy - Add Device 7 (AL is full)",
-				&ll_privacy_add_device_7,
-				setup_ll_privacy_2_devices_extra_al,
+	test_bredrle50("LL Privacy - Add Device 3 (AL is full)",
+				&ll_privacy_add_device_3,
+				setup_ll_privacy_add_3,
 				test_command_generic);
 
 	/* LL Privacy
@@ -14722,30 +14882,76 @@ int main(int argc, char *argv[])
 	 * Expect: Disable the advertising before adding new device to the
 	 *         accept list and resolving list
 	 */
-	test_bredrle50("LL Privacy - Add Device 8 (Disable Adv)",
-				&ll_privacy_add_device_8,
-				setup_ll_privacy_adv, test_command_generic);
+	test_bredrle50("LL Privacy - Add Device 4 (Disable Adv)",
+				&ll_privacy_add_4,
+				setup_ll_privacy_add_4,
+				test_command_generic);
+
+	/* LL Privacy
+	 * Setup: Enable LL Privacy and add IRK of new device
+	 * Run: Set Device Flags: DEVICE_FLAG_ADDRESS_RESOLUTION
+	 * Expect: Device is added to the resolving list
+	 */
+	test_bredrle50("LL Privacy - Set Flags 1 (Add to RL)",
+				&ll_privacy_set_flags_1,
+				setup_ll_privacy_set_flags_1,
+				test_command_generic);
+	/* LL Privacy
+	 * Setup: Enable LL Privacy and add IRK of new device
+	 * Run: Set Device Flags: DEVICE_FLAG_ADDRESS_RESOLUTION
+	 * Expect: Device is added to the resolving list and resolving list
+	 *         is enabled
+	 */
+	test_bredrle50("LL Privacy - Set Flags 2 (Enable RL)",
+				&ll_privacy_set_flags_2,
+				setup_ll_privacy_set_flags_1,
+				test_command_generic);
+
+	/* LL Privacy
+	 * Setup: Enable LL Privacy, add device1 with IRK, and add IRK of
+	 *        device2
+	 * Run: Set Device Flags: DEVICE_FLAG_ADDRESS_RESOLUTION
+	 * Expect: Device2 is added to the resolv list
+	 */
+	test_bredrle50("LL Privacy - Set Flags 3 (2 Devices to RL)",
+				&ll_privacy_set_flags_3,
+				setup_ll_privacy_set_flags_3,
+				test_command_generic);
+
+	/* LL Privacy
+	 * Setup: Enable LL Privacy, add 3 devices with IRKs, and add IRK of
+	 *        device4
+	 * Run: Set Device Flags: DEVICE_FLAG_ADDRESS_RESOLUTION
+	 * Expect: Device4 is added but failed to add to resolv list because
+	 *         btdev resolv list is full.
+	 */
+	test_bredrle50("LL Privacy - Set Flags 4 (RL is full)",
+				&ll_privacy_set_flags_4,
+				setup_ll_privacy_set_flags_4,
+				test_command_generic);
 
 	/* LL Privacy
 	 * Setup: Enable LL Privacy, and add 2 advertisings
-	 * Run: Add new device
+	 * Run: Set Device Flags: DEVICE_FLAG_ADDRESS_RESOLUTION
 	 * Expect: Disable the advertising before adding new device to the
 	 *         accept list and resolving list
 	 */
-	test_bredrle50("LL Privacy - Add Device 9 (Multi Adv)",
-				&ll_privacy_add_device_9,
-				setup_ll_privacy_2_advs, test_command_generic);
+	test_bredrle50("LL Privacy - Set Flags 5 (Multi Adv)",
+				&ll_privacy_set_flags_5,
+				setup_ll_privacy_set_flags_5,
+				test_command_generic);
 
 	/* LL Privacy
 	 * Setup: Enable LL Privacy, and add 1 device and add 2 advertisings
-	 * Run: Add new device
+	 * Run: Set Device Flags: DEVICE_FLAG_ADDRESS_RESOLUTION
 	 * Expect: Disable the advertising before adding new device to the
 	 *         accept list and resolving list
 	 */
-	test_bredrle50("LL Privacy - Add Device 10 (Multi Dev and Multi Adv)",
-				&ll_privacy_add_device_9,
-				setup_ll_privacy_dev_2_advs,
+	test_bredrle50("LL Privacy - Set Flags 6 (Multi Dev and Multi Adv)",
+				&ll_privacy_set_flags_5,
+				setup_ll_privacy_set_flags_6,
 				test_command_generic);
+
 
 	/* LL Privacy
 	 * Setup: Enable LL Privacy and add 2 devices and its IRK
@@ -14806,7 +15012,7 @@ int main(int argc, char *argv[])
 	 */
 	test_bredrle50("LL Privacy - Start Discovery 1 (Disable RL)",
 				&ll_privacy_start_discovery_ll_privacy_1,
-				setup_ll_privacy_dev1_and_irk2,
+				setup_ll_privacy_set_flags_3,
 				test_command_generic);
 
 	/* LL Privacy
@@ -14884,7 +15090,7 @@ int main(int argc, char *argv[])
 	 * Setup: Enable Privacy, LL Privacy
 	 * Run: Pair device, disconnect, add device, add 2nd device, and
 	 *      remove the client, then unpair.
-	 * Expect: Expect the clinet is removed from the Accept List.
+	 * Expect: Expect the client is removed from the Accept List.
 	 */
 	test_bredrle50_full("LL Privacy - Unpair 2 (Remove from AL)",
 				&ll_privacy_unpair_2,

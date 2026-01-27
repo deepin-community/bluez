@@ -17,6 +17,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <sys/types.h>
 #include <sys/param.h>
 #include <sys/socket.h>
@@ -28,15 +29,15 @@
 #include <wordexp.h>
 #include <ctype.h>
 
-#include "lib/bluetooth.h"
-#include "lib/hci.h"
-#include "lib/hci_lib.h"
-#include "lib/sdp.h"
-#include "lib/sdp_lib.h"
-#include "lib/uuid.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/hci.h"
+#include "bluetooth/hci_lib.h"
+#include "bluetooth/sdp.h"
+#include "bluetooth/sdp_lib.h"
+#include "bluetooth/uuid.h"
 
 #include "src/uuid-helper.h"
-#include "lib/mgmt.h"
+#include "bluetooth/mgmt.h"
 
 #include "src/shared/mainloop.h"
 #include "src/shared/io.h"
@@ -70,20 +71,20 @@ static int pending_index = 0;
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 #endif
 
-#define PROMPT_ON	COLOR_BLUE "[mgmt]" COLOR_OFF "# "
+static void mgmt_menu_pre_run(const struct bt_shell_menu *menu);
+
+#define PROMPT_ON	COLOR_BLUE "[mgmt]" COLOR_OFF "> "
 
 static void update_prompt(uint16_t index)
 {
 	char str[32];
 
 	if (index == MGMT_INDEX_NONE)
-		snprintf(str, sizeof(str), "%s# ",
-					COLOR_BLUE "[mgmt]" COLOR_OFF);
+		snprintf(str, sizeof(str), "[mgmt]> ");
 	else
-		snprintf(str, sizeof(str),
-				COLOR_BLUE "[hci%u]" COLOR_OFF "# ", index);
+		snprintf(str, sizeof(str), "[hci%u]> ", index);
 
-	bt_shell_set_prompt(str);
+	bt_shell_set_prompt(str, COLOR_BLUE);
 }
 
 void mgmt_set_index(const char *arg)
@@ -317,9 +318,17 @@ static const char *options2str(uint32_t options)
 	str[0] = '\0';
 
 	for (i = 0; i < NELEM(options_str); i++) {
-		if ((options & (1 << i)) != 0)
-			off += snprintf(str + off, sizeof(str) - off, "%s ",
+		if ((options & (1 << i)) != 0) {
+			int n = snprintf(str + off, sizeof(str) - off, "%s ",
 							options_str[i]);
+
+			if (n < 0 || n >= (int)(sizeof(str) - off)) {
+				str[off] = '\0';
+				break;
+			}
+
+			off += n;
+		}
 	}
 
 	return str;
@@ -359,6 +368,11 @@ static const char *settings_str[] = {
 				"wide-band-speech",
 				"cis-central",
 				"cis-peripheral",
+				"iso-broadcaster",
+				"sync-receiver",
+				"ll-privacy",
+				"past-sender",
+				"past-receiver"
 };
 
 static const char *settings2str(uint32_t settings)
@@ -371,9 +385,17 @@ static const char *settings2str(uint32_t settings)
 	str[0] = '\0';
 
 	for (i = 0; i < NELEM(settings_str); i++) {
-		if ((settings & (1 << i)) != 0)
-			off += snprintf(str + off, sizeof(str) - off, "%s ",
+		if ((settings & (1 << i)) != 0) {
+			int n = snprintf(str + off, sizeof(str) - off, "%s ",
 							settings_str[i]);
+
+			if (n < 0 || n >= (int)(sizeof(str) - off)) {
+				str[off] = '\0';
+				break;
+			}
+
+			off += n;
+		}
 	}
 
 	return str;
@@ -570,7 +592,7 @@ static void confirm_name_rsp(uint8_t status, uint16_t len,
 
 static char *eir_get_name(const uint8_t *eir, uint16_t eir_len)
 {
-	uint8_t parsed = 0;
+	uint16_t parsed = 0;
 
 	if (eir_len < 2)
 		return NULL;
@@ -598,7 +620,7 @@ static char *eir_get_name(const uint8_t *eir, uint16_t eir_len)
 
 static unsigned int eir_get_flags(const uint8_t *eir, uint16_t eir_len)
 {
-	uint8_t parsed = 0;
+	uint16_t parsed = 0;
 
 	if (eir_len < 2)
 		return 0;
@@ -849,10 +871,16 @@ static void prompt_input(const char *input, void *user_data)
 								&prompt.addr);
 		break;
 	case MGMT_EV_USER_CONFIRM_REQUEST:
-		if (input[0] == 'y' || input[0] == 'Y')
-			mgmt_confirm_reply(prompt.index, &prompt.addr);
-		else
+		if (len) {
+			if (input[0] == 'y' || input[0] == 'Y')
+				mgmt_confirm_reply(prompt.index, &prompt.addr);
+			else
+				mgmt_confirm_neg_reply(prompt.index,
+						&prompt.addr);
+		} else {
 			mgmt_confirm_neg_reply(prompt.index, &prompt.addr);
+			bt_shell_set_prompt(PROMPT_ON, COLOR_BLUE);
+		}
 		break;
 	}
 }
@@ -1478,7 +1506,7 @@ static void ext_index_rsp(uint8_t status, uint16_t len, const void *param,
 
 	for (i = 0; i < count; i++) {
 		uint16_t index = le16_to_cpu(rp->entry[i].index);
-		char *busstr = hci_bustostr(rp->entry[i].bus);
+		const char *busstr = hci_bustostr(rp->entry[i].bus);
 
 		switch (rp->entry[i].type) {
 		case 0x00:
@@ -1674,7 +1702,10 @@ static void exp_info_rsp(uint8_t status, uint16_t len, const void *param,
 							void *user_data)
 {
 	const struct mgmt_rp_read_exp_features_info *rp = param;
-	uint16_t index = PTR_TO_UINT(user_data);
+	uint16_t index = PTR_TO_UINT(user_data), i;
+	uint128_t uuid_be;
+	char uuidstr[40];
+	bt_uuid_t uuid;
 
 	if (status != 0) {
 		error("Reading hci%u exp features failed with status 0x%02x (%s)",
@@ -1695,6 +1726,14 @@ static void exp_info_rsp(uint8_t status, uint16_t len, const void *param,
 	print("\tNumber of experimental features: %u",
 					le16_to_cpu(rp->feature_count));
 
+	uuid.type = BT_UUID128;
+	for (i = 0; i < le16_to_cpu(rp->feature_count); i++) {
+		memcpy(&uuid_be, &rp->features[i].uuid, sizeof(uint128_t));
+		ntoh128(&uuid_be, &uuid.value.u128);
+		bt_uuid_to_string(&uuid, uuidstr, sizeof(uuidstr));
+
+		print("\t%s (flags 0x%04x)", uuidstr, rp->features[i].flags);
+	}
 done:
 	pending_index--;
 
@@ -2197,7 +2236,7 @@ static void get_flags_rsp(uint8_t status, uint16_t len, const void *param,
 	bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
-static struct option get_flags_options[] = {
+static const struct option get_flags_options[] = {
 	{ "help",	0, 0, 'h' },
 	{ "type",	1, 0, 't' },
 	{ 0, 0, 0, 0 }
@@ -2266,7 +2305,7 @@ static void set_flags_rsp(uint8_t status, uint16_t len, const void *param,
 	bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
-static struct option set_flags_options[] = {
+static const struct option set_flags_options[] = {
 	{ "help",	0, 0, 'h' },
 	{ "type",	1, 0, 't' },
 	{ "flags",	1, 0, 'f' },
@@ -2329,6 +2368,115 @@ static void cmd_set_flags(int argc, char **argv)
 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
 	}
 
+}
+
+static uint8_t *str2bytearray(char *arg, uint8_t *val, long *val_len)
+{
+	char *entry;
+	unsigned int i;
+
+	for (i = 0; (entry = strsep(&arg, " \t")) != NULL; i++) {
+		long v;
+		char *endptr = NULL;
+
+		if (*entry == '\0')
+			continue;
+
+		if (i >= *val_len) {
+			bt_shell_printf("Too much data\n");
+			return NULL;
+		}
+
+		v = strtol(entry, &endptr, 0);
+		if (!endptr || *endptr != '\0' || v > UINT8_MAX) {
+			bt_shell_printf("Invalid value at index %d\n", i);
+			return NULL;
+		}
+
+		val[i] = v;
+	}
+
+	*val_len = i;
+
+	return val;
+}
+
+static void hci_cmd_rsp(uint8_t status, uint16_t len, const void *param,
+							void *user_data)
+{
+	if (status != 0) {
+		error("HCI command failed with status 0x%02x (%s)",
+						status, mgmt_errstr(status));
+		bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	if (len > 0) {
+		bt_shell_printf("Response: ");
+		bt_shell_hexdump(param, len);
+	}
+
+	bt_shell_noninteractive_quit(EXIT_SUCCESS);
+}
+
+static void cmd_hci_cmd(int argc, char **argv)
+{
+	struct {
+		struct mgmt_cp_hci_cmd_sync cp;
+		uint8_t data[UINT8_MAX];
+	} pkt;
+	char *endptr = NULL;
+	long value;
+	uint16_t index;
+
+	value = strtoul(argv[1], &endptr, 0);
+	if (!endptr || *endptr != '\0' || value > UINT16_MAX) {
+		bt_shell_printf("Invalid opcode: %s", argv[1]);
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	memset(&pkt, 0, sizeof(pkt));
+	pkt.cp.opcode = cpu_to_le16(value);
+
+	if (argc > 2) {
+		endptr = NULL;
+		value = strtoul(argv[2], &endptr, 0);
+		if (!endptr || *endptr != '\0' || value > UINT8_MAX) {
+			bt_shell_printf("Invalid event: %s", argv[2]);
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
+
+		pkt.cp.event = value;
+	}
+
+	if (argc > 3) {
+		endptr = NULL;
+		value = strtoul(argv[3], &endptr, 0);
+		if (!endptr || *endptr != '\0' || value > UINT8_MAX) {
+			bt_shell_printf("Invalid timeout: %s", argv[2]);
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
+
+		pkt.cp.timeout = value;
+	}
+
+	if (argc > 4) {
+		value = sizeof(pkt.data);
+		if (!str2bytearray(argv[4], pkt.data, &value))
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+
+		pkt.cp.params_len = value;
+	}
+
+	index = mgmt_index;
+	if (index == MGMT_INDEX_NONE)
+		index = 0;
+
+	if (mgmt_send(mgmt, MGMT_OP_HCI_CMD_SYNC, index,
+			sizeof(pkt.cp) + pkt.cp.params_len, &pkt,
+			hci_cmd_rsp, NULL, NULL) == 0) {
+		error("Unable to send HCI command");
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
 }
 
 /* Wrapper to get the index and opcode to the response callback */
@@ -2672,7 +2820,7 @@ static void disconnect_rsp(uint8_t status, uint16_t len, const void *param,
 	bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
-static struct option disconnect_options[] = {
+static const struct option disconnect_options[] = {
 	{ "help",	0, 0, 'h' },
 	{ "type",	1, 0, 't' },
 	{ 0, 0, 0, 0 }
@@ -2777,7 +2925,7 @@ static void find_service_rsp(uint8_t status, uint16_t len, const void *param,
 	discovery = true;
 }
 
-static struct option find_service_options[] = {
+static const struct option find_service_options[] = {
 	{ "help",	no_argument, 0, 'h' },
 	{ "le-only",	no_argument, 0, 'l' },
 	{ "bredr-only",	no_argument, 0, 'b' },
@@ -2874,7 +3022,7 @@ static void find_rsp(uint8_t status, uint16_t len, const void *param,
 	discovery = true;
 }
 
-static struct option find_options[] = {
+static const struct option find_options[] = {
 	{ "help",	0, 0, 'h' },
 	{ "le-only",	1, 0, 'l' },
 	{ "bredr-only",	1, 0, 'b' },
@@ -2946,7 +3094,7 @@ static void stop_find_rsp(uint8_t status, uint16_t len, const void *param,
 	bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
-static struct option stop_find_options[] = {
+static const struct option stop_find_options[] = {
 	{ "help",	0, 0, 'h' },
 	{ "le-only",	1, 0, 'l' },
 	{ "bredr-only",	1, 0, 'b' },
@@ -3068,7 +3216,7 @@ static void register_pair_callbacks(struct mgmt *mgmt, uint16_t index)
 						passkey_notify, mgmt, NULL);
 }
 
-static struct option pair_options[] = {
+static const struct option pair_options[] = {
 	{ "help",	0, 0, 'h' },
 	{ "capability",	1, 0, 'c' },
 	{ "type",	1, 0, 't' },
@@ -3163,7 +3311,7 @@ static void cancel_pair_rsp(uint8_t status, uint16_t len, const void *param,
 	bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
-static struct option cancel_pair_options[] = {
+static const struct option cancel_pair_options[] = {
 	{ "help",	0, 0, 'h' },
 	{ "type",	1, 0, 't' },
 	{ 0, 0, 0, 0 }
@@ -3245,7 +3393,7 @@ static void unpair_rsp(uint8_t status, uint16_t len, const void *param,
 	bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
-static struct option unpair_options[] = {
+static const struct option unpair_options[] = {
 	{ "help",	0, 0, 'h' },
 	{ "type",	1, 0, 't' },
 	{ 0, 0, 0, 0 }
@@ -3372,7 +3520,7 @@ static void irks_rsp(uint8_t status, uint16_t len, const void *param,
 	bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
-static struct option irks_options[] = {
+static const struct option irks_options[] = {
 	{ "help",	0, 0, 'h' },
 	{ "local",	1, 0, 'l' },
 	{ "file",	1, 0, 'f' },
@@ -3486,7 +3634,7 @@ static void block_rsp(uint16_t op, uint16_t id, uint8_t status, uint16_t len,
 	bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
-static struct option block_options[] = {
+static const struct option block_options[] = {
 	{ "help",	0, 0, 'h' },
 	{ "type",	1, 0, 't' },
 	{ 0, 0, 0, 0 }
@@ -3730,7 +3878,7 @@ static void remote_oob_rsp(uint8_t status, uint16_t len, const void *param,
 	print("Remote OOB data added for %s (%u)", addr, rp->type);
 }
 
-static struct option remote_oob_opt[] = {
+static const struct option remote_oob_opt[] = {
 	{ "help",	0, 0, '?' },
 	{ "type",	1, 0, 't' },
 	{ 0, 0, 0, 0 }
@@ -3973,7 +4121,7 @@ static void conn_info_rsp(uint8_t status, uint16_t len, const void *param,
 	bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
-static struct option conn_info_options[] = {
+static const struct option conn_info_options[] = {
 	{ "help",       0, 0, 'h' },
 	{ "type",       1, 0, 't' },
 	{ 0, 0, 0, 0 }
@@ -4109,7 +4257,7 @@ static void clock_info_rsp(uint8_t status, uint16_t len, const void *param,
 
 	print("Local Clock:   %u", le32_to_cpu(rp->local_clock));
 	print("Piconet Clock: %u", le32_to_cpu(rp->piconet_clock));
-	print("Accurary:      %u", le16_to_cpu(rp->accuracy));
+	print("Accuracy:      %u", le16_to_cpu(rp->accuracy));
 
 	bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
@@ -4144,7 +4292,7 @@ static void add_device_rsp(uint8_t status, uint16_t len, const void *param,
 	bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
-static struct option add_device_options[] = {
+static const struct option add_device_options[] = {
 	{ "help",	0, 0, 'h' },
 	{ "action",	1, 0, 'a' },
 	{ "type",	1, 0, 't' },
@@ -4217,7 +4365,7 @@ static void remove_device_rsp(uint8_t status, uint16_t len, const void *param,
 	bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
-static struct option del_device_options[] = {
+static const struct option del_device_options[] = {
 	{ "help",	0, 0, 'h' },
 	{ "type",	1, 0, 't' },
 	{ 0, 0, 0, 0 }
@@ -4374,9 +4522,17 @@ static const char *adv_flags2str(uint32_t flags)
 	str[0] = '\0';
 
 	for (i = 0; i < NELEM(adv_flags_str); i++) {
-		if ((flags & (1 << i)) != 0)
-			off += snprintf(str + off, sizeof(str) - off, "%s ",
+		if ((flags & (1 << i)) != 0) {
+			int n = snprintf(str + off, sizeof(str) - off, "%s ",
 							adv_flags_str[i]);
+
+			if (n < 0 || n >= (int)(sizeof(str) - off)) {
+				str[off] = '\0';
+				break;
+			}
+
+			off += n;
+		}
 	}
 
 	return str;
@@ -4471,7 +4627,7 @@ static void advsize_usage(void)
 		"\t -n, --local-name          \"local-name\" flag");
 }
 
-static struct option advsize_options[] = {
+static const struct option advsize_options[] = {
 	{ "help",		0, 0, 'h' },
 	{ "connectable",	0, 0, 'c' },
 	{ "general-discov",	0, 0, 'g' },
@@ -4591,7 +4747,7 @@ static void add_adv_usage(void)
 		"\tadd-adv -u 180d -u 180f -d 080954657374204C45 1");
 }
 
-static struct option add_adv_options[] = {
+static const struct option add_adv_options[] = {
 	{ "help",		0, 0, 'h' },
 	{ "uuid",		1, 0, 'u' },
 	{ "adv-data",		1, 0, 'd' },
@@ -4929,7 +5085,7 @@ static void add_ext_adv_params_usage(void)
 		"\tadd-ext-adv-params -r 0x801 -x 0x802 -P 2M -g 1");
 }
 
-static struct option add_ext_adv_params_options[] = {
+static const struct option add_ext_adv_params_options[] = {
 	{ "help",		0, 0, 'h' },
 	{ "duration",		1, 0, 'd' },
 	{ "timeout",		1, 0, 't' },
@@ -5107,7 +5263,7 @@ static void add_ext_adv_data_usage(void)
 		"\tadd-ext-adv-data -u 180d -u 180f -d 080954657374204C45 1");
 }
 
-static struct option add_ext_adv_data_options[] = {
+static const struct option add_ext_adv_data_options[] = {
 	{ "help",		0, 0, 'h' },
 	{ "uuid",		1, 0, 'u' },
 	{ "adv-data",		1, 0, 'd' },
@@ -5313,9 +5469,17 @@ static const char *phys2str(uint32_t phys)
 	str[0] = '\0';
 
 	for (i = 0; i < NELEM(phys_str); i++) {
-		if ((phys & (1 << i)) != 0)
-			off += snprintf(str + off, sizeof(str) - off, "%s ",
+		if ((phys & (1 << i)) != 0) {
+			int n = snprintf(str + off, sizeof(str) - off, "%s ",
 							phys_str[i]);
+
+			if (n < 0 || n >= (int)(sizeof(str) - off)) {
+				str[off] = '\0';
+				break;
+			}
+
+			off += n;
+		}
 	}
 
 	return str;
@@ -5551,7 +5715,7 @@ static bool str2pattern(struct mgmt_adv_pattern *pattern, const char *str)
 	return true;
 }
 
-static struct option add_monitor_rssi_options[] = {
+static const struct option add_monitor_rssi_options[] = {
 	{ "help",		0, 0, 'h' },
 	{ "high-threshold",	1, 0, 'R' },
 	{ "low-threshold",	1, 0, 'r' },
@@ -5850,6 +6014,7 @@ static const struct bt_shell_menu monitor_menu = {
 static const struct bt_shell_menu mgmt_menu = {
 	.name = "mgmt",
 	.desc = "Management Submenu",
+	.pre_run = mgmt_menu_pre_run,
 	.entries = {
 	{ "select",		"<index>",
 		cmd_select,		"Select a different index"	},
@@ -5882,7 +6047,7 @@ static const struct bt_shell_menu mgmt_menu = {
 	{ "ssp",		"<on/off>",
 		cmd_ssp,		"Toggle SSP mode"		},
 	{ "sc",			"<on/off/only>",
-		cmd_sc,			"Toogle SC support"		},
+		cmd_sc,			"Toggle SC support"		},
 	{ "hs",			"<on/off>",
 		cmd_hs,			"Toggle HS support"		},
 	{ "le",			"<on/off>",
@@ -5944,7 +6109,7 @@ static const struct bt_shell_menu mgmt_menu = {
 	{ "ext-config",		"<on/off>",
 		cmd_ext_config,		"External configuration"	},
 	{ "debug-keys",		"<on/off>",
-		cmd_debug_keys,		"Toogle debug keys"		},
+		cmd_debug_keys,		"Toggle debug keys"		},
 	{ "conn-info",		"[-t type] <remote address>",
 		cmd_conn_info,		"Get connection information"	},
 	{ "io-cap",		"<cap>",
@@ -6009,6 +6174,8 @@ static const struct bt_shell_menu mgmt_menu = {
 		cmd_get_flags,		"Get device flags"		},
 	{ "set-flags",		"[-f flags] [-t type] <address>",
 		cmd_set_flags,		"Set device flags"		},
+	{ "hci-cmd",		"<opcode> [event] [timeout] [param...]",
+		cmd_hci_cmd,	"Send HCI Command and wait for Event"	},
 	{} },
 };
 
@@ -6019,23 +6186,24 @@ static void mgmt_debug(const char *str, void *user_data)
 	print("%s%s", prefix, str);
 }
 
-bool mgmt_add_submenu(void)
+void mgmt_add_submenu(void)
+{
+	bt_shell_add_submenu(&mgmt_menu);
+	bt_shell_add_submenu(&monitor_menu);
+}
+
+static void mgmt_menu_pre_run(const struct bt_shell_menu *menu)
 {
 	mgmt = mgmt_new_default();
 	if (!mgmt) {
 		fprintf(stderr, "Unable to open mgmt_socket\n");
-		return false;
+		return;
 	}
-
-	bt_shell_add_submenu(&mgmt_menu);
-	bt_shell_add_submenu(&monitor_menu);
 
 	if (getenv("MGMT_DEBUG"))
 		mgmt_set_debug(mgmt, mgmt_debug, "mgmt: ", NULL);
 
 	register_mgmt_callbacks(mgmt, mgmt_index);
-
-	return true;
 }
 
 void mgmt_remove_submenu(void)

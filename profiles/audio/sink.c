@@ -20,8 +20,8 @@
 #include <glib.h>
 #include <dbus/dbus.h>
 
-#include "lib/bluetooth.h"
-#include "lib/sdp.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/sdp.h"
 
 #include "gdbus/gdbus.h"
 
@@ -62,7 +62,7 @@ struct sink_state_callback {
 
 static GSList *sink_callbacks = NULL;
 
-static char *str_state[] = {
+static const char *str_state[] = {
 	"SINK_STATE_DISCONNECTED",
 	"SINK_STATE_CONNECTING",
 	"SINK_STATE_CONNECTED",
@@ -110,6 +110,7 @@ static void avdtp_state_callback(struct btd_device *dev,
 	switch (new_state) {
 	case AVDTP_SESSION_STATE_DISCONNECTED:
 		sink_set_state(sink, SINK_STATE_DISCONNECTED);
+		btd_service_disconnecting_complete(sink->service, 0);
 		break;
 	case AVDTP_SESSION_STATE_CONNECTING:
 		sink_set_state(sink, SINK_STATE_CONNECTING);
@@ -135,7 +136,10 @@ static void stream_state_changed(struct avdtp_stream *stream,
 
 	switch (new_state) {
 	case AVDTP_STATE_IDLE:
-		btd_service_disconnecting_complete(sink->service, 0);
+		if (sink->connect_id > 0) {
+			a2dp_cancel(sink->connect_id);
+			sink->connect_id = 0;
+		}
 
 		if (sink->disconnect_id > 0) {
 			a2dp_cancel(sink->disconnect_id);

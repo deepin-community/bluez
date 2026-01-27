@@ -11,11 +11,12 @@
 #include <stdbool.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <ell/ell.h>
 
-#include "lib/bluetooth.h"
+#include "bluetooth/bluetooth.h"
 #include "src/shared/btp.h"
 
 #define BTP_MTU 512

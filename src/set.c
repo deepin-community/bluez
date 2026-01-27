@@ -28,6 +28,8 @@
 #include "src/shared/queue.h"
 #include "src/shared/ad.h"
 #include "src/shared/crypto.h"
+#include "src/shared/att.h"
+#include "src/shared/gatt-db.h"
 
 #include "log.h"
 #include "error.h"
@@ -171,7 +173,7 @@ static void set_free(void *data)
 }
 
 static struct btd_device_set *set_new(struct btd_device *device,
-					uint8_t sirk[16], uint8_t size)
+					const uint8_t sirk[16], uint8_t size)
 {
 	struct btd_device_set *set;
 
@@ -206,7 +208,7 @@ static struct btd_device_set *set_new(struct btd_device *device,
 }
 
 static struct btd_device_set *set_find(struct btd_device *device,
-						uint8_t sirk[16])
+						const uint8_t sirk[16])
 {
 	struct btd_adapter *adapter = device_get_adapter(device);
 	const struct queue_entry *entry;
@@ -277,8 +279,24 @@ static void foreach_rsi(void *data, void *user_data)
 
 	bt_crypto_unref(crypto);
 
-	if (!memcmp(ad->data, res, sizeof(res)))
-		device_connect_le(set->device);
+	if (memcmp(ad->data, res, sizeof(res)))
+		return;
+
+	/* Attempt to use existing gatt_db from set if device has never been
+	 * connected before.
+	 *
+	 * If dbs don't really match bt_gatt_client will attempt to rediscover
+	 * the ranges that don't match.
+	 */
+	if (gatt_db_isempty(btd_device_get_gatt_db(set->device))) {
+		struct btd_device *device;
+
+		device = queue_get_entries(set->devices)->data;
+		btd_device_set_gatt_db(set->device,
+					btd_device_get_gatt_db(device));
+	}
+
+	device_connect_le(set->device);
 }
 
 static void foreach_device(struct btd_device *device, void *data)
@@ -295,10 +313,14 @@ static void foreach_device(struct btd_device *device, void *data)
 }
 
 struct btd_device_set *btd_set_add_device(struct btd_device *device,
-						uint8_t *key, uint8_t sirk[16],
+						const uint8_t *key,
+						const uint8_t sirk_value[16],
 						uint8_t size)
 {
 	struct btd_device_set *set;
+	uint8_t sirk[16];
+
+	memcpy(sirk, sirk_value, sizeof(sirk));
 
 	/* In case key has been set it means SIRK is encrypted */
 	if (key) {

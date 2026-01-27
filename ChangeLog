@@ -1,3 +1,111 @@
+ver 5.85:
+	Fix issue with handling display of battery charge level.
+	Fix issue with BASS permissions not requiring encryption.
+	Fix issue with handling abort for OBEX SRM operation.
+	Fix issue with handling device privacy.
+	Add support for HFP call answer support.
+	Add support for HFP simple 3-way call support.
+
+ver 5.84:
+	Fix issue with AVRCP and handling invalid UTF-8 item name.
+	Fix issue with exposing coordinate sets if LE Audio is disabled.
+	Fix issue with BAP and not responding to SetConfiguration.
+	Add support for BAP unicast endpoint reconfiguration.
+	Add support for BASS and encrypted broadcast source.
+	Add support for HFP and Call Line Identification.
+
+ver 5.83:
+	Fix issue with handling BAP and removal of PAC.
+	Fix issue with handling SID for broadcast receiver.
+	Fix issue with handling HSP/HFP reconnection policy.
+	Fix issue with handling cable pairing and Sixaxis controllers.
+	Fix issue with handling virtual cable unplug for HID devices.
+	Fix issue with handling service records for HID devices.
+	Add support for AVDTP and TX timestamps.
+
+ver 5.82:
+	Fix issue with handling BAP state transitions.
+	Fix issue with handling D-Bus interface removal.
+
+ver 5.81:
+	Fix issue with handling MAP and supported features.
+	Fix issue with handling SDP record for Phonebook Access Client.
+	Fix issue with handling AVRCP PDU parameters length mismatch.
+	Fix issue with handling AVRCP PDU for SetAbsoluteVolume.
+	Fix issue with handling AVDTP bad media transport format.
+	Fix issue with handling support for LL Privacy setting.
+
+ver 5.80:
+	Fix issue with handling address type for all types of keys.
+	Fix issue with handling maximum number of GATT channels.
+	Fix issue with handling MTU auto-tuning feature.
+	Fix issue with handling AVRCP volume in reconfigured transports.
+	Fix issue with handling VCP volume setting requests.
+	Fix issue with handling VCP connection management.
+	Fix issue with handling MAP qualification.
+	Fix issue with handling PBAP qualification.
+	Fix issue with handling BNEP qualification.
+	Add support for PreferredBearer device property.
+	Add support for SupportedTypes Message Access property.
+	Add support for HFP, A2DP, AVRCP, AVCTP and MAP latest versions.
+
+ver 5.79:
+	Fix issue with handling address type while pairing.
+	Add support for allowing to set A2DP transport delay.
+	Add support for persistent userspace HID operation.
+	Add support for handling syncing to multiple BISes.
+
+ver 5.78:
+	Fix issue with handling notification of scanned BISes to BASS
+	Fix issue with handling checking BIS caps against peer caps.
+	Fix issue with handling MGMT Set Device Flags overwrites.
+	Fix issue with handling ASE notification order.
+	Fix issue with handling BIG Info report events.
+	Fix issue with handling PACS Server role.
+	Fix issue with registering UHID_START multiple times.
+	Fix issue with pairing method not setting auto-connect.
+
+ver 5.77:
+	Fix issue with storing and handling connection parameters.
+	Fix issue with handling device that are marked as temporary.
+	Fix issue with HID and special handling for non-keyboards.
+	Fix issue with BR/EDR not support when discoverable is off.
+	Add support for initial implementation of ASHA profile.
+
+ver 5.76:
+	Fix issue with broadcast channel location and stream capabilities.
+	Fix issue with handling BIS management and synchronization.
+	Fix issue with handling Extended Advertising.
+	Fix issue with UserspaceHID and replay structures.
+	Add support for providing PPCP characteristic.
+
+ver 5.75:
+	Fix issue with build system and header inclusion.
+
+ver 5.74:
+	Fix issue with not enabling Wideband Speech when available.
+	Fix issue with UserspaceHID and Bluetooth Classic devices.
+	Fix issue with checking for services being connected.
+	Fix issue with GATT client connection creation.
+	Fix issue with OBEX and small file transfers.
+	Fix issue with handling pairing with Apple AirPods.
+
+ver 5.73:
+	Fix issue with BAP and setting up broadcast source.
+	Fix issue with BAP and register all endpoints.
+	Fix issue with BAP and missing metadata property.
+	Fix issue with BAP and not handling out of order responses.
+	Fix issue with BAP and attempting to set device as connectable.
+	Add support for CCP plugin for call control profile.
+
+ver 5.72:
+	Fix issue with BAP and handling stream IO linking.
+	Fix issue with BAP and setup of multiple streams per endpoint.
+	Fix issue with AVDTP and potential incorrect transaction label.
+	Fix issue with A2DP and handling crash on suspend.
+	Fix issue with GATT database and an invalid pointer.
+	Add support for AICS service.
+
 ver 5.71:
 	Fix issue with not registering CSIS service.
 	Fix issue with registering pairing callbacks.

@@ -1,0 +1,335 @@
+.\" Man page generated from reStructuredText.
+.
+.
+.nr rst2man-indent-level 0
+.
+.de1 rstReportMargin
+\\$1 \\n[an-margin]
+level \\n[rst2man-indent-level]
+level margin: \\n[rst2man-indent\\n[rst2man-indent-level]]
+-
+\\n[rst2man-indent0]
+\\n[rst2man-indent1]
+\\n[rst2man-indent2]
+..
+.de1 INDENT
+.\" .rstReportMargin pre:
+. RS \\$1
+. nr rst2man-indent\\n[rst2man-indent-level] \\n[an-margin]
+. nr rst2man-indent-level +1
+.\" .rstReportMargin post:
+..
+.de UNINDENT
+. RE
+.\" indent \\n[an-margin]
+.\" old: \\n[rst2man-indent\\n[rst2man-indent-level]]
+.nr rst2man-indent-level -1
+.\" new: \\n[rst2man-indent\\n[rst2man-indent-level]]
+.in \\n[rst2man-indent\\n[rst2man-indent-level]]u
+..
+.TH "ORG.BLUEZ.MEDIATRANSPORT" "5" "July 2024" "BlueZ" "Linux System Administration"
+.SH NAME
+org.bluez.MediaTransport \- BlueZ D-Bus MediaTransport API documentation
+.SH INTERFACE
+.INDENT 0.0
+.TP
+.B Service
+org.bluez
+.TP
+.B Interface
+org.bluez.MediaTransport1
+.TP
+.B Object path
+[variable prefix]/{hci0,hci1,...}/dev_{BDADDR}/fd#
+.UNINDENT
+.SS Methods
+.SS fd, uint16, uint16 Acquire()
+.sp
+Acquire transport file descriptor and the MTU for read and write respectively.
+.sp
+Possible Errors:
+.INDENT 0.0
+.TP
+.B org.bluez.Error.NotAuthorized
+.TP
+.B org.bluez.Error.Failed
+.UNINDENT
+.SS fd, uint16, uint16 TryAcquire()
+.sp
+Acquire transport file descriptor only if the transport is in \(dqpending\(dq state at
+the time the message is received by BlueZ. Otherwise no request will be sent to
+the remote device and the function will just fail with
+\fBorg.bluez.Error.NotAvailable\fP\&.
+.sp
+Possible Errors:
+.INDENT 0.0
+.TP
+.B org.bluez.Error.NotAuthorized
+.TP
+.B org.bluez.Error.Failed
+.TP
+.B org.bluez.Error.NotAvailable
+.UNINDENT
+.SS void Release()
+.sp
+Releases file descriptor.
+.SS void Select()
+.sp
+Applicable only for transports created by a broadcast sink. This moves the
+transport from \(dqidle\(dq to \(dqbroadcasting\(dq.
+.sp
+This allows callers to select which BISes he wishes to sync to via a 2 step
+process:
+.INDENT 0.0
+.IP 1. 3
+the user calls the method, changing the transport\(aqs state to broadcasting
+.IP 2. 3
+the audio server detects that the transport is in the \(aqbroadcasting\(aq state
+and automatically acquires it
+.UNINDENT
+.sp
+Possible Errors:
+.INDENT 0.0
+.TP
+.B org.bluez.Error.NotAuthorized
+.UNINDENT
+.SS void Unselect()
+.sp
+Applicable only for transports created by a broadcast sink. This moves the
+transport from \(dqbroadcasting\(dq or \(dqactive\(dq to \(dqidle\(dq.
+.sp
+This allows callers to terminate the sync to a BIS to via a 2 step process:
+.INDENT 0.0
+.IP 1. 3
+the user calls this method, changing the transport\(aqs state to idle
+.IP 2. 3
+the audio server detects this event and releases the transport
+.UNINDENT
+.sp
+Possible Errors:
+.INDENT 0.0
+.TP
+.B org.bluez.Error.NotAuthorized
+.UNINDENT
+.SS Properties
+.SS object Device [readonly]
+.sp
+Device object which the transport is connected to.
+.SS string UUID [readonly]
+.sp
+UUID of the profile which the transport is for.
+.SS byte Codec [readonly]
+.sp
+Assigned number of codec that the transport support.
+.sp
+The values should match the profile specification which is indicated by the
+UUID.
+.SS array{byte} Configuration [readonly]
+.sp
+Configuration blob, it is used as it is so the size and byte order must match.
+.SS string State [readonly]
+.sp
+Indicates the state of the transport. Possible values are:
+.INDENT 0.0
+.TP
+.B \(dqidle\(dq
+not streaming
+.TP
+.B \(dqpending\(dq
+streaming but not acquired
+.TP
+.B \(dqbroadcasting\(dq
+streaming but not acquired, applicable only for transports created by a
+broadcast sink
+.TP
+.B \(dqactive\(dq
+streaming and acquired
+.UNINDENT
+.SS uint16 Delay [readwrite, optional]
+.sp
+Transport delay in 1/10 of millisecond, this property is only writeable when the
+transport corresponds to a sink endpoint and it was acquired by the sender.
+.SS uint16 Volume [readwrite, optional]
+.sp
+Indicates volume level of the transport, this property is only writeable
+when the transport was acquired by the sender.
+.sp
+Possible Values:
+.INDENT 0.0
+.TP
+.B 0\-127 (A2DP)
+.TP
+.B 0\-255 (BAP)
+.UNINDENT
+.SS object Endpoint [readonly, optional, experimental]
+.sp
+Endpoint object which the transport is associated with.
+.SS uint32 Location [readonly, ISO only, experimental]
+.sp
+Indicates transport Audio Location.
+.SS array{byte} Metadata [readwrite, ISO Only, experimental]
+.sp
+Indicates transport Metadata.
+.SS array{object} Links [readonly, optional, CIS only, experimental]
+.sp
+Linked transport objects which the transport is associated with.
+.SS array{object} Links [readwrite, BIS only, experimental]
+.sp
+For a Broadcast Sink, the BIG sync procedure requires all desired streams to be
+enumerated from the start and it cannot be later reconfigured by adding or
+removing BISes.
+.sp
+To avoid terminating and recreating the BIG sync every time a new transport is
+selected for acquire, all transports selected via \fBSelect\fP need to be linked
+together.
+.sp
+When the first transport is acquired via Transport.Acquire, all links are
+included in the BIG sync command.
+.sp
+An acquired transport will create and set fds for all its links. Then, each link
+needs to be acquired separately, to get the fd and start receiving audio.
+.SS dict QoS [readwrite, optional, ISO only, experimental]
+.sp
+Only present when QoS is configured.
+.sp
+Possible values for Unicast:
+.INDENT 0.0
+.TP
+.B byte CIG
+Indicates configured CIG.
+.sp
+Possible values:
+.INDENT 7.0
+.TP
+.B 0x00 \- 0xef
+Valid ID range.
+.TP
+.B 0xff
+Auto allocate.
+.UNINDENT
+.TP
+.B byte CIS
+Indicates configured CIS.
+.sp
+Possible values:
+.INDENT 7.0
+.TP
+.B 0x00 \- 0xef
+.UNINDENT
+.sp
+Valid ID range.
+.INDENT 7.0
+.TP
+.B 0xff
+Auto allocate.
+.UNINDENT
+.TP
+.B byte Framing
+Indicates configured framing.
+.sp
+Possible values:
+.INDENT 7.0
+.TP
+.B 0x00
+Unframed.
+.TP
+.B 0x01
+Framed.
+.UNINDENT
+.TP
+.B uint32 PresentationDelay
+Indicates configured transport presentation delay (us).
+.TP
+.B byte TargetLatency
+Indicates the requested target latency.
+.sp
+Possible values:
+.INDENT 7.0
+.TP
+.B 0x01
+Low Latency.
+.TP
+.B 0x02
+Balanced Latency/Reliability.
+.TP
+.B 0x03
+High Reliability.
+.UNINDENT
+.UNINDENT
+.sp
+Possible values for Broadcast:
+.INDENT 0.0
+.TP
+.B byte BIG
+Indicates configured QoS BIG.
+.TP
+.B byte BIS
+Indicates configured BIS.
+.TP
+.B byte SyncFactor
+Indicates configured broadcast sync factor.
+.TP
+.B byte Packing
+Indicates configured packing.
+.TP
+.B byte Framing
+Indicates configured framing.
+.TP
+.B array{byte} BCode
+Indicates the string used for encryption/decryption.
+.TP
+.B byte encryption
+Indicates if the stream is encrypted.
+.TP
+.B byte Options
+Indicates configured broadcast options.
+.TP
+.B uint16 Skip
+Indicates configured broadcast skip.
+.TP
+.B byte SyncTimeout
+Indicates configured broadcast sync timeout.
+.TP
+.B byte SyncType
+Indicates configured broadcast sync CTE type.
+.TP
+.B byte MSE
+Indicates configured broadcast MSE.
+.TP
+.B uint16 Timeout
+Indicates configured broadcast timeout.
+.UNINDENT
+.sp
+Possible values for both Unicast and Broadcast:
+.INDENT 0.0
+.TP
+.B uint32 Interval
+Indicates configured ISO interval (us).
+.TP
+.B uint16 Latency
+Indicates configured transport latency (ms).
+.TP
+.B uint16 SDU
+Indicates configured maximum SDU.
+.TP
+.B byte PHY
+Indicates configured PHY.
+.sp
+Possible values:
+.INDENT 7.0
+.TP
+.B bit 0
+LE 1M
+.TP
+.B bit 1
+LE 2M
+.TP
+.B bit 2
+LE Coded
+.UNINDENT
+.TP
+.B byte Retransmissions
+Indicates configured retransmissions.
+.UNINDENT
+.\" Generated by docutils manpage writer.
+.

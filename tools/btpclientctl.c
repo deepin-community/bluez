@@ -22,7 +22,7 @@
 #include <fcntl.h>
 #include <poll.h>
 
-#include "lib/bluetooth.h"
+#include "bluetooth/bluetooth.h"
 
 #include "src/shared/ad.h"
 #include "src/shared/btp.h"
@@ -34,7 +34,7 @@
 
 #define DEFAULT_SOCKET_PATH	"/tmp/bt-stack-tester"
 
-#define PROMPT_ON	COLOR_BLUE "[btpclient]" COLOR_OFF "# "
+#define PROMPT_ON	COLOR_BLUE "[btpclient]" COLOR_OFF "> "
 
 #define EVT_OPCODE_BASE	0x80
 
@@ -328,7 +328,7 @@ static void null_evt(const void *data, uint16_t size)
 }
 
 static const struct indexstr_data error_table[] = {
-	{ 0x01, "Faile" },
+	{ 0x01, "Failed" },
 	{ 0x02, "Unknown Command" },
 	{ 0x03, "Not Ready" },
 	{ 0x04, "Invalid Index" },
@@ -2340,7 +2340,7 @@ int main(int argc, char *argv[])
 	mainloop_add_fd(btpclientctl->server_fd, EPOLLIN, server_callback,
 			btpclientctl, NULL);
 
-	bt_shell_set_prompt(PROMPT_ON);
+	bt_shell_set_prompt(PROMPT_ON, COLOR_BLUE);
 
 	status = bt_shell_run();
 

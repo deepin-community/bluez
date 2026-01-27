@@ -2,26 +2,25 @@ Source: bluez
 Maintainer: Debian Bluetooth Maintainers <team+pkg-bluetooth@tracker.debian.org>
 Uploaders: Nobuhiro Iwamatsu <iwamatsu@debian.org>
 Section: admin
-Priority: optional
 Build-Depends: debhelper-compat (= 13),
-               flex,
                bison,
-               libdbus-1-dev (>= 1.6),
-               libglib2.0-dev,
-               libdw-dev,
-               libudev-dev,
-               libreadline-dev,
-               libical-dev,
-               libasound2-dev,
-               libell-dev (>= 0.39),
-               libjson-c-dev (>= 0.13),
-               python3-docutils,
-               udev,
                check <!nocheck>,
-               systemd,
+               flex,
+               libasound2-dev,
+               libdbus-1-dev (>= 1.6),
+               libdw-dev,
+               libebook1.2-dev [!i386] <!pkg.bluez.noeds>,
+               libell-dev (>= 0.39),
+               libglib2.0-dev,
+               libical-dev,
+               libjson-c-dev (>= 0.13),
+               libreadline-dev,
+               libudev-dev,
+               python3-docutils,
+               python3-pygments,
                systemd-dev,
-Standards-Version: 4.6.1
-Rules-Requires-Root: no
+               udev
+Standards-Version: 4.7.3
 Vcs-Browser: https://salsa.debian.org/bluetooth-team/bluez
 Vcs-Git: https://salsa.debian.org/bluetooth-team/bluez.git
 Homepage: http://www.bluez.org
@@ -30,9 +29,8 @@ Package: libbluetooth3
 Architecture: linux-any
 Multi-Arch: same
 Section: libs
-Depends: ${shlibs:Depends},
-         ${misc:Depends}
-Pre-Depends: ${misc:Pre-Depends}
+Depends: ${misc:Depends},
+         ${shlibs:Depends}
 Description: Library to use the BlueZ Linux Bluetooth stack
  BlueZ is the official Linux Bluetooth protocol stack. It is an Open Source
  project distributed under GNU General Public License (GPL).
@@ -44,7 +42,7 @@ Section: libdevel
 Depends: libbluetooth3 (= ${binary:Version}),
          libc6-dev | libc-dev,
          ${misc:Depends}
-Suggests: pkg-config
+Suggests: pkgconf
 Provides: libbluetooth3-dev
 Description: Development files for using the BlueZ Linux Bluetooth library
  BlueZ is the official Linux Bluetooth protocol stack. It is an Open Source
@@ -55,11 +53,12 @@ Description: Development files for using the BlueZ Linux Bluetooth library
 
 Package: bluetooth
 Architecture: all
-Depends: ${misc:Depends},
-         bluez
+Multi-Arch: foreign
+Depends: bluez,
+         ${misc:Depends}
 Suggests: bluez-cups,
-	  bluez-obexd,
-	  bluez-meshd
+          bluez-meshd,
+          bluez-obexd
 Description: Bluetooth support (metapackage)
  This package provides all of the different plugins supported
  by the Bluez bluetooth stack.
@@ -67,12 +66,12 @@ Description: Bluetooth support (metapackage)
 Package: bluez
 Architecture: linux-any
 Multi-Arch: foreign
-Depends: ${shlibs:Depends},
-         ${misc:Depends},
+Depends: adduser,
+         default-dbus-system-bus | dbus-system-bus,
          kmod,
          udev,
-         default-dbus-system-bus | dbus-system-bus
-Pre-Depends: ${misc:Pre-Depends}
+         ${misc:Depends},
+         ${shlibs:Depends}
 Suggests: pulseaudio-module-bluetooth
 Description: Bluetooth tools and daemons
  This package contains tools and system daemons for using Bluetooth devices.
@@ -82,9 +81,9 @@ Description: Bluetooth tools and daemons
 
 Package: bluez-cups
 Architecture: linux-any
-Depends: ${shlibs:Depends},
-         cups,
-         ${misc:Depends}
+Depends: cups,
+         ${misc:Depends},
+         ${shlibs:Depends}
 Description: Bluetooth printer driver for CUPS
  This package contains a driver to let CUPS print to Bluetooth-connected
  printers.
@@ -94,8 +93,9 @@ Description: Bluetooth printer driver for CUPS
 
 Package: bluez-obexd
 Architecture: linux-any
-Depends: ${shlibs:Depends},
-         ${misc:Depends}
+Depends: ${misc:Depends},
+         ${shlibs:Depends},
+         evolution-data-server [!i386] <!pkg.bluez.noeds>,
 Recommends: dbus-user-session
 Description: bluez obex daemon
  This package contains a OBEX(OBject EXchange) daemon.
@@ -111,8 +111,8 @@ Description: bluez obex daemon
 
 Package: bluez-meshd
 Architecture: linux-any
-Depends: ${shlibs:Depends},
-         ${misc:Depends}
+Depends: ${misc:Depends},
+         ${shlibs:Depends}
 Description: bluetooth mesh daemon
  The Bluetooth Mesh network is a new Bluetooth feature that extends "Bluetooth
  Low Energy (BLE)".
@@ -125,8 +125,8 @@ Description: bluetooth mesh daemon
 
 Package: bluez-hcidump
 Architecture: linux-any
-Depends: ${shlibs:Depends},
-         ${misc:Depends}
+Depends: ${misc:Depends},
+         ${shlibs:Depends}
 Description: Analyses Bluetooth HCI packets
  The hcidump utility allows the monitoring of Bluetooth activity.
  It provides a disassembly of the Bluetooth traffic and can display
@@ -140,9 +140,9 @@ Description: Analyses Bluetooth HCI packets
 
 Package: bluez-test-tools
 Architecture: linux-any
-Depends: ${shlibs:Depends},
+Depends: bluez (= ${binary:Version}),
          ${misc:Depends},
-         bluez (= ${binary:Version})
+         ${shlibs:Depends}
 Description: test tools of bluez
  This package contains test tools for using BlueZ.
  .
@@ -151,6 +151,10 @@ Description: test tools of bluez
 
 Package: bluez-test-scripts
 Architecture: all
+Multi-Arch: foreign
+# Build if (!nodoc) && (!noinsttest)
+# nodoc would produce an empty package
+Build-Profiles: <!nodoc !noinsttest>
 Depends: ${misc:Depends}
 Description: test scripts of bluez
  This package contains test scripts for using BlueZ.
@@ -160,6 +164,7 @@ Description: test scripts of bluez
 
 Package: bluez-source
 Architecture: all
+Multi-Arch: foreign
 Depends: ${misc:Depends}
 Description: Source code for the BlueZ Linux Bluetooth stack
  This package contains the sources and patches which are needed

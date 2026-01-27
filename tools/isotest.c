@@ -35,20 +35,23 @@
 #include <sys/wait.h>
 #include <poll.h>
 
-#include "lib/bluetooth.h"
-#include "lib/hci.h"
-#include "lib/hci_lib.h"
-#include "lib/mgmt.h"
-#include "lib/iso.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/hci.h"
+#include "bluetooth/hci_lib.h"
+#include "bluetooth/mgmt.h"
+#include "bluetooth/iso.h"
 
 #include "src/shared/util.h"
 
 #define NSEC_USEC(_t) (_t / 1000L)
 #define SEC_USEC(_t)  (_t  * 1000000L)
 #define TS_USEC(_ts)  (SEC_USEC((_ts)->tv_sec) + NSEC_USEC((_ts)->tv_nsec))
+#define ROUND_CLOSEST(_x, _y) (((_x) + (_y / 2)) / (_y))
 
 #define DEFAULT_BIG_ID 0x01
 #define DEFAULT_BIS_ID 0x01
+
+#define MAX_DATA_SIZE 0x40000000
 
 /* Test modes */
 enum {
@@ -642,7 +645,7 @@ static void dump_mode(int fd, int sk, char *peer)
 	}
 
 	syslog(LOG_INFO, "Receiving ...");
-	while ((len = read(sk, buf, data_size)) > 0) {
+	while ((len = read(sk, buf, data_size)) >= 0) {
 		if (fd >= 0) {
 			len = write(fd, buf, len);
 			if (len < 0) {
@@ -680,10 +683,10 @@ static void recv_mode(int fd, int sk, char *peer)
 			int r;
 
 			r = recv(sk, buf, data_size, 0);
-			if (r <= 0) {
-				if (r < 0)
-					syslog(LOG_ERR, "Read failed: %s (%d)",
-							strerror(errno), errno);
+			if (r < 0) {
+				syslog(LOG_ERR, "Read failed: %s (%d)",
+						strerror(errno), errno);
+
 				if (errno != ENOTCONN)
 					return;
 
@@ -720,7 +723,7 @@ static int open_file(const char *filename)
 	syslog(LOG_INFO, "Opening %s ...", filename);
 
 	fd = open(filename, O_RDONLY);
-	if (fd <= 0) {
+	if (fd < 0) {
 		syslog(LOG_ERR, "Can't open file %s: %s\n",
 						filename, strerror(errno));
 	}
@@ -834,7 +837,9 @@ static void do_send(int sk, int fd, char *peer, bool repeat)
 	}
 
 	/* num of packets = latency (ms) / interval (us) */
-	num = (out->latency * 1000 / out->interval);
+	num = ROUND_CLOSEST(out->latency * 1000, out->interval);
+	if (!num)
+		num = 1;
 
 	syslog(LOG_INFO, "Number of packets: %d", num);
 
@@ -843,8 +848,7 @@ static void do_send(int sk, int fd, char *peer, bool repeat)
 		 * latency:
 		 * jitter buffer = 2 * (SDU * subevents)
 		 */
-		sndbuf = 2 * ((out->latency * 1000 / out->interval) *
-							out->sdu);
+		sndbuf = 2 * (num * out->sdu);
 
 	len = sizeof(sndbuf);
 	if (setsockopt(sk, SOL_SOCKET, SO_SNDBUF, &sndbuf, len) < 0) {
@@ -922,7 +926,7 @@ static void send_mode(char *filename, char *peer, int i, bool repeat)
 		if (!err)
 			fd = open_file(altername);
 
-		if (fd <= 0)
+		if (fd < 0)
 			fd = open_file(filename);
 	}
 
@@ -950,6 +954,8 @@ static void send_mode(char *filename, char *peer, int i, bool repeat)
 			close(sk_arr[i]);
 
 		free(sk_arr);
+		if (fd >= 0)
+			close(fd);
 		return;
 	}
 
@@ -1249,7 +1255,7 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'b':
-			if (optarg)
+			if (optarg && atoi(optarg) < MAX_DATA_SIZE)
 				data_size = atoi(optarg);
 			break;
 
@@ -1454,9 +1460,18 @@ int main(int argc, char *argv[])
 
 		switch (mode) {
 		case SEND:
-			send_mode(filename, argv[optind + i], i, repeat);
-			if (filename && strchr(filename, ','))
-				filename = strchr(filename, ',') + 1;
+			peer = argv[optind + i];
+			if (bachk(peer) < 0) {
+				fprintf(stderr, "Invalid peer address '%s'\n",
+						peer);
+				exit(1);
+			}
+			send_mode(filename, peer, i, repeat);
+			if (filename && strchr(filename, ',')) {
+				char *tmp = filename;
+				filename = strdup(strchr(filename, ',') + 1);
+				free(tmp);
+			}
 			break;
 
 		case RECONNECT:
@@ -1469,6 +1484,11 @@ int main(int argc, char *argv[])
 
 		case CONNECT:
 			peer = argv[optind + i];
+			if (bachk(peer) < 0) {
+				fprintf(stderr, "Invalid peer address '%s'\n",
+						peer);
+				exit(1);
+			}
 
 			mgmt_set_experimental();
 
@@ -1506,7 +1526,7 @@ int main(int argc, char *argv[])
 
 				free(sk_arr);
 			} else {
-				sk = do_connect(argv[optind + i]);
+				sk = do_connect(peer);
 				if (sk < 0)
 					exit(1);
 

@@ -4,9 +4,7 @@
 
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all optimize=+lto
 CONFIGURE_FLAGS := \
-	--disable-silent-rules \
 	--with-dbusconfdir=/usr/share \
-	--libdir=\$${prefix}/lib/$(DEB_HOST_MULTIARCH) \
 	--enable-static \
 	--enable-tools \
 	--enable-cups \
@@ -19,7 +17,6 @@ CONFIGURE_FLAGS := \
 	--enable-library \
 	--enable-test \
 	--enable-nfc \
-	--enable-sap \
 	--enable-monitor \
 	--enable-udev \
 	--enable-obex \
@@ -37,6 +34,13 @@ CONFIGURE_FLAGS := \
 DEB_CFLAGS_MAINT_APPEND += -DFIRMWARE_DIR=/lib/firmware
 export DEB_CFLAGS_MAINT_APPEND
 
+ifeq (,$(filter pkg.bluez.noeds,$(DEB_BUILD_PROFILES)))
+# Ubuntu doesn't build evolution-data-server on i386
+ifeq (,$(filter $(DEB_HOST_ARCH),i386))
+  CONFIGURE_FLAGS += --with-phonebook=ebook
+endif
+endif
+
 ifeq ($(shell dpkg-vendor --is Ubuntu && echo yes) $(DEB_HOST_ARCH), yes i386)
    skip_packages = -Nbluez-cups
 endif
@@ -47,11 +51,10 @@ export deb_udevdir = $(shell pkg-config --variable=udevdir udev | sed s,^/,,)
 %:
 	dh $@ --exclude=.la
 
-override_dh_install:
+execute_before_dh_install:
 	# Remove test scripts, and these are taken directly into the package
 	# from the test directory
 	rm -rf debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/bluez
-	dh_install
 
 override_dh_auto_configure:
 	dh_auto_configure -- $(CONFIGURE_FLAGS)
@@ -71,9 +74,10 @@ override_dh_builddeb:
 override_dh_gencontrol:
 	dh_gencontrol ${skip_packages}
 
-override_dh_fixperms-indep:
-	dh_fixperms
+execute_after_dh_fixperms-indep:
+ifneq ($(filter bluez-test-scripts,$(shell dh_listpackages)),)
 	chmod 0644 debian/bluez-test-scripts/usr/share/doc/bluez-test-scripts/examples/*
+endif
 
 override_dh_auto_install-indep: build_bluez-source
 BUILDDIRSOURCE := $(shell pwd)/debian/tmp-source/bluez-source

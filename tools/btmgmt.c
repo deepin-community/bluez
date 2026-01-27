@@ -46,13 +46,9 @@ int main(int argc, char *argv[])
 
 	bt_shell_init(argc, argv, &opt);
 
-	if (!mgmt_add_submenu()) {
-		fprintf(stderr, "Unable to open mgmt_socket\n");
-		return EXIT_FAILURE;
-	}
-
-	bt_shell_attach(fileno(stdin));
+	mgmt_add_submenu();
 	mgmt_set_index(index_option);
+	bt_shell_attach(fileno(stdin));
 	status = bt_shell_run();
 
 	mgmt_remove_submenu();

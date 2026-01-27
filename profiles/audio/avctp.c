@@ -29,10 +29,10 @@
 
 #include <glib.h>
 
-#include "lib/bluetooth.h"
-#include "lib/sdp.h"
-#include "lib/l2cap.h"
-#include "lib/uuid.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/sdp.h"
+#include "bluetooth/l2cap.h"
+#include "bluetooth/uuid.h"
 
 #include "btio/btio.h"
 #include "src/adapter.h"
@@ -228,7 +228,7 @@ struct avctp_browsing_pdu_handler {
 	GDestroyNotify destroy;
 };
 
-static struct {
+static const struct {
 	const char *name;
 	uint8_t avc;
 	uint16_t uinput;

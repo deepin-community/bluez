@@ -30,8 +30,8 @@
 #include "parser/parser.h"
 #include "parser/sdp.h"
 
-#include "lib/hci.h"
-#include "lib/hci_lib.h"
+#include "bluetooth/hci.h"
+#include "bluetooth/hci_lib.h"
 
 #define SNAP_LEN	HCI_MAX_FRAME_SIZE
 
@@ -610,7 +610,7 @@ static void usage(void)
 	"  -m, --manufacturer=compid  Default manufacturer\n"
 	"  -w, --save-dump=file       Save dump to a file\n"
 	"  -r, --read-dump=file       Read dump from a file\n"
-	"  -t, --ts                   Display time stamps\n"
+	"  -t, --timestamp            Display time stamps\n"
 	"  -a, --ascii                Dump data in ascii\n"
 	"  -x, --hex                  Dump data in hex\n"
 	"  -X, --ext                  Dump data in hex and ascii\n"

@@ -26,9 +26,9 @@
 #include <readline/readline.h>
 #include <readline/history.h>
 
-#include "lib/bluetooth.h"
-#include "lib/sdp.h"
-#include "lib/uuid.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/sdp.h"
+#include "bluetooth/uuid.h"
 
 #include "src/shared/util.h"
 #include "btio/btio.h"
@@ -760,7 +760,7 @@ static void cmd_mtu(int argcp, char **argvp)
 	gatt_exchange_mtu(attrib, opt_mtu, exchange_mtu_cb, NULL);
 }
 
-static struct {
+static const struct {
 	const char *cmd;
 	void (*func)(int argcp, char **argvp);
 	const char *params;

@@ -2,14 +2,15 @@
 builtin_modules += hostname
 builtin_sources += plugins/hostname.c
 
-builtin_modules += wiimote
-builtin_sources += plugins/wiimote.c
-
 builtin_modules += autopair
 builtin_sources += plugins/autopair.c
 
 builtin_modules += policy
 builtin_sources += plugins/policy.c
+
+builtin_sources += profiles/audio/media.h profiles/audio/media.c \
+			profiles/audio/transport.h profiles/audio/transport.c \
+			profiles/audio/player.h profiles/audio/player.c
 
 if ADMIN
 builtin_modules += admin
@@ -35,8 +36,6 @@ builtin_sources += profiles/audio/source.h profiles/audio/source.c \
 			profiles/audio/sink.h profiles/audio/sink.c \
 			profiles/audio/a2dp.h profiles/audio/a2dp.c \
 			profiles/audio/avdtp.h profiles/audio/avdtp.c \
-			profiles/audio/media.h profiles/audio/media.c \
-			profiles/audio/transport.h profiles/audio/transport.c \
 			profiles/audio/a2dp-codecs.h
 endif
 
@@ -45,8 +44,7 @@ if AVRCP
 builtin_modules += avrcp
 builtin_sources += profiles/audio/control.h profiles/audio/control.c \
 			profiles/audio/avctp.h profiles/audio/avctp.c \
-			profiles/audio/avrcp.h profiles/audio/avrcp.c \
-			profiles/audio/player.h profiles/audio/player.c
+			profiles/audio/avrcp.h profiles/audio/avrcp.c
 endif
 
 if NETWORK
@@ -74,8 +72,6 @@ builtin_sources += profiles/input/hog.c \
 			profiles/battery/bas.c profiles/battery/bas.h \
 			profiles/scanparam/scpp.c profiles/scanparam/scpp.h \
 			profiles/input/suspend.h profiles/input/suspend-none.c
-
-EXTRA_DIST += profiles/input/suspend-dummy.c
 endif
 
 if HEALTH
@@ -110,11 +106,9 @@ builtin_modules += battery
 builtin_sources += profiles/battery/battery.c
 
 if SIXAXIS
-plugin_LTLIBRARIES += plugins/sixaxis.la
-plugins_sixaxis_la_SOURCES = plugins/sixaxis.c
-plugins_sixaxis_la_LDFLAGS = $(AM_LDFLAGS) -module -avoid-version
-plugins_sixaxis_la_LIBADD = $(UDEV_LIBS)
-plugins_sixaxis_la_CFLAGS = $(AM_CFLAGS) -fvisibility=hidden
+builtin_modules += sixaxis
+builtin_sources += plugins/sixaxis.c
+builtin_ldadd += $(UDEV_LIBS)
 endif
 
 if BAP
@@ -134,7 +128,7 @@ endif
 
 if VCP
 builtin_modules += vcp
-builtin_sources += profiles/audio/vcp.c
+builtin_sources += profiles/audio/vcp.h profiles/audio/vcp.c
 endif
 
 if MICP
@@ -142,7 +136,17 @@ builtin_modules += micp
 builtin_sources += profiles/audio/micp.c
 endif
 
+if CCP
+builtin_modules += ccp
+builtin_sources += profiles/audio/ccp.c
+endif
+
 if CSIP
 builtin_modules += csip
 builtin_sources += profiles/audio/csip.c
+endif
+
+if ASHA
+builtin_modules += asha
+builtin_sources += profiles/audio/asha.h profiles/audio/asha.c
 endif

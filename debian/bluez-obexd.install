@@ -1,4 +1,5 @@
-usr/libexec/bluetooth/obexd
-usr/libexec/bluetooth/obexd.sh
-usr/share/dbus-1/services/org.bluez.obex.service
+usr/lib/systemd/user/dbus-org.bluez.obex.service
 usr/lib/systemd/user/obex.service
+usr/libexec/bluetooth/obexd
+usr/share/dbus-1/services/org.bluez.obex.service
+usr/share/dbus-1/system.d/obex.conf

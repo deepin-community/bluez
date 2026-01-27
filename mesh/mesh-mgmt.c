@@ -12,10 +12,12 @@
 #include <config.h>
 #endif
 
+#include <time.h>
+
 #include <ell/ell.h>
 
-#include "lib/bluetooth.h"
-#include "lib/mgmt.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/mgmt.h"
 #include "src/shared/mgmt.h"
 
 #include "mesh/mesh-mgmt.h"

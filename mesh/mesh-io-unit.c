@@ -19,7 +19,10 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <time.h>
 #include <ell/ell.h>
+
+#include "src/shared/ad.h"
 
 #include "mesh/mesh-defs.h"
 #include "mesh/dbus.h"
@@ -58,7 +61,7 @@ struct tx_pkt {
 	struct mesh_io_send_info	info;
 	bool				delete;
 	uint8_t				len;
-	uint8_t				pkt[30];
+	uint8_t				pkt[MESH_AD_MAX_LEN];
 };
 
 struct tx_pattern {
@@ -340,7 +343,7 @@ static void tx_to(struct l_timeout *timeout, void *user_data)
 		count = 1;
 	}
 
-	tx->delete = !!(count == 1);
+	tx->delete = (count == 1);
 
 	send_pkt(pvt, tx, ms);
 

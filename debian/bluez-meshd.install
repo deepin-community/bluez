@@ -1,7 +1,8 @@
-usr/share/dbus-1/system.d/bluetooth-mesh.conf
 ${env:deb_systemdsystemunitdir}/bluetooth-mesh.service
+etc/bluetooth/mesh-main.conf
 usr/bin/mesh-cfgclient
 usr/bin/mesh-cfgtest
 usr/bin/meshctl
 usr/libexec/bluetooth/bluetooth-meshd
 usr/share/dbus-1/system-services/org.bluez.mesh.service
+usr/share/dbus-1/system.d/bluetooth-mesh.conf
