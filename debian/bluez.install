@@ -27,6 +27,7 @@ usr/bin/rfcomm
 usr/bin/sdptool
 usr/lib/systemd/user/mpris-proxy.service
 usr/libexec/bluetooth/bluetoothd
+usr/libexec/bluetooth/bluetoothd.sh
 usr/share/dbus-1/system-services/org.bluez.service
 usr/share/dbus-1/system.d/bluetooth.conf
 usr/share/zsh/site-functions/_bluetoothctl
