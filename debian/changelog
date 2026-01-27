@@ -1,3 +1,10 @@
+bluez (5.85-3deepin2) unstable; urgency=medium
+
+  * add libsystemd-dev dependency
+  * 
+
+ -- tunaichao <tunaichao@uniontech.com>  Tue, 27 Jan 2026 14:19:18 +0800
+
 bluez (5.85-3deepin1) unstable; urgency=medium
 
   * Remove libebook1.2-dev dependency from bluez
