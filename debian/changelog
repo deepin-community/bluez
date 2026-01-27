@@ -1,3 +1,9 @@
+bluez (5.85-3deepin4) unstable; urgency=medium
+
+  * Change the service startup program to use a shell script.
+
+ -- tunaichao <tunaichao@uniontech.com>  Tue, 27 Jan 2026 20:29:53 +0800
+
 bluez (5.85-3deepin3) unstable; urgency=medium
 
   * chore: disable auto enable
