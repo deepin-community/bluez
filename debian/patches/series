@@ -10,3 +10,5 @@ raspi-bcm43xx-load-firmware.patch
 raspi-bcm43xx-3wire.patch
 ubuntu_error_restart.patch
 main.conf.patch
+uniontech-add-custom-config-for-huawei.patch
+uniontech-add-sh-for-debug.patch
