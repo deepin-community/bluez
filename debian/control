@@ -9,7 +9,6 @@ Build-Depends: debhelper-compat (= 13),
                libasound2-dev,
                libdbus-1-dev (>= 1.6),
                libdw-dev,
-               libebook1.2-dev [!i386] <!pkg.bluez.noeds>,
                libell-dev (>= 0.39),
                libglib2.0-dev,
                libical-dev,
@@ -95,7 +94,6 @@ Package: bluez-obexd
 Architecture: linux-any
 Depends: ${misc:Depends},
          ${shlibs:Depends},
-         evolution-data-server [!i386] <!pkg.bluez.noeds>,
 Recommends: dbus-user-session
 Description: bluez obex daemon
  This package contains a OBEX(OBject EXchange) daemon.

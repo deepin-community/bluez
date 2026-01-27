@@ -34,13 +34,6 @@ CONFIGURE_FLAGS := \
 DEB_CFLAGS_MAINT_APPEND += -DFIRMWARE_DIR=/lib/firmware
 export DEB_CFLAGS_MAINT_APPEND
 
-ifeq (,$(filter pkg.bluez.noeds,$(DEB_BUILD_PROFILES)))
-# Ubuntu doesn't build evolution-data-server on i386
-ifeq (,$(filter $(DEB_HOST_ARCH),i386))
-  CONFIGURE_FLAGS += --with-phonebook=ebook
-endif
-endif
-
 ifeq ($(shell dpkg-vendor --is Ubuntu && echo yes) $(DEB_HOST_ARCH), yes i386)
    skip_packages = -Nbluez-cups
 endif
