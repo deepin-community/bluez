@@ -12,3 +12,4 @@ ubuntu_error_restart.patch
 main.conf.patch
 uniontech-add-custom-config-for-huawei.patch
 uniontech-add-sh-for-debug.patch
+deepin-bug282163-Fix-main-conf-for-connection.patch
