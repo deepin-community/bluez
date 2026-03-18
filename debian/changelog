@@ -1,3 +1,9 @@
+bluez (5.85-3deepin6) unstable; urgency=medium
+
+  * Obexd exits immediately upon logout.
+
+ -- tunaichao <tunaichao@uniontech.com>  Wed, 18 Mar 2026 14:08:05 +0800
+
 bluez (5.85-3deepin5) unstable; urgency=medium
 
   * fix: Fix main conf for connection.

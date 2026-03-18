@@ -1,0 +1,11 @@
+Index: bluez/obexd/src/obex.service.in
+===================================================================
+--- bluez.orig/obexd/src/obex.service.in
++++ bluez/obexd/src/obex.service.in
+@@ -1,5 +1,6 @@
+ [Unit]
+ Description=Bluetooth OBEX service
++PartOf=graphical-session.target
+ 
+ [Service]
+ Type=dbus
