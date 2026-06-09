@@ -1,3 +1,8 @@
+bluez (5.85-3deepin7) unstable; urgency=medium
+
+  * Add BPF filter for registered HCI events
+
+ -- deepin-ci-robot <packages@deepin.org>  Tue, 09 Jun 2026 09:28:15 +0800
 bluez (5.85-3deepin6) unstable; urgency=medium
 
   * Obexd exits immediately upon logout.
