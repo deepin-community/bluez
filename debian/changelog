@@ -1,3 +1,9 @@
+bluez (5.85-3deepin7) unstable; urgency=medium
+
+  * fix inverted NULL check in gatt_db clone.
+
+ -- tunaichao <tunaichao@uniontech.com>  Tue, 23 Jun 2026 15:22:48 +0800
+
 bluez (5.85-3deepin6) unstable; urgency=medium
 
   * Obexd exits immediately upon logout.

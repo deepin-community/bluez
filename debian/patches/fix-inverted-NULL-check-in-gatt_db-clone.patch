@@ -1,0 +1,26 @@
+From 757cd98f4186e6e1e38b0a36539b78a20e93b5bf Mon Sep 17 00:00:00 2001
+From: Zhao Dongdong <zhaodongdong@kylinos.cn>
+Date: Mon, 18 May 2026 14:45:32 +0800
+Subject: [PATCH] device: fix inverted NULL check in gatt_db clone
+
+gatt_db_clone() returns NULL on failure so the condition was inverted.
+With the old check a successful clone (non-NULL) would return false and
+skip swapping the device's GATT database, while a failure (NULL) would
+fall through and dereference a NULL pointer a few lines below.
+
+Fix by negating the condition: only bail out early if the clone failed;
+proceed with the swap when the clone actually succeeds.
+
+Index: bluez/src/device.c
+===================================================================
+--- bluez.orig/src/device.c
++++ bluez/src/device.c
+@@ -7691,7 +7691,7 @@ bool btd_device_set_gatt_db(struct btd_d
+ 		return false;
+ 
+ 	clone = gatt_db_clone(db);
+-	if (clone)
++	if (!clone)
+ 		return false;
+ 
+ 	gatt_db_unregister(device->db, device->db_id);
