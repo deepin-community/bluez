@@ -15,3 +15,4 @@ uniontech-add-sh-for-debug.patch
 deepin-bug282163-Fix-main-conf-for-connection.patch
 deepin-bug321717-Obexd-exits-immediately-upon-logout.patch
 fix-inverted-NULL-check-in-gatt_db-clone.patch
+fix-integer-overflow-in-sdp_extract_seqtype.patch

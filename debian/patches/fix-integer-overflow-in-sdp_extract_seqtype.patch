@@ -1,0 +1,35 @@
+From dc07b3d54b801dea84e82397057071a824a38500 Mon Sep 17 00:00:00 2001
+From: Pauli Virtanen <pav@iki.fi>
+Date: Sun, 17 May 2026 13:30:09 +0300
+Subject: [PATCH] sdp: Fix integer overflow in sdp_extract_seqtype
+
+Check uint32_t value does not overflow int range.
+
+Link: https://lore.kernel.org/linux-bluetooth/ygH6bncNsvf-0Hco92Ae11Lw8-jOfekFO6O3bUvFK8w0DTueny_rwJIF6ffZg2G_XCB4v8h8xRIcAL2b_KwaweNcGa231ZQDHCMpzyvR5i8=@fluentlogic.org/
+
+Index: bluez/lib/bluetooth/sdp.c
+===================================================================
+--- bluez.orig/lib/bluetooth/sdp.c
++++ bluez/lib/bluetooth/sdp.c
+@@ -1214,6 +1214,7 @@ int sdp_extract_seqtype(const uint8_t *b
+ {
+ 	uint8_t dtd;
+ 	int scanned = sizeof(uint8_t);
++	uint32_t val32;
+ 
+ 	if (bufsize < (int) sizeof(uint8_t)) {
+ 		SDPERR("Unexpected end of packet");
+@@ -1249,7 +1250,12 @@ int sdp_extract_seqtype(const uint8_t *b
+ 			SDPERR("Unexpected end of packet");
+ 			return 0;
+ 		}
+-		*size = bt_get_be32(buf);
++		val32 = bt_get_be32(buf);
++		if (val32 > INT_MAX) {
++			SDPERR("Invalid size");
++			return 0;
++		}
++		*size = val32;
+ 		scanned += sizeof(uint32_t);
+ 		break;
+ 	default:

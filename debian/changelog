@@ -1,3 +1,9 @@
+bluez (5.85-3deepin8) unstable; urgency=medium
+
+  * Fix integer overflow in sdp_extract_seqtype.
+
+ -- tunaichao <tunaichao@uniontech.com>  Tue, 23 Jun 2026 16:12:10 +0800
+
 bluez (5.85-3deepin7) unstable; urgency=medium
 
   * fix inverted NULL check in gatt_db clone.
