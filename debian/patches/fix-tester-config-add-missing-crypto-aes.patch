@@ -1,0 +1,37 @@
+From 2470448ed9d7ddff2347215a91b28de3a4565b0c Mon Sep 17 00:00:00 2001
+From: Pauli Virtanen <pav@iki.fi>
+Date: Sun, 17 May 2026 23:51:30 +0300
+Subject: [PATCH] tester.config: add missing CRYPTO_AES
+
+Kernel commit 4a1507625b0 ("Bluetooth: SMP: Use AES-CMAC library
+API") removed CRYPTO_AES from the default Bluetooth kernel config.
+
+This causes Bluetooth testbots to fail silently with "Not Run" status:
+
+Basic Framework - Success - init
+  Read Index List callback
+    Status: 0x00
+Bluetooth: hci0: Opcode 0x0c03 failed: -110
+Bluetooth: hci0: Opcode 0x0c03 failed: -110
+  hciemu: Failed to open vhci
+  Failed to setup HCI emulation
+Basic Framework - Success - pre setup failed
+Basic Framework - Success - done
+...
+SCO CVSD Listen Send - Success                       Not Run
+Total: 30, Passed: 0 (0.0%), Failed: 0, Not Run: 30
+
+Fix by explicitly requiring CRYPTO_AES.
+
+diff --git a/doc/test-runner.rst b/doc/test-runner.rst
+index 60f18683c..ff2420ea8 100644
+--- a/doc/test-runner.rst
++++ b/doc/test-runner.rst
+@@ -84,6 +84,7 @@ Bluetooth
+ 	CONFIG_BT_HCIUART_H4=y
+ 	CONFIG_BT_HCIVHCI=y
+ 
++	CONFIG_CRYPTO_AES=y
+ 	CONFIG_CRYPTO_CMAC=y
+ 	CONFIG_CRYPTO_USER_API=y
+ 	CONFIG_CRYPTO_USER_API_HASH=y
