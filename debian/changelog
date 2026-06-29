@@ -1,3 +1,9 @@
+bluez (5.85-3deepin7) unstable; urgency=medium
+
+  * Add support for HCI Event Encryption Change v2 in monitor.
+
+ -- deepin-ci-robot <packages@deepin.org>  Mon, 29 Jun 2026 00:00:00 +0800
+
 bluez (5.85-3deepin6) unstable; urgency=medium
 
   * Obexd exits immediately upon logout.

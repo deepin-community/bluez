@@ -1,0 +1,62 @@
+From b493164ffbff277bdb540f6d779ba4b4645b3679 Mon Sep 17 00:00:00 2001
+From: Archie Pusaka <apusaka@chromium.org>
+Date: Fri, 22 May 2026 19:15:12 +0800
+Subject: [PATCH] monitor: Add support for HCI Event Encryption Change v2
+
+> HCI Event: Encryption Change v2 (0x59) plen 5
+        Status: Success (0x00)
+        Handle: 256 (BR-ACL) Address: 00:11:22:34:56:78
+        Encryption: Enabled with E0 (0x01)
+        Key size: 16
+
+diff --git a/monitor/bt.h b/monitor/bt.h
+index 60fe2efbf..a849c18a9 100644
+--- a/monitor/bt.h
++++ b/monitor/bt.h
+@@ -3739,6 +3739,14 @@ struct bt_hci_evt_auth_payload_timeout_expired {
+ 	uint16_t handle;
+ } __attribute__ ((packed));
+ 
++#define BT_HCI_EVT_ENCRYPT_CHANGE_V2		0x59
++struct bt_hci_evt_encrypt_change_v2 {
++	uint8_t  status;
++	uint16_t handle;
++	uint8_t  encr_mode;
++	uint8_t  encr_key_size;
++} __attribute__ ((packed));
++
+ #define BT_HCI_EVT_LE_CONN_COMPLETE		0x01
+ struct bt_hci_evt_le_conn_complete {
+ 	uint8_t  status;
+diff --git a/monitor/packet.c b/monitor/packet.c
+index 873c49ed1..41f0226c3 100644
+--- a/monitor/packet.c
++++ b/monitor/packet.c
+@@ -12193,6 +12193,17 @@ static void auth_payload_timeout_expired_evt(struct timeval *tv, uint16_t index,
+ 	print_handle(evt->handle);
+ }
+ 
++static void encrypt_change_evt_v2(struct timeval *tv, uint16_t index,
++					const void *data, uint8_t size)
++{
++	const struct bt_hci_evt_encrypt_change_v2 *evt = data;
++
++	print_status(evt->status);
++	print_handle(evt->handle);
++	print_encr_mode_change(evt->encr_mode, evt->handle);
++	print_key_size(evt->encr_key_size);
++}
++
+ static void le_conn_complete_evt(struct timeval *tv, uint16_t index,
+ 					const void *data, uint8_t size)
+ {
+@@ -13949,6 +13960,8 @@ static const struct event_data event_table[] = {
+ 	{ 0x57, "Authenticated Payload Timeout Expired",
+ 				auth_payload_timeout_expired_evt, 2, true },
+ 	{ 0x58, "SAM Status Change" },
++	{ 0x59, "Encryption Change v2",
++				encrypt_change_evt_v2, 5, true },
+ 	{ 0xfe, "Testing" },
+ 	{ 0xff, "Vendor", vendor_evt, 0, false },
+ 	{ }
+
