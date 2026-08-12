@@ -1,3 +1,9 @@
+bluez (5.85-3deepin10) unstable; urgency=medium
+
+  * Fix use-after-free on external media service teardown in profiles/audio.
+
+ -- deepin-ci-robot <packages@deepin.org>  Wed, 12 Aug 2026 16:30:26 +0800
+
 bluez (5.85-3deepin9) unstable; urgency=medium
 
   * Fix heap overflow in PBAP Database Identifier check and use-after-free in gatt-client teardown
