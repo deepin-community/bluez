@@ -1,3 +1,9 @@
+bluez (5.85-3deepin10) unstable; urgency=medium
+
+  * Fix heap-use-after-free on adapter removal: remove GATT database from dbs lookup list when destroyed.
+
+ -- deepin-ci-robot <packages@deepin.org>  Thu, 20 Aug 2026 09:33:52 +0800
+
 bluez (5.85-3deepin9) unstable; urgency=medium
 
   * Fix heap overflow in PBAP Database Identifier check and use-after-free in gatt-client teardown
