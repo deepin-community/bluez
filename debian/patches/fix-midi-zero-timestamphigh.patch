@@ -1,0 +1,58 @@
+From 220f102c8db9888bd113d0d53cd246ece3012696 Mon Sep 17 00:00:00 2001
+From: Matthew Cash <matthew@matthew-cash.com>
+Date: Sat, 27 Jun 2026 15:44:44 -0700
+Subject: [PATCH] profiles/midi: Fix zero timestampHigh
+
+BLE-MIDI timestampHigh can legitimately be zero. The MIDI parser used
+timestamp_high == 0 to decide whether it had already consumed the packet
+header, so packets starting with 0x80 0x80 caused the next running-status
+payload byte to be consumed as another timestamp header.
+
+Track whether timestampHigh has been read separately from its value so
+packed MIDI events with zero timestampHigh are parsed correctly.
+
+diff --git a/profiles/midi/libmidi.c b/profiles/midi/libmidi.c
+index 6f2914a8c..ef33f7dfd 100644
+--- a/profiles/midi/libmidi.c
++++ b/profiles/midi/libmidi.c
+@@ -110,6 +110,7 @@ int midi_read_init(struct midi_read_parser *parser)
+ 	parser->timestamp = 0;
+ 	parser->timestamp_low = 0;
+ 	parser->timestamp_high = 0;
++	parser->timestamp_high_set = false;
+ 
+ 	parser->sysex_stream.data = malloc(MIDI_SYSEX_MAX_SIZE);
+ 	if (!parser->sysex_stream.data)
+@@ -355,8 +356,10 @@ size_t midi_read_raw(struct midi_read_parser *parser, const uint8_t *data,
+ 	size_t i = 0;
+ 	bool err = false;
+ 
+-	if (parser->timestamp_high == 0)
++	if (!parser->timestamp_high_set) {
+ 		parser->timestamp_high = data[i++] & 0x3F;
++		parser->timestamp_high_set = true;
++	}
+ 
+ 	snd_midi_event_reset_encode(parser->midi_ev);
+ 
+diff --git a/profiles/midi/libmidi.h b/profiles/midi/libmidi.h
+index 41f522dd4..bcfac2063 100644
+--- a/profiles/midi/libmidi.h
++++ b/profiles/midi/libmidi.h
+@@ -83,6 +83,7 @@ struct midi_read_parser {
+ 	int16_t timestamp;               /* last MIDI-BLE timestamp */
+ 	int8_t timestamp_low;            /* MIDI-BLE timestampLow from the current packet */
+ 	int8_t timestamp_high;           /* MIDI-BLE timestampHigh from the current packet */
++	bool timestamp_high_set;         /* timestampHigh read */
+ 	struct midi_buffer sysex_stream; /* SysEx stream */
+ 	snd_midi_event_t *midi_ev;       /* midi<->seq event */
+ };
+@@ -100,6 +101,7 @@ static inline void midi_read_reset(struct midi_read_parser *parser)
+ 	parser->rstatus = 0;
+ 	parser->timestamp_low = 0;
+ 	parser->timestamp_high = 0;
++	parser->timestamp_high_set = false;
+ }
+ 
+ /* Parses raw BLE-MIDI messages and populates a sequencer event representing the
+
