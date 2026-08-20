@@ -17,3 +17,4 @@ deepin-bug321717-Obexd-exits-immediately-upon-logout.patch
 fix-inverted-NULL-check-in-gatt_db-clone.patch
 fix-integer-overflow-in-sdp_extract_seqtype.patch
 fix-pbap-databaseid-check-gatt-client-use-after-free.patch
+fix-monitor-packet-logger-notes-null-termination.patch
