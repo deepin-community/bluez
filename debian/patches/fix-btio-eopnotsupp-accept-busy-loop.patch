@@ -1,0 +1,29 @@
+From 8c580d30d2655f75796c31ca0d496ffd1578cb46 Mon Sep 17 00:00:00 2001
+From: Luiz Augusto von Dentz <luiz.von.dentz@intel.com>
+Date: Tue, 9 Jun 2026 11:48:03 -0400
+Subject: [PATCH] btio: Handle EOPNOTSUPP from accept() to prevent busy loop
+
+When accept() returns EOPNOTSUPP on an L2CAP SEQPACKET server socket
+(e.g. AVCTP browsing channel, PSM 0x1b), the error is permanent and
+retrying will never succeed. Previously, only EBADFD was treated as
+fatal, causing server_cb to return TRUE for EOPNOTSUPP. Since the fd
+remains readable, this creates an infinite busy loop that hangs
+bluetoothd.
+
+Treat EOPNOTSUPP the same as EBADFD by returning FALSE to remove the
+GLib IO watch and stop the loop.
+
+diff --git a/btio/btio.c b/btio/btio.c
+index 39d4411f7..4c69d6035 100644
+--- a/btio/btio.c
++++ b/btio/btio.c
+@@ -274,7 +274,7 @@ static gboolean server_cb(GIOChannel *io, GIOCondition cond,
+ 
+ 	cli_sock = accept(srv_sock, NULL, NULL);
+ 	if (cli_sock < 0) {
+-		if (errno == EBADFD)
++		if (errno == EBADFD || errno == EOPNOTSUPP)
+ 			return FALSE;
+ 		return TRUE;
+ 	}
+
