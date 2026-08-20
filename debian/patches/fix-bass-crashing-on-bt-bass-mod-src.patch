@@ -1,0 +1,66 @@
+From b3729e26cc42fb1477f325c994b2a51b34f929d7 Mon Sep 17 00:00:00 2001
+From: Luiz Augusto von Dentz <luiz.von.dentz@intel.com>
+Date: Tue, 14 Apr 2026 15:04:59 -0400
+Subject: [PATCH] bass: Fix crashing on BT_BASS_MOD_SRC
+
+If assistant attempt o modify source the code would attempt to iterate
+over all valid range of BIS indexes which may lead to the following
+trace since the delegator maybe freed in the process:
+
+ #0  queue_find (queue=<optimized out>, function=function@entry=0x58b8761109c0 <setup_match_bis>, match_data=match_data@entry=0x3) at src/shared/queue.c:230
+ #1  0x000058b8761127fb in bass_update_bis_sync (bcast_src=<optimized out>, dg=<optimized out>) at profiles/audio/bass.c:1824
+ #2  handle_mod_src_req (data=<optimized out>, params=<optimized out>, bcast_src=0x58b894661be0) at profiles/audio/bass.c:1862
+ #3  cp_handler (bcast_src=0x58b894661be0, op=<optimized out>, params=<optimized out>, user_data=<optimized out>) at profiles/audio/bass.c:1910
+ #4  0x000058b8761bc978 in bass_handle_mod_src_op (bass=<optimized out>, attrib=<optimized out>, opcode=<optimized out>, id=<optimized out>, iov=<optimized out>, att=<optimized out>)
+    at src/shared/bass.c:1069
+
+To fix the code will now just interate at existing setups checking if
+they match the BIS index then adding/removing the stream so it is no
+longer possible to free the delegator before all setups are processed.
+
+diff --git a/profiles/audio/bass.c b/profiles/audio/bass.c
+index bf0db0555..1fd7704a7 100644
+--- a/profiles/audio/bass.c
++++ b/profiles/audio/bass.c
+@@ -1854,32 +1854,24 @@ static int handle_set_bcode_req(struct bt_bcast_src *bcast_src,
+ 	return 0;
+ }
+ 
+-static bool setup_match_bis(const void *data, const void *match_data)
+-{
+-	const struct bass_setup *setup = data;
+-	const int bis =  PTR_TO_INT(match_data);
+-
+-	return setup->bis == bis;
+-}
+-
+ static void bass_update_bis_sync(struct bass_delegator *dg,
+ 				struct bt_bcast_src *bcast_src)
+ {
+-	for (int bis = 1; bis < ISO_MAX_NUM_BIS; bis++) {
+-		struct bass_setup *setup = queue_find(dg->setups,
+-				setup_match_bis, INT_TO_PTR(bis));
+-		uint8_t state;
++	const struct queue_entry *entry;
+ 
+-		if (!setup)
+-			continue;
++	/* Check if existing setups if BIS needs to be added/removed */
++	for (entry = queue_get_entries(dg->setups); entry;
++				entry = entry->next) {
++		struct bass_setup *setup = entry->data;
++		uint8_t state;
+ 
+ 		state = bt_bap_stream_get_state(setup->stream);
+ 
+-		if (!setup->stream && bt_bass_check_bis(bcast_src, bis))
++		if (!setup->stream && bt_bass_check_bis(bcast_src, setup->bis))
+ 			bass_add_bis(setup);
+ 		else if (setup->stream &&
+ 				state == BT_BAP_STREAM_STATE_STREAMING &&
+-				!bt_bass_check_bis(bcast_src, bis))
++				!bt_bass_check_bis(bcast_src, setup->bis))
+ 			bass_remove_bis(setup);
+ 	}
+ }
+
