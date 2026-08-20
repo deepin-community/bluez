@@ -1,3 +1,9 @@
+bluez (5.85-3deepin10) unstable; urgency=medium
+
+  * Fix failed bonding attempt after LE link disconnection for dual-bearer devices
+
+ -- deepin-ci-robot <packages@deepin.org>  Thu, 20 Aug 2026 10:20:13 +0800
+
 bluez (5.85-3deepin9) unstable; urgency=medium
 
   * Fix heap overflow in PBAP Database Identifier check and use-after-free in gatt-client teardown
