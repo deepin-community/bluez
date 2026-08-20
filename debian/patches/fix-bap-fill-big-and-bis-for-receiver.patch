@@ -1,0 +1,47 @@
+From 9d8d8cbd47498c412021dfc76ce715678e9aa762 Mon Sep 17 00:00:00 2001
+From: Michal Dzik <michal.dzik@streamunlimited.com>
+Date: Fri, 17 Apr 2026 13:29:13 +0200
+Subject: [PATCH] audio/bap: fill BIG and BIS for receiver
+
+This is for some reason a missing feature.
+We receive QoS structure from the kernel via BT_ISO_QOS, but BIG and BIS
+are not set there. In fact it is even impossible to pass them that way,
+as it is only one structure per remote device. That's why we have to parse
+BASE data to extract BIS and set it to stream->qos. BIG is not present
+explicitly in BASE, but we can use subgroup index with success.
+
+As a result of this commit, MediaTransport1 object has now a valid BIG
+and BIS set in QoS property.
+
+diff --git a/profiles/audio/bap.c b/profiles/audio/bap.c
+index 375026440..5333267f7 100644
+--- a/profiles/audio/bap.c
++++ b/profiles/audio/bap.c
+@@ -1502,6 +1502,7 @@ static void iso_bcast_confirm_cb(GIOChannel *io, GError *err, void *user_data)
+ 
+ static void create_stream_for_bis(struct bap_data *bap_data,
+ 				struct bt_bap_pac *lpac, uint8_t sid,
++				uint8_t bis, uint8_t sgrp,
+ 				struct bt_bap_qos *qos, struct iovec *caps,
+ 				struct iovec *meta, char *path)
+ {
+@@ -1512,6 +1513,8 @@ static void create_stream_for_bis(struct bap_data *bap_data,
+ 
+ 	/* Create an internal copy for bcode */
+ 	setup->qos.bcast.bcode = util_iov_dup(qos->bcast.bcode, 1);
++	setup->qos.bcast.big = sgrp;
++	setup->qos.bcast.bis = bis;
+ 
+ 	setup->data = bap_data;
+ 
+@@ -1550,7 +1553,8 @@ static void bis_handler(uint8_t sid, uint8_t bis, uint8_t sgrp,
+ 			sid, bis) < 0)
+ 		return;
+ 
+-	create_stream_for_bis(data, lpac, sid, qos, caps, meta, path);
++	create_stream_for_bis(data, lpac, sid, bis, sgrp, qos, caps, meta,
++									path);
+ }
+ 
+ static gboolean big_info_report_cb(GIOChannel *io, GIOCondition cond,
+
