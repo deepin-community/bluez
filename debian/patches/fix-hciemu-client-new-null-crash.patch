@@ -1,0 +1,40 @@
+From 6aa7f5b4e0224e8b6668d7b9787d11d443ec72fd Mon Sep 17 00:00:00 2001
+From: Luiz Augusto von Dentz <luiz.von.dentz@intel.com>
+Date: Tue, 5 May 2026 16:12:09 -0400
+Subject: [PATCH] hciemu: Fix crash if hciemu_client_new return NULL
+
+The following crahs can be observed if hciemu_client_new fails:
+
+ Invalid read of size 8
+   at 0x12DA79: queue_get_entries (queue.c:356)
+   by 0x118434: hciemu_get_client (hciemu.c:277)
+   by 0x1184A3: hciemu_client_get_host (hciemu.c:301)
+   by 0x11536B: setup_powered_common (l2cap-tester.c:1452)
+   by 0x11568E: setup_powered_client (l2cap-tester.c:1491)
+   by 0x1324C6: setup_callback (tester.c:500)
+   by 0x48A304D: g_main_context_dispatch (in /usr/lib/x86_64-linux-gnu/libglib-2.0.so.0.6400.6)
+   by 0x48A33FF: ??? (in /usr/lib/x86_64-linux-gnu/libglib-2.0.so.0.6400.6)
+   by 0x48A36F2: g_main_loop_run (in /usr/lib/x86_64-linux-gnu/libglib-2.0.so.0.6400.6)
+   by 0x133868: mainloop_run (mainloop-glib.c:65)
+   by 0x133C9F: mainloop_run_with_signal (mainloop-notify.c:196)
+   by 0x13325F: tester_run (tester.c:1085)
+  Address 0x4c1e388 is 8 bytes inside a block of size 32 free'd
+   at 0x483CA3F: free (in /usr/lib/x86_64-linux-gnu/valgrind/vgpreload_memcheck-amd64-linux.so)
+   by 0x1187BF: hciemu_new_num (hciemu.c:437)
+
+diff --git a/emulator/hciemu.c b/emulator/hciemu.c
+index 01a8e80b7..bff92286e 100644
+--- a/emulator/hciemu.c
++++ b/emulator/hciemu.c
+@@ -435,7 +435,9 @@ struct hciemu *hciemu_new_num(enum hciemu_type type, uint8_t num)
+ 
+ 		if (!client) {
+ 			queue_destroy(hciemu->clients, hciemu_client_destroy);
+-			break;
++			queue_destroy(hciemu->post_command_hooks, NULL);
++			free(hciemu);
++			return NULL;
+ 		}
+ 
+ 		queue_push_tail(hciemu->clients, client);
+
