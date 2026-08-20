@@ -1,0 +1,31 @@
+From 29fb17c909a0998b09aaee1dc0fb6163bd2619cb Mon Sep 17 00:00:00 2001
+From: michael_kong <kx960506@163.com>
+Date: Thu, 21 May 2026 11:28:14 +0800
+Subject: [PATCH] shared/bap: Fix unused value in qos
+
+In bt_bap_parse_base, PresentationDelay is parsed but not written to QoS.
+
+diff --git a/src/shared/bap.c b/src/shared/bap.c
+index 78ba22259..bd523e5e6 100644
+--- a/src/shared/bap.c
++++ b/src/shared/bap.c
+@@ -7655,16 +7655,15 @@ bool bt_bap_parse_base(uint8_t sid, struct iovec *iov,
+ 			bt_bap_bis_func_t handler,
+ 			void *user_data)
+ {
+-	uint32_t delay;
+ 	uint8_t sgrps;
+ 	bool ret = true;
+ 
+ 	util_debug(func, NULL, "BASE len: %zd", iov->iov_len);
+ 
+-	if (!util_iov_pull_le24(iov, &delay))
++	if (!util_iov_pull_le24(iov, &qos->bcast.delay))
+ 		return false;
+ 
+-	util_debug(func, NULL, "PresentationDelay: %d", delay);
++	util_debug(func, NULL, "PresentationDelay: %d", qos->bcast.delay);
+ 
+ 	if (!util_iov_pull_u8(iov, &sgrps))
+ 		return false;
+
