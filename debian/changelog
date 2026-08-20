@@ -1,3 +1,9 @@
+bluez (5.85-3deepin10) unstable; urgency=medium
+
+  * Use custom DBus timeouts only when a remote side is waiting; fixes BAP broadcast SetConfiguration 3s timeout being missed under high system load (e.g. VM on boot).
+
+ -- deepin-ci-robot <packages@deepin.org>  Thu, 20 Aug 2026 10:31:47 +0800
+
 bluez (5.85-3deepin9) unstable; urgency=medium
 
   * Fix heap overflow in PBAP Database Identifier check and use-after-free in gatt-client teardown
