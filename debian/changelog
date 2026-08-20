@@ -1,3 +1,9 @@
+bluez (5.85-3deepin10) unstable; urgency=medium
+
+  * Fix crash in tester tools when hciemu_new fails: unreference mgmt object and return on the pre-setup error path to avoid NULL dereference in read_info_callback.
+
+ -- deepin-ci-robot <packages@deepin.org>  Thu, 20 Aug 2026 10:05:33 +0800
+
 bluez (5.85-3deepin9) unstable; urgency=medium
 
   * Fix heap overflow in PBAP Database Identifier check and use-after-free in gatt-client teardown

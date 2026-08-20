@@ -1,0 +1,163 @@
+From acd0a49506a1a24a4fe532d77f6f5a1301b011bb Mon Sep 17 00:00:00 2001
+From: Luiz Augusto von Dentz <luiz.von.dentz@intel.com>
+Date: Wed, 6 May 2026 15:24:27 -0400
+Subject: [PATCH] tools/tester: Fix crash when hciemu_new fails
+
+When hciemu_new returns NULL, the mgmt object was not being unreferenced
+before returning from the pre-setup failure path. This could lead to a
+NULL dereference in read_info_callback when it later calls
+hciemu_get_address on the NULL hciemu pointer.
+
+Add mgmt_unref and return to the error path across all testers.
+
+Index: repo/tools/6lowpan-tester.c
+===================================================================
+--- repo.orig/tools/6lowpan-tester.c
++++ repo/tools/6lowpan-tester.c
+@@ -177,6 +177,8 @@ static void read_index_list_callback(uin
+ 	if (!data->hciemu) {
+ 		tester_warn("Failed to setup HCI emulation");
+ 		tester_pre_setup_failed();
++		mgmt_unref(data->mgmt);
++		data->mgmt = NULL;
+ 		return;
+ 	}
+ 
+Index: repo/tools/bnep-tester.c
+===================================================================
+--- repo.orig/tools/bnep-tester.c
++++ repo/tools/bnep-tester.c
+@@ -162,6 +162,9 @@ static void read_index_list_callback(uin
+ 	if (!data->hciemu) {
+ 		tester_warn("Failed to setup HCI emulation");
+ 		tester_pre_setup_failed();
++		mgmt_unref(data->mgmt);
++		data->mgmt = NULL;
++		return;
+ 	}
+ 
+ 	if (tester_use_debug())
+Index: repo/tools/ioctl-tester.c
+===================================================================
+--- repo.orig/tools/ioctl-tester.c
++++ repo/tools/ioctl-tester.c
+@@ -229,6 +229,9 @@ static void read_index_list_callback(uin
+ 	if (!data->hciemu) {
+ 		tester_warn("Failed to setup HCI emulation");
+ 		tester_pre_setup_failed();
++		mgmt_unref(data->mgmt);
++		data->mgmt = NULL;
++		return;
+ 	}
+ 
+ 	if (tester_use_debug())
+Index: repo/tools/iso-tester.c
+===================================================================
+--- repo.orig/tools/iso-tester.c
++++ repo/tools/iso-tester.c
+@@ -637,6 +637,8 @@ static void read_index_list_callback(uin
+ 	if (!data->hciemu) {
+ 		tester_warn("Failed to setup HCI emulation");
+ 		tester_pre_setup_failed();
++		mgmt_unref(data->mgmt);
++		data->mgmt = NULL;
+ 		return;
+ 	}
+ 
+Index: repo/tools/l2cap-tester.c
+===================================================================
+--- repo.orig/tools/l2cap-tester.c
++++ repo/tools/l2cap-tester.c
+@@ -210,6 +210,9 @@ static void read_index_list_callback(uin
+ 	if (!data->hciemu) {
+ 		tester_warn("Failed to setup HCI emulation");
+ 		tester_pre_setup_failed();
++		mgmt_unref(data->mgmt);
++		data->mgmt = NULL;
++		return;
+ 	}
+ 
+ 	if (tester_use_debug())
+Index: repo/tools/mesh-tester.c
+===================================================================
+--- repo.orig/tools/mesh-tester.c
++++ repo/tools/mesh-tester.c
+@@ -419,6 +419,9 @@ static void read_index_list_callback(uin
+ 	if (!data->hciemu) {
+ 		tester_warn("Failed to setup HCI emulation");
+ 		test_pre_setup_failed();
++		mgmt_unref(data->mgmt);
++		data->mgmt = NULL;
++		return;
+ 	}
+ 
+ 	if (tester_use_debug())
+Index: repo/tools/mgmt-tester.c
+===================================================================
+--- repo.orig/tools/mgmt-tester.c
++++ repo/tools/mgmt-tester.c
+@@ -431,6 +431,9 @@ static void read_index_list_callback(uin
+ 	if (!data->hciemu) {
+ 		tester_warn("Failed to setup HCI emulation");
+ 		test_pre_setup_failed();
++		mgmt_unref(data->mgmt);
++		data->mgmt = NULL;
++		return;
+ 	}
+ 
+ 	if (tester_use_debug())
+Index: repo/tools/rfcomm-tester.c
+===================================================================
+--- repo.orig/tools/rfcomm-tester.c
++++ repo/tools/rfcomm-tester.c
+@@ -167,6 +167,9 @@ static void read_index_list_callback(uin
+ 	if (!data->hciemu) {
+ 		tester_warn("Failed to setup HCI emulation");
+ 		tester_pre_setup_failed();
++		mgmt_unref(data->mgmt);
++		data->mgmt = NULL;
++		return;
+ 	}
+ 
+ 	if (tester_use_debug())
+Index: repo/tools/sco-tester.c
+===================================================================
+--- repo.orig/tools/sco-tester.c
++++ repo/tools/sco-tester.c
+@@ -181,6 +181,8 @@ static void read_index_list_callback(uin
+ 	if (!data->hciemu) {
+ 		tester_warn("Failed to setup HCI emulation");
+ 		tester_pre_setup_failed();
++		mgmt_unref(data->mgmt);
++		data->mgmt = NULL;
+ 		return;
+ 	}
+ 
+Index: repo/tools/smp-tester.c
+===================================================================
+--- repo.orig/tools/smp-tester.c
++++ repo/tools/smp-tester.c
+@@ -185,6 +185,9 @@ static void read_index_list_callback(uin
+ 	if (!data->hciemu) {
+ 		tester_warn("Failed to setup HCI emulation");
+ 		tester_pre_setup_failed();
++		mgmt_unref(data->mgmt);
++		data->mgmt = NULL;
++		return;
+ 	}
+ 
+ 	if (tester_use_debug())
+Index: repo/tools/userchan-tester.c
+===================================================================
+--- repo.orig/tools/userchan-tester.c
++++ repo/tools/userchan-tester.c
+@@ -156,6 +156,9 @@ static void read_index_list_callback(uin
+ 	if (!data->hciemu) {
+ 		tester_warn("Failed to setup HCI emulation");
+ 		tester_pre_setup_failed();
++		mgmt_unref(data->mgmt);
++		data->mgmt = NULL;
++		return;
+ 	}
+ 
+ 	tester_print("New hciemu instance created");
