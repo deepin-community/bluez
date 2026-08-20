@@ -1,3 +1,9 @@
+bluez (5.85-3deepin10) unstable; urgency=medium
+
+  * Fix checking LE bonding on HIDP: HIDP is classic-only (LE uses HOG), so check bonding with BDADDR_BREDR instead of the device address type which for dual-mode devices maps to an LE address.
+
+ -- deepin-ci-robot <packages@deepin.org>  Thu, 20 Aug 2026 09:58:14 +0800
+
 bluez (5.85-3deepin9) unstable; urgency=medium
 
   * Fix heap overflow in PBAP Database Identifier check and use-after-free in gatt-client teardown
