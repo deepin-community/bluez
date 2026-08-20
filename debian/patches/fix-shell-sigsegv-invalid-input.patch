@@ -1,0 +1,49 @@
+From 1436eab1d0e59f9022334ff7d75c8e5032e7a882 Mon Sep 17 00:00:00 2001
+From: Wouter <wouter@xesxen.nl>
+Date: Thu, 19 Mar 2026 15:14:35 +0100
+Subject: [PATCH] shared/shell: Fix SIGSEGV on invalid input
+
+This fixes a crash when handling "<space><tab>"
+
+==3760495== Invalid read of size 1
+==3760495==    at 0x4902187: strcmp (vg_replace_strmem.c:941)
+==3760495==    by 0x4067408: menu_completion (shell.c:1126)
+==3760495==    by 0x40675DE: shell_completion (shell.c:1177)
+==3760495==    by 0x4B267AB: gen_completion_matches (complete.c:1282)
+==3760495==    by 0x4B2F8C1: rl_complete_internal (complete.c:2104)
+==3760495==    by 0x4B26B52: _rl_dispatch_subseq (readline.c:941)
+==3760495==    by 0x4B27B71: readline_internal_char (readline.c:690)
+==3760495==    by 0x4B48695: rl_callback_read_char (callback.c:275)
+==3760495==    by 0x40655F2: bt_shell_input_line (shell.c:309)
+==3760495==    by 0x406577E: input_read (shell.c:343)
+==3760495==    by 0x4068CB4: watch_callback (io-glib.c:173)
+==3760495==    by 0x49C1F4C: g_main_dispatch (gmain.c:3565)
+==3760495==  Address 0x0 is not stack'd, malloc'd or (recently) free'd
+
+Signed-off-by: Luiz Augusto von Dentz <luiz.von.dentz@intel.com>
+
+diff --git a/src/shared/shell.c b/src/shared/shell.c
+index b061f8001..87a8a310d 100644
+--- a/src/shared/shell.c
++++ b/src/shared/shell.c
+@@ -1122,6 +1122,9 @@ static char **menu_completion(const struct bt_shell_menu_entry *entry,
+ {
+ 	char **matches = NULL;
+ 
++	if (argc == 0)
++		return NULL;
++
+ 	for (; entry->cmd; entry++) {
+ 		if (strcmp(entry->cmd, input_cmd))
+ 			continue;
+@@ -1147,6 +1150,9 @@ static char **submenu_completion(const char *text, int argc, char *input_cmd)
+ 	if (data.main != data.menu)
+ 		return NULL;
+ 
++	if (!input_cmd)
++		return NULL;
++
+ 	cmd = strrchr(input_cmd, '.');
+ 	if (!cmd)
+ 		return NULL;
+
