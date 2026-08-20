@@ -1,0 +1,32 @@
+From c0fec57e9fa28692dc36e12616c5b74e4fa425ec Mon Sep 17 00:00:00 2001
+From: Luiz Augusto von Dentz <luiz.von.dentz@intel.com>
+Date: Tue, 23 Jun 2026 15:14:32 -0400
+Subject: [PATCH] shared/bap: Don't transition to IDLE inside
+ bap_bcast_set_state
+
+Remove the recursive stream_set_state(IDLE) call from the RELEASING
+case in bap_bcast_set_state. This call re-entered bap_bcast_set_state
+while the state_cbs queue was still being iterated, causing a
+use-after-free if a callback unregistered itself during notification.
+
+diff --git a/src/shared/bap.c b/src/shared/bap.c
+index 9dd07bc5f..6086924a9 100644
+--- a/src/shared/bap.c
++++ b/src/shared/bap.c
+@@ -2436,7 +2436,6 @@ static void bap_bcast_set_state(struct bt_bap_stream *stream, uint8_t state)
+ 		break;
+ 	case BT_ASCS_ASE_STATE_RELEASING:
+ 		bap_stream_io_detach(stream);
+-		stream_set_state(stream, BT_BAP_STREAM_STATE_IDLE);
+ 		break;
+ 	case BT_ASCS_ASE_STATE_ENABLING:
+ 		if (bt_bap_stream_get_io(stream))
+@@ -2579,6 +2578,7 @@ static unsigned int bap_bcast_release(struct bt_bap_stream *stream,
+ 					void *user_data)
+ {
+ 	stream_set_state(stream, BT_BAP_STREAM_STATE_RELEASING);
++	stream_set_state(stream, BT_BAP_STREAM_STATE_IDLE);
+ 
+ 	return 1;
+ }
+

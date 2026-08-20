@@ -1,3 +1,9 @@
+bluez (5.85-3deepin10) unstable; urgency=medium
+
+  * Fix use-after-free in BAP broadcast stream state machine by removing recursive IDLE transition inside bap_bcast_set_state.
+
+ -- deepin-ci-robot <packages@deepin.org>  Thu, 20 Aug 2026 09:41:44 +0800
+
 bluez (5.85-3deepin9) unstable; urgency=medium
 
   * Fix heap overflow in PBAP Database Identifier check and use-after-free in gatt-client teardown
