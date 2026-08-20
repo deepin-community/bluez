@@ -1,0 +1,33 @@
+From bc0a839fa3839823a5c1e51a687d9adbb6156b8b Mon Sep 17 00:00:00 2001
+From: Michal Dzik <michal.dzik@streamunlimited.com>
+Date: Fri, 17 Apr 2026 13:29:14 +0200
+Subject: [PATCH] audio: update QoS dbus property after it is set
+
+Dbus set and get on QoS property use different data:
+- get uses bap->qos
+- set uses bap->stream->qos
+This works, because bap->qos is a copy of bap->stream->qos. The only
+issue is when we set this property and then try to get it. We see old, not
+updated copy. Simply calling bap_update_bcast_qos() fixes the problem.
+
+diff --git a/profiles/audio/transport.c b/profiles/audio/transport.c
+index 81a63c365..5c2a2777e 100644
+--- a/profiles/audio/transport.c
++++ b/profiles/audio/transport.c
+@@ -1556,6 +1556,8 @@ static void bcast_qos_set(void *user_data, int err)
+ 					"Failed to set Broadcast Code");
+ }
+ 
++static void bap_update_bcast_qos(const struct media_transport *transport);
++
+ static void set_bcast_qos(const GDBusPropertyTable *property,
+ 			DBusMessageIter *dict, GDBusPendingPropertySet id,
+ 			void *data)
+@@ -1604,6 +1606,7 @@ static void set_bcast_qos(const GDBusPropertyTable *property,
+ 	}
+ 
+ 	bt_bap_stream_qos(bap->stream, bap_qos, NULL, NULL);
++	bap_update_bcast_qos(transport);
+ 	g_dbus_pending_property_success(id);
+ }
+

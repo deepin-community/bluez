@@ -1,3 +1,9 @@
+bluez (5.85-3deepin10) unstable; urgency=medium
+
+  * Fix audio QoS dbus property not updated after being set (call bap_update_bcast_qos after bt_bap_stream_qos).
+
+ -- deepin-ci-robot <packages@deepin.org>  Thu, 20 Aug 2026 09:58:30 +0800
+
 bluez (5.85-3deepin9) unstable; urgency=medium
 
   * Fix heap overflow in PBAP Database Identifier check and use-after-free in gatt-client teardown
