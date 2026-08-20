@@ -1,0 +1,21 @@
+From 4771fd2fed346564ed322573d8c2a691b1fe8565 Mon Sep 17 00:00:00 2001
+From: Michal Dzik <michal.dzik@streamunlimited.com>
+Date: Fri, 17 Apr 2026 13:29:12 +0200
+Subject: [PATCH] shared/bap: run callback after setting the broadcast metadata
+
+Without this callback, dbus property setting will stall.
+
+diff --git a/src/shared/bap.c b/src/shared/bap.c
+index 8da626fe3..78ba22259 100644
+--- a/src/shared/bap.c
++++ b/src/shared/bap.c
+@@ -2526,6 +2526,9 @@ static unsigned int bap_bcast_metadata(struct bt_bap_stream *stream,
+ 	util_iov_free(stream->meta, 1);
+ 	stream->meta = util_iov_dup(data, 1);
+ 
++	if (func)
++		func(stream, BT_ASCS_RSP_SUCCESS, 0x00, user_data);
++
+ 	return 1;
+ }
+
