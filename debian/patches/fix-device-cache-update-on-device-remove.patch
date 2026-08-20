@@ -1,0 +1,25 @@
+From 279c4ac70c77d88e1947cef98cdabc288d2430d3 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fr=C3=A9d=C3=A9ric=20Danis?= <frederic.danis@collabora.com>
+Date: Mon, 8 Jun 2026 14:27:13 +0200
+Subject: [PATCH] device: Fix cache update on device remove
+
+If there's no other group than the one explicitly removed the length
+returned by g_key_file_to_data() will be 0 and currently nothing
+will be changed in the device cache file.
+
+If there's nothing to write, remove the device cache file.
+
+diff --git a/src/device.c b/src/device.c
+index 8f7ec5654..0599171a1 100644
+--- a/src/device.c
++++ b/src/device.c
+@@ -5469,6 +5469,8 @@ static void device_remove_stored(struct btd_device *device)
+ 								gerr->message);
+ 			g_error_free(gerr);
+ 		}
++	} else {
++		unlink(filename);
+ 	}
+ 
+ 	g_free(data);
+
