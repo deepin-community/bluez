@@ -1,0 +1,40 @@
+From ea4b494414f60beda3cf69aef9278354c07b74f1 Mon Sep 17 00:00:00 2001
+From: Michal Dzik <michal.dzik@streamunlimited.com>
+Date: Sat, 6 Jun 2026 08:03:47 +0200
+Subject: [PATCH] btio: handle error from broadcast ISO socket
+
+If not handled, server_cb() will be stuck in endless loop of calling
+accept() on the socket.
+
+diff --git a/btio/btio.c b/btio/btio.c
+index cfaa9392d..39d4411f7 100644
+--- a/btio/btio.c
++++ b/btio/btio.c
+@@ -252,6 +252,26 @@ static gboolean server_cb(GIOChannel *io, GIOCondition cond,
+ 
+ 	srv_sock = g_io_channel_unix_get_fd(io);
+ 
++	if (cond & G_IO_ERR) {
++		int err, sk_err;
++		socklen_t len = sizeof(sk_err);
++
++		if (getsockopt(srv_sock, SOL_SOCKET, SO_ERROR, &sk_err, &len)
++									< 0)
++			err = errno;
++		else
++			err = sk_err;
++
++		if (server->connect) {
++			GError *gerr = NULL;
++
++			ERROR_FAILED(&gerr, "ERR on socket", err);
++			server->connect(io, gerr, server->user_data);
++			g_clear_error(&gerr);
++		}
++		return FALSE;
++	}
++
+ 	cli_sock = accept(srv_sock, NULL, NULL);
+ 	if (cli_sock < 0) {
+ 		if (errno == EBADFD)
+
