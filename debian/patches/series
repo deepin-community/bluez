@@ -18,3 +18,4 @@ fix-inverted-NULL-check-in-gatt_db-clone.patch
 fix-integer-overflow-in-sdp_extract_seqtype.patch
 fix-pbap-databaseid-check-gatt-client-use-after-free.patch
 CVE-2026-80186.patch
+CVE-2026-75032.patch

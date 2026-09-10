@@ -1,3 +1,12 @@
+bluez (5.85-3deepin11) unstable; urgency=medium
+
+  * fix(cve): CVE-2026-75032 (medium) - avrcp: Fix Out-of-Bounds Read in
+    AVRCP GetFolderItems parsing   Upstream:
+    https://github.com/bluez/bluez/commit/bd8989620ed6e80755f06cfdb18f5b
+    4a3913493c
+
+ -- deepin-ci-robot <packages@deepin.org>  Thu, 10 Sep 2026 20:38:23 +0800
+
 bluez (5.85-3deepin10) unstable; urgency=medium
 
   * fix(cve): CVE-2026-80186 (high) - eir: Fix stack buffer overflow
