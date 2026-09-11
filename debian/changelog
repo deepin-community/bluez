@@ -1,3 +1,9 @@
+bluez (5.85-3deepin11) unstable; urgency=medium
+
+  * Rebuild with LTO enabled (dpkg vendor feature optimize/lto).
+
+ -- tunaichao <tunaichao@uniontech.com>  Fri, 11 Sep 2026 10:02:20 +0800
+
 bluez (5.85-3deepin10) unstable; urgency=medium
 
   * fix(cve): CVE-2026-80186 (high) - eir: Fix stack buffer overflow
