@@ -4,6 +4,10 @@ bluez (5.85-3deepin11) unstable; urgency=medium
     type confusion when parsing crafted SDP XML   Upstream:
     https://github.com/bluez/bluez/commit/985e643d78b09afc81d606bc0a0858
     1fc05b1b15.patch
+  * fix(cve): CVE-2026-19774 (high) - [PATCH] a2dp: Fix handling of
+    codec capability storage   Upstream:
+    https://github.com/bluez/bluez/commit/912f5efb0dd9bb08e408d33371a571
+    82c5678aef
 
  -- deepin-ci-robot <packages@deepin.org>  Thu, 10 Sep 2026 22:41:14 +0800
 
