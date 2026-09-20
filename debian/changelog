@@ -1,8 +1,15 @@
 bluez (5.85-3deepin11) unstable; urgency=medium
 
-  * Rebuild with LTO enabled (dpkg vendor feature optimize/lto).
+  * fix(cve): CVE-2026-80185 (medium) - sdp-xml: Fix crash caused by
+    type confusion when parsing crafted SDP XML   Upstream:
+    https://github.com/bluez/bluez/commit/985e643d78b09afc81d606bc0a0858
+    1fc05b1b15.patch
+  * fix(cve): CVE-2026-19774 (high) - [PATCH] a2dp: Fix handling of
+    codec capability storage   Upstream:
+    https://github.com/bluez/bluez/commit/912f5efb0dd9bb08e408d33371a571
+    82c5678aef
 
- -- tunaichao <tunaichao@uniontech.com>  Fri, 11 Sep 2026 10:02:20 +0800
+ -- deepin-ci-robot <packages@deepin.org>  Thu, 10 Sep 2026 22:41:14 +0800
 
 bluez (5.85-3deepin10) unstable; urgency=medium
 
