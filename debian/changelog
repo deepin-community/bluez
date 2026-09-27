@@ -1,3 +1,12 @@
+bluez (5.85-3deepin12) unstable; urgency=medium
+
+  * fix(cve): CVE-2026-85218 (unknown) - [PATCH] avrcp: Fix out-of-
+    bounds parsing of ListPlayerAttributes response   Upstream:
+    https://github.com/bluez/bluez/commit/b21c216d580cf303681bfe9eab60a5
+    414d8b6cc0
+
+ -- deepin-ci-robot <packages@deepin.org>  Sun, 27 Sep 2026 08:05:00 +0800
+
 bluez (5.85-3deepin11) unstable; urgency=medium
 
   * fix(cve): CVE-2026-80185 (medium) - sdp-xml: Fix crash caused by

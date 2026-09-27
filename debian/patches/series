@@ -20,3 +20,4 @@ fix-pbap-databaseid-check-gatt-client-use-after-free.patch
 CVE-2026-80186.patch
 CVE-2026-80185.patch
 CVE-2026-19774.patch
+CVE-2026-85218.patch
