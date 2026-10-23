@@ -1,0 +1,37 @@
+From 237d4d5d20a556ea11f6cf5d0013884a0a70962e Mon Sep 17 00:00:00 2001
+From: Simon Mikuda <simon.mikuda@streamunlimited.com>
+Date: Sun, 14 Jun 2026 12:02:07 +0200
+Subject: [PATCH] shared/bap: Transition ASE to QoS Configured on CIS loss
+
+stream_io_disconnected() only handled the Releasing state, leaving
+Enabling, Streaming and Disabling ASEs stuck when the CIS was lost
+unexpectedly.
+
+The ASE shall autonomously move to QoS Configured on loss of the
+CIS and notify the peer
+
+Fixes PTS test BAP/USR/SCC/BV-167-C
+
+diff --git a/src/shared/bap.c b/src/shared/bap.c
+index 979e88dca..b575e7a99 100644
+--- a/src/shared/bap.c
++++ b/src/shared/bap.c
+@@ -6796,8 +6796,16 @@ static bool stream_io_disconnected(struct io *io, void *user_data)
+ 		return false;
+ 	}
+ 
+-	if (stream->ep->state == BT_ASCS_ASE_STATE_RELEASING)
++	switch (stream->ep->state) {
++	case BT_ASCS_ASE_STATE_RELEASING:
+ 		stream_set_state(stream, BT_BAP_STREAM_STATE_CONFIG);
++		break;
++	case BT_ASCS_ASE_STATE_ENABLING:
++	case BT_ASCS_ASE_STATE_STREAMING:
++	case BT_ASCS_ASE_STATE_DISABLING:
++		stream_set_state(stream, BT_BAP_STREAM_STATE_QOS);
++		break;
++	}
+ 
+ 	bt_bap_stream_set_io(stream, -1);
+ 	return false;
+

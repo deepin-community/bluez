@@ -1,0 +1,44 @@
+From 7a0c8ebf91e69c3b2d2d48f8f4b0074fddde1fa4 Mon Sep 17 00:00:00 2001
+From: Zhiyuan Sheng <zhiyuan.sheng@oss.qualcomm.com>
+Date: Fri, 22 May 2026 14:03:12 +0800
+Subject: [PATCH] obexd: fix PBAP PullPhoneBook failure with ebook backend
+
+phonebook_pull() in phonebook-ebook.c does not set *err = 0 on the
+success path, unlike phonebook-tracker.c and phonebook-dummy.c. The
+caller vobject_pull_open() in pbap.c declares 'ret' without
+initialization and passes &ret to phonebook_pull(), so 'ret' retains
+an indeterminate stack value when the ebook backend is in use. The
+subsequent 'if (ret < 0)' check then incorrectly triggers and rejects
+the request with Internal Server Error.
+
+Fix this by setting *err = 0 on success in phonebook-ebook.c, and
+initialize 'ret' to 0 in vobject_pull_open() as a defensive measure
+to guard against any backend that omits this assignment.
+
+diff --git a/obexd/plugins/pbap.c b/obexd/plugins/pbap.c
+index 74976890d..9f8684863 100644
+--- a/obexd/plugins/pbap.c
++++ b/obexd/plugins/pbap.c
+@@ -661,7 +661,7 @@ static void *vobject_pull_open(const char *name, int oflag, mode_t mode,
+ {
+ 	struct pbap_session *pbap = context;
+ 	phonebook_cb cb;
+-	int ret;
++	int ret = 0;
+ 	void *request;
+ 
+ 	DBG("name %s context %p maxlistcount %d", name, context,
+diff --git a/obexd/plugins/phonebook-ebook.c b/obexd/plugins/phonebook-ebook.c
+index d772edca0..5fc0498c1 100644
+--- a/obexd/plugins/phonebook-ebook.c
++++ b/obexd/plugins/phonebook-ebook.c
+@@ -262,6 +262,9 @@ void *phonebook_pull(const char *name, const struct apparam_field *params,
+ 	data->query = e_book_query_to_string(query);
+ 	e_book_query_unref(query);
+ 
++	if (err)
++		*err = 0;
++
+ 	return data;
+ }
+

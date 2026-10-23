@@ -1,0 +1,29 @@
+From d45fd43a1cc3ba791858f11c144112c518a9ad84 Mon Sep 17 00:00:00 2001
+From: Thomas Kirschner <thomaskirschner85@yahoo.de>
+Date: Thu, 7 May 2026 01:00:51 +0200
+Subject: [PATCH] bap: Fix typo in QoS D-Bus dictionary entry names
+
+MinimumDelay and PreferredMinimumDelay had wrong spelling, causing
+them to be exposed incorrectly over D-Bus. Any client relying on
+the correct spelling would fail to find these entries, breaking
+LE Audio QoS negotiation.
+
+diff --git a/profiles/audio/bap.c b/profiles/audio/bap.c
+index 5333267f7..b35542488 100644
+--- a/profiles/audio/bap.c
++++ b/profiles/audio/bap.c
+@@ -432,11 +432,11 @@ static gboolean get_qos(const GDBusPropertyTable *property,
+ 	dict_append_entry(&dict, "Retransmissions", DBUS_TYPE_BYTE, &qos->rtn);
+ 	dict_append_entry(&dict, "MaximumLatency", DBUS_TYPE_UINT16,
+ 					&qos->latency);
+-	dict_append_entry(&dict, "MimimumDelay", DBUS_TYPE_UINT32,
++	dict_append_entry(&dict, "MinimumDelay", DBUS_TYPE_UINT32,
+ 					&qos->pd_min);
+ 	dict_append_entry(&dict, "MaximumDelay", DBUS_TYPE_UINT32,
+ 					&qos->pd_max);
+-	dict_append_entry(&dict, "PreferredMimimumDelay", DBUS_TYPE_UINT32,
++	dict_append_entry(&dict, "PreferredMinimumDelay", DBUS_TYPE_UINT32,
+ 					&qos->ppd_min);
+ 	dict_append_entry(&dict, "PreferredMaximumDelay", DBUS_TYPE_UINT32,
+ 					&qos->ppd_max);
+

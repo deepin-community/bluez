@@ -1,0 +1,44 @@
+From e19c771841e9017326103a8d8e8139b2374ffe19 Mon Sep 17 00:00:00 2001
+From: Pauli Virtanen <pav@iki.fi>
+Date: Wed, 13 May 2026 19:17:18 +0300
+Subject: [PATCH] emulator: btvirt: check pkt lengths, don't get stuck on
+ malformed
+
+Don't try to parse packet before whole header is received.
+
+If received data has unknown packet type, reset buffer so that we don't
+get stuck.
+
+diff --git a/emulator/server.c b/emulator/server.c
+index fa2bc07be..f14e14cd2 100644
+--- a/emulator/server.c
++++ b/emulator/server.c
+@@ -136,12 +136,20 @@ again:
+ 				client->pkt_len = 0;
+ 				break;
+ 			case HCI_ACLDATA_PKT:
++				if (count < HCI_ACL_HDR_SIZE + 1) {
++					client->pkt_offset += len;
++					return;
++				}
+ 				acl_hdr = (hci_acl_hdr*)(ptr + 1);
+ 				client->pkt_expect = HCI_ACL_HDR_SIZE + acl_hdr->dlen + 1;
+ 				client->pkt_data = malloc(client->pkt_expect);
+ 				client->pkt_len = 0;
+ 				break;
+ 			case HCI_ISODATA_PKT:
++				if (count < HCI_ISO_HDR_SIZE + 1) {
++					client->pkt_offset += len;
++					return;
++				}
+ 				iso_hdr = (hci_iso_hdr *)(ptr + 1);
+ 				client->pkt_expect = HCI_ISO_HDR_SIZE +
+ 							iso_hdr->dlen + 1;
+@@ -151,6 +159,7 @@ again:
+ 			default:
+ 				printf("packet error, unknown type: %d\n",
+ 					client->pkt_type);
++				client->pkt_offset = 0;
+ 				return;
+ 			}
+

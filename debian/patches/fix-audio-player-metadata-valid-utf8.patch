@@ -1,0 +1,67 @@
+From fb0f8f495ace893f65ee1eaa91e84743ccf62cc9 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fr=C3=A9d=C3=A9ric=20Danis?= <frederic.danis@collabora.com>
+Date: Mon, 13 Apr 2026 09:12:46 +0200
+Subject: [PATCH] audio/player: Ensure metadata string is valid UTF-8
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+bluetoothd crashes on reception of GetItemAttributes reply if it contains
+an invalid UTF-8 string:
+
+> BR-ACL: Handle 11 [B8:3C:28:E8:07:69 (Apple, Inc.)] flags 0x02 dlen 680
+      Channel: 71 len 676 ctrl 0x0304 [PSM 27 mode Enhanced Retransmission
+               (0x03)] {chan 7}
+      I-frame: Unsegmented TxSeq 2 ReqSeq 3
+      AVCTP Browsing: Response: type 0x00 label 2 PID 0x110e
+        AVRCP: GetItemAttributes: len 0x029a
+          Status: 0x04 (Success)
+          AttributeCount: 0x01 (1)
+          AttributeID: 0x00000001 (Title)
+          CharsetID: 0x006a (UTF-8)
+          AttributeLength: 0x0290 (656)
+          AttributeValue: ................................................
+..........................................................................
+.........................................................................2
+009.......................................................................
+..........................................................................
+..........................................................................
+..........................................................................
+..........................................................................
+..........................................................................
+................
+= bluetoothd: profiles/audio/player.c:media_player_set_playlist_item() 0
+= bluetoothd: profiles/audio/player.c:media_player_set_metadata() Title:
+  奥巴马表示：美国之所以没有搞定中国，不是因为中国的军事实力以及经济强大
+  ，而是因为中国从始至终都没有掉进我们安排的“陷阱”。时间倒回2009年，北京
+  钓鱼台国宾馆。奥巴马的随行团队一进门，连句客套话都没顾得上说，反手就把
+  随身带的电子设备挨个拔了电源、卸了电池。这阵仗看着像是在防监听，实则是
+  心虚。那群在长桌对面坐下的人，心里正翻腾着一种从未有过的无力感。因为眼
+  前的谈判对象，压根没打算照着他们兜里的剧本念台词。多年以后，退下来的奥
+  巴马在回忆录《应�
+arguments to dbus_message_iter_append_basic() were incorrect,
+  assertion "_dbus_check_is_valid_utf8 (*string_p)" failed in file
+  dbus-message.c line 2775.
+This is normally a bug in some application using the D-Bus library.
+
+diff --git a/profiles/audio/player.c b/profiles/audio/player.c
+index 86e59bc8e..3af9a1824 100644
+--- a/profiles/audio/player.c
++++ b/profiles/audio/player.c
+@@ -30,6 +30,7 @@
+ #include "src/log.h"
+ #include "src/dbus-common.h"
+ #include "src/error.h"
++#include "src/shared/util.h"
+ 
+ #include "player.h"
+ 
+@@ -1442,6 +1443,8 @@ void media_player_set_metadata(struct media_player *mp,
+ 	GHashTable *metadata = item ? item->metadata : mp->track;
+ 
+ 	value = g_strndup(data, len);
++	/* Ensure this is a valid UTF-8 string */
++	strtoutf8(value, len);
+ 
+ 	DBG("%s: %s", key, value);
+

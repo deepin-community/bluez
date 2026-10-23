@@ -1,0 +1,31 @@
+From 5d836f1c697cde166981d31276e2dd828996f3e7 Mon Sep 17 00:00:00 2001
+From: Simon Mikuda <simon.mikuda@streamunlimited.com>
+Date: Wed, 10 Jun 2026 10:20:54 +0200
+Subject: [PATCH] adapter: Fix failed bonding attempt after LE link
+ disconnection
+
+What happens when issue occurs:
+- device is connected to both bearers BR/EDR and LE
+- bonding is requested
+- LE link disconnects
+- pairing keys arrive
+
+BlueZ would finish bonding request with error and mark device as
+temporary. Then it would be disconnected+removed after default
+temporary timeout (30 seconds).
+
+diff --git a/src/adapter.c b/src/adapter.c
+index cc753fbd6..538f63e0a 100644
+--- a/src/adapter.c
++++ b/src/adapter.c
+@@ -8622,7 +8622,9 @@ static void dev_disconnected(struct btd_adapter *adapter,
+ 		disconnect_notify(device, reason);
+ 	}
+ 
+-	bonding_attempt_complete(adapter, &addr->bdaddr, addr->type,
++	/* device could be still connected to different bearer */
++	if (!device || !btd_device_is_connected(device))
++		bonding_attempt_complete(adapter, &addr->bdaddr, addr->type,
+ 						MGMT_STATUS_DISCONNECTED);
+ }
+
