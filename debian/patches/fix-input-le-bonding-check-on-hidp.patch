@@ -1,0 +1,38 @@
+From 756da3fa17b9a892ce22bc340b9a293a6c68931f Mon Sep 17 00:00:00 2001
+From: Luiz Augusto von Dentz <luiz.von.dentz@intel.com>
+Date: Tue, 21 Apr 2026 16:19:14 -0400
+Subject: [PATCH] input: Fix checking LE bonding on HIDP
+
+HIDP is classic only, LE uses HOG, so there is no point in checking the
+bonding with the address type which in case the device supports
+dual-mode will map to LE random/public address.
+
+Fixes: https://github.com/bluez/bluez/issues/2034
+
+diff --git a/profiles/input/device.c b/profiles/input/device.c
+index 6bdc5ee3a..5b1be2b16 100644
+--- a/profiles/input/device.c
++++ b/profiles/input/device.c
+@@ -127,8 +127,8 @@ static int connection_disconnect(struct input_device *idev, uint32_t flags);
+ 
+ static bool input_device_bonded(struct input_device *idev)
+ {
+-	return device_is_bonded(idev->device,
+-				btd_device_get_bdaddr_type(idev->device));
++	/* HIDP is classic only; so consider it bonded if BDADDR_BREDR is */
++	return device_is_bonded(idev->device, BDADDR_BREDR);
+ }
+ 
+ static void input_device_free(struct input_device *idev)
+@@ -172,8 +172,8 @@ static void input_device_free(struct input_device *idev)
+ 
+ static void virtual_cable_unplug(struct input_device *idev)
+ {
+-	device_remove_bonding(idev->device,
+-				btd_device_get_bdaddr_type(idev->device));
++	/* HIDP is classic only; so only remove BDADDR_BREDR bonding */
++	device_remove_bonding(idev->device, BDADDR_BREDR);
+ 
+ 	idev->virtual_cable_unplug = false;
+ }
+

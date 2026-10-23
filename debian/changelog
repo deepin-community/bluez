@@ -1,3 +1,12 @@
+bluez (5.85-3deepin12) unstable; urgency=medium
+
+  * Aggregate 45 backport PRs (#16-#66, excluding #18 #29 #61 #62 #64 #65)
+    into debian/patches/ for batch review. All patches imported via quilt
+    into debian/patches/series in ascending PR-number order. Upstream source
+    tree unchanged; changes confined to debian/ directory only.
+
+ -- deepin-ci-robot <packages@deepin.org>  Fri, 24 Oct 2026 00:00:00 +0800
+
 bluez (5.85-3deepin11) unstable; urgency=medium
 
   * fix(cve): CVE-2026-80185 (medium) - sdp-xml: Fix crash caused by

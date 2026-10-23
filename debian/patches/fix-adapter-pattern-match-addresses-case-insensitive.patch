@@ -1,0 +1,24 @@
+From c6bc42d696610bfae4e5dc193e1d39371c6b3e0c Mon Sep 17 00:00:00 2001
+From: Luiz Augusto von Dentz <luiz.von.dentz@intel.com>
+Date: Thu, 4 Jun 2026 13:14:38 -0400
+Subject: [PATCH] adapter: Fix using case sensitive strncmp for pattern match
+ addresses
+
+When matching discovery filter pattern with addresses shall be
+considered case insensitive since its binary format that can be
+printed using either upper or lower case for the range a-f/A-F.
+
+diff --git a/src/adapter.c b/src/adapter.c
+index 20f7c3e03..03593d962 100644
+--- a/src/adapter.c
++++ b/src/adapter.c
+@@ -7288,7 +7288,7 @@ static bool device_is_discoverable(struct btd_adapter *adapter,
+ 			return true;
+ 		}
+ 
+-		if (!strncmp(filter->pattern, addr, pattern_len)) {
++		if (!strncasecmp(filter->pattern, addr, pattern_len)) {
+ 			*auto_connect = filter->auto_connect;
+ 			return true;
+ 		}
+

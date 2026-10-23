@@ -1,0 +1,84 @@
+From 7482aceece7044e688f20f113263b50c21d69fb6 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fr=C3=A9d=C3=A9ric=20Danis?= <frederic.danis@collabora.com>
+Date: Wed, 15 Jul 2026 17:51:44 +0200
+Subject: [PATCH] profiles/audio: fix UAF on external media service teardown
+
+Keep media_app endpoint/player queues in sync with object lifetime to
+avoid stale pointers during proxy removal.
+
+When admin allowlist reapply removes audio services, endpoint/player
+objects may be destroyed through non-proxy paths first.
+Later proxy_removed_cb calls queue_remove_if() and matching by path
+can dereference freed endpoint/player memory.
+
+Fix by:
+- adding media_app back-references in media_endpoint/local_player
+- unlinking from app queues inside media_endpoint_remove or
+  local_player_remove
+- setting ownership when app-registering endpoint/player objects
+
+This prevents heap-use-after-free in match_endpoint_by_path or
+match_player_by_path during service disconnect.
+
+Assisted-by: GPT:GPT-5.3-Codex
+
+diff --git a/profiles/audio/media.c b/profiles/audio/media.c
+index a7a8575..131c931 100644
+--- a/profiles/audio/media.c
++++ b/profiles/audio/media.c
+@@ -126,11 +126,13 @@ struct media_endpoint {
+ 	guint			watch;
+ 	GSList			*requests;
+ 	struct media_adapter	*adapter;
++	struct media_app	*app;
+ 	GSList			*transports;
+ };
+ 
+ struct media_player {
+ 	struct media_adapter	*adapter;
++	struct media_app	*app;
+ 	struct avrcp_player	*player;
+ 	char			*sender;	/* Player DBus bus id */
+ 	char			*path;		/* Player object path */
+@@ -251,6 +253,11 @@ static void media_endpoint_remove(void *data)
+ 		return;
+ 	}
+ 
++	if (endpoint->app) {
++		queue_remove(endpoint->app->endpoints, endpoint);
++		endpoint->app = NULL;
++	}
++
+ 	info("Endpoint unregistered: sender=%s path=%s", endpoint->sender,
+ 			endpoint->path);
+ 
+@@ -1863,6 +1870,11 @@ static void media_player_remove(void *data)
+ {
+ 	struct media_player *mp = data;
+ 
++	if (mp->app) {
++		queue_remove(mp->app->players, mp);
++		mp->app = NULL;
++	}
++
+ 	info("Player unregistered: sender=%s path=%s", mp->sender, mp->path);
+ 
+ 	media_player_destroy(mp);
+@@ -2915,6 +2927,8 @@ static void app_register_endpoint(void *data, void *user_data)
+ 		return;
+ 	}
+ 
++	endpoint->app = app;
++
+ 	queue_push_tail(app->endpoints, endpoint);
+ 
+ 	return;
+@@ -2999,6 +3013,8 @@ static void app_register_player(void *data, void *user_data)
+ 			goto fail;
+ 	}
+ 
++	player->app = app;
++
+ 	queue_push_tail(app->players, player);
+ 
+ 	return;

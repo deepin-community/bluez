@@ -1,0 +1,57 @@
+From 081dfd785fe594f581c892aae68955436915afd9 Mon Sep 17 00:00:00 2001
+From: Marcel Holtmann <marcel@holtmann.org>
+Date: Tue, 3 Mar 2026 16:01:20 +0100
+Subject: [PATCH] monitor: Fix issue with Packet Logger Notes missing null
+ termination
+
+
+diff --git a/monitor/packet.c b/monitor/packet.c
+index fbe773ffb..ff28dfbd4 100644
+--- a/monitor/packet.c
++++ b/monitor/packet.c
+@@ -4502,7 +4502,7 @@ void packet_monitor(struct timeval *tv, struct ucred *cred,
+ 		packet_vendor_diag(tv, index, manufacturer, data, size);
+ 		break;
+ 	case BTSNOOP_OPCODE_SYSTEM_NOTE:
+-		packet_system_note(tv, cred, index, data);
++		packet_system_note(tv, cred, index, data, size);
+ 		break;
+ 	case BTSNOOP_OPCODE_USER_LOGGING:
+ 		ul = data;
+@@ -13817,11 +13817,16 @@ void packet_vendor_diag(struct timeval *tv, uint16_t index,
+ 	}
+ }
+ 
+-void packet_system_note(struct timeval *tv, struct ucred *cred,
+-					uint16_t index, const void *message)
++void packet_system_note(struct timeval *tv, struct ucred *cred, uint16_t index,
++					const void *data, uint16_t size)
+ {
+-	print_packet(tv, cred, '=', index, NULL, COLOR_SYSTEM_NOTE,
+-					"Note", message, NULL);
++	char *str = strndup(data, size);
++
++	if (str) {
++		print_packet(tv, cred, '=', index, NULL, COLOR_SYSTEM_NOTE,
++							"Note", str, NULL);
++		free(str);
++	}
+ }
+ 
+ struct monitor_l2cap_hdr {
+diff --git a/monitor/packet.h b/monitor/packet.h
+index 38f3f5514..73a86f64b 100644
+--- a/monitor/packet.h
++++ b/monitor/packet.h
+@@ -118,8 +118,8 @@ void packet_index_info(struct timeval *tv, uint16_t index, const char *label,
+ void packet_vendor_diag(struct timeval *tv, uint16_t index,
+ 					uint16_t manufacturer,
+ 					const void *data, uint16_t size);
+-void packet_system_note(struct timeval *tv, struct ucred *cred,
+-					uint16_t index, const void *message);
++void packet_system_note(struct timeval *tv, struct ucred *cred, uint16_t index,
++					const void *data, uint16_t size);
+ void packet_user_logging(struct timeval *tv, struct ucred *cred,
+ 					uint16_t index, uint8_t priority,
+ 					const char *ident, const void *data,
+

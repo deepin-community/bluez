@@ -1,0 +1,55 @@
+From 744fad3c342e79bf41713e440378a726a680e633 Mon Sep 17 00:00:00 2001
+From: Luiz Augusto von Dentz <luiz.von.dentz@intel.com>
+Date: Thu, 26 Feb 2026 13:34:05 -0500
+Subject: [PATCH] hciemu: Fix silently dropping packet if writev return -EAGAIN
+
+The code has been silently dropping packets due to lack of buffer
+since hciemu design is single threaded it cannot do partial writes
+or flushes to force the buffer to be consumed and give space to the
+next chunk, so in order to fix this the code will now attempt to
+detect if a socket runs out of space and automatically bump the
+buffer with use of SO_SNDBUF.
+
+diff --git a/emulator/hciemu.c b/emulator/hciemu.c
+index 8c73a07ee..01a8e80b7 100644
+--- a/emulator/hciemu.c
++++ b/emulator/hciemu.c
+@@ -118,8 +118,35 @@ static void writev_callback(const struct iovec *iov, int iovlen,
+ 	fd = g_io_channel_unix_get_fd(channel);
+ 
+ 	written = writev(fd, iov, iovlen);
+-	if (written < 0)
+-		return;
++	if (written < 0) {
++		ssize_t ret;
++		int size, data_len;
++		socklen_t len = sizeof(size);
++		int i;
++
++		if (errno != EAGAIN)
++			return;
++
++		data_len = 0;
++
++		for (i = 0; i < iovlen; i++)
++			data_len += iov[i].iov_len;
++
++		/* Automatically bump the send buffer size if the data to be
++		 * sent is larger than the current buffer size. This is needed
++		 * for btdev which doesn't flush the socket buffer until all
++		 * data has been sent.
++		 */
++		ret = getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, &len);
++		if (!ret) {
++			size += data_len;
++			setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, len);
++		}
++
++		written = writev(fd, iov, iovlen);
++		if (written < 0)
++			return;
++	}
+ }
+ 
+ static gboolean receive_bthost(GIOChannel *channel, GIOCondition condition,
+

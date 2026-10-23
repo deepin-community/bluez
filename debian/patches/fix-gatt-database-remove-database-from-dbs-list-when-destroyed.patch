@@ -1,0 +1,36 @@
+From 1ab128f6d749427a5508592b3b2b587b724efccf Mon Sep 17 00:00:00 2001
+From: Pauli Virtanen <pav@iki.fi>
+Date: Sun, 12 Apr 2026 14:11:30 +0300
+Subject: [PATCH] gatt-database: remove database from dbs list when destroyed
+
+btd_gatt_database_new() adds btd_gatt_database to the dbs lookup queue,
+but nothing removes it from there even when destroying.
+
+Fix by removing databases from the lookup queue before destroy.
+
+Fixes crash on adapter removal in some cases:
+
+ERROR: AddressSanitizer: heap-use-after-free on address 0x7bd476be1308
+READ of size 8 at 0x7bd476be1308 thread T0
+    #0 0x00000064562a in match_db
+    #1 0x000000865410 in queue_find
+    #2 0x000000645671 in btd_gatt_database_get
+0x7bd476be1308 is located 8 bytes inside of 128-byte region [0x7bd476be1300,0x7bd476be>
+freed by thread T0 here:
+    #0 0x7f1478cee4cf in free.part.0
+    #1 0x000000621625 in gatt_database_free
+    #2 0x000000645582 in btd_gatt_database_destroy
+
+diff --git a/src/gatt-database.c b/src/gatt-database.c
+index 5819c2529..39e6a2593 100644
+--- a/src/gatt-database.c
++++ b/src/gatt-database.c
+@@ -4147,6 +4147,8 @@ void btd_gatt_database_destroy(struct btd_gatt_database *database)
+ 					adapter_get_path(database->adapter),
+ 					GATT_MANAGER_IFACE);
+ 
++	queue_remove(dbs, database);
++
+ 	gatt_database_free(database);
+ }
+

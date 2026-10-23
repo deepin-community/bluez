@@ -1,0 +1,72 @@
+From a225faba50d1224b1191c84198fefa4f7053bb6c Mon Sep 17 00:00:00 2001
+From: Bastien Nocera <hadess@hadess.net>
+Date: Mon, 11 May 2026 13:35:06 +0200
+Subject: [PATCH] mesh: Fix str{r,}chr usage
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Fix the code manipulating "const char *" return values from
+json_object_to_json_string_ext() to modify it for printing, we're
+not allowed to do that.
+
+tools/mesh/mesh-db.c: In function ‘mesh_db_finish_export’:
+tools/mesh/mesh-db.c:2598:13: error: assignment discards ‘const’ qualifier from pointer target type [-Werror=discarded-qualifiers]
+ 2598 |         pos = strrchr(hdr, '}');
+      |             ^
+tools/mesh/mesh-db.c:2604:13: error: assignment discards ‘const’ qualifier from pointer target type [-Werror=discarded-qualifiers]
+ 2604 |         pos = strrchr(hdr, '"');
+      |             ^
+tools/mesh/mesh-db.c:2613:13: error: assignment discards ‘const’ qualifier from pointer target type [-Werror=discarded-qualifiers]
+ 2613 |         pos = strchr(str, '{');
+      |             ^
+
+diff --git a/tools/mesh/mesh-db.c b/tools/mesh/mesh-db.c
+index fb9c436d1..9051f4f0e 100644
+--- a/tools/mesh/mesh-db.c
++++ b/tools/mesh/mesh-db.c
+@@ -2547,7 +2547,9 @@ void *mesh_db_prepare_export(void)
+ bool mesh_db_finish_export(bool is_error, void *expt_cfg, const char *fname)
+ {
+ 	FILE *outfile = NULL;
+-	const char *str, *hdr;
++	const char *str_s, *hdr_s;
++	char *str = NULL;
++	char *hdr = NULL;
+ 	json_object *jhdr = NULL;
+ 	bool result = false;
+ 	char *pos;
+@@ -2581,15 +2583,19 @@ bool mesh_db_finish_export(bool is_error, void *expt_cfg, const char *fname)
+ 	if (!add_string(jhdr, "version", schema_version))
+ 		goto done;
+ 
+-	hdr = json_object_to_json_string_ext(jhdr, JSON_C_TO_STRING_PRETTY |
++	hdr_s = json_object_to_json_string_ext(jhdr, JSON_C_TO_STRING_PRETTY |
+ 						JSON_C_TO_STRING_NOSLASHESCAPE);
+ 
+-	str = json_object_to_json_string_ext(expt_cfg, JSON_C_TO_STRING_PRETTY |
++	str_s = json_object_to_json_string_ext(expt_cfg,
++						JSON_C_TO_STRING_PRETTY |
+ 						JSON_C_TO_STRING_NOSLASHESCAPE);
+ 
+-	if (!hdr || !str)
++	if (!hdr_s || !str_s)
+ 		goto done;
+ 
++	hdr = strdup(hdr_s);
++	str = strdup(str_s);
++
+ 	/*
+ 	 * Write two strings to the output while stripping closing "}" from the
+ 	 * header string and opening "{" from the config object.
+@@ -2624,6 +2630,10 @@ bool mesh_db_finish_export(bool is_error, void *expt_cfg, const char *fname)
+ 	result = true;
+ 
+ done:
++	if (hdr != NULL)
++		free(hdr);
++	if (str != NULL)
++		free(str);
+ 	if (outfile)
+ 		fclose(outfile);
+
