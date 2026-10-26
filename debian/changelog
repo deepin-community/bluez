@@ -1,3 +1,9 @@
+bluez (5.85-3deepin13) unstable; urgency=medium
+
+  * fix(tools): btmon-logger - clamp HCI DIAG packet payload length to received data to fix heap-buffer-overflow triggered by kernel devcoredump. Upstream: https://github.com/bluez/bluez/commit/2faee1f504ce85807bacf4267838d728493345d8
+
+ -- deepin-ci-robot <packages@deepin.org>  Mon, 26 Oct 2026 11:50:33 +0800
+
 bluez (5.85-3deepin12) unstable; urgency=medium
 
   * Aggregate 45 backport PRs (#16-#66, excluding #18 #29 #61 #62 #64 #65)
