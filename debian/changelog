@@ -1,3 +1,9 @@
+bluez (5.85-3deepin13) unstable; urgency=medium
+
+  * Fix use-after-free in adapter_remove(): unlink each device from the adapter device list before freeing it, so freeing a device (e.g. gatt_server_cleanup reporting disconnection) no longer searches freed devices
+
+ -- deepin-ci-robot <packages@deepin.org>  Mon, 26 Oct 2026 15:29:28 +0800
+
 bluez (5.85-3deepin12) unstable; urgency=medium
 
   * Aggregate 45 backport PRs (#16-#66, excluding #18 #29 #61 #62 #64 #65)

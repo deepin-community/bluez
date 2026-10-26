@@ -1,0 +1,67 @@
+From eb82d81bf26bd212856f74a301f0fcc24eb6c132 Mon Sep 17 00:00:00 2001
+From: Luiz Augusto von Dentz <luiz.von.dentz@intel.com>
+Date: Fri, 18 Sep 2026 17:55:43 -0400
+Subject: [PATCH] adapter: remove the devices from the list before freeing them
+
+The devices of an adapter are freed one by one when it is removed, but
+the list keeps pointing at them until every one of them is gone, so it
+refers to freed devices while the remaining ones are being removed.
+
+Freeing a device looks devices up though, e.g. cleaning up its GATT
+server reports the disconnection, which searches the list for the
+device it belongs to, and the search reads the devices already freed:
+
+  ERROR: AddressSanitizer: heap-use-after-free
+    in bacmp lib/bluetooth/bluetooth.h:438
+    in device_addr_type_cmp src/device.c:5657
+    in btd_adapter_find_device src/adapter.c:1055
+    in att_disconnected src/gatt-database.c:335
+    in gatt_server_cleanup src/device.c:842
+    in device_free src/device.c:918
+
+Take each device out of the list before removing it, so only the ones
+still to be removed are ever found.
+
+This needs more than one device on the adapter to show up, which the
+test of a coordinated set is the first to leave behind.
+
+Assisted-by: opencode:claude-opus-5
+
+diff --git a/src/adapter.c b/src/adapter.c
+index ea33a9db5a..bc15f7b19f 100644
+--- a/src/adapter.c
++++ b/src/adapter.c
+@@ -7048,7 +7048,6 @@ static struct btd_adapter *btd_adapter_n
+ 
+ static void adapter_remove(struct btd_adapter *adapter)
+ {
+-	GSList *l;
+ 	struct gatt_db *db;
+ 
+ 	DBG("Removing adapter %s", adapter->path);
+@@ -7056,13 +7055,19 @@ static void adapter_remove(struct btd_ad
+ 	g_slist_free(adapter->connect_list);
+ 	adapter->connect_list = NULL;
+ 
+-	for (l = adapter->devices; l; l = l->next) {
+-		device_removed_drivers(adapter, l->data);
+-		device_remove(l->data, FALSE);
+-	}
++	while (adapter->devices) {
++		struct btd_device *device = adapter->devices->data;
++
++		/* Take the device out of the list before removing it, as
++		 * freeing it looks devices up, e.g. when cleaning up its
++		 * GATT server, and the ones already freed would still be
++		 * found.
++		 */
++		adapter->devices = g_slist_remove(adapter->devices, device);
+ 
+-	g_slist_free(adapter->devices);
+-	adapter->devices = NULL;
++		device_removed_drivers(adapter, device);
++		device_remove(device, FALSE);
++	}
+ 
+ 	discovery_cleanup(adapter, 0);
+ 
