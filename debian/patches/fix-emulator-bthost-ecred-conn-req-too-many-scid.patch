@@ -1,0 +1,33 @@
+From c53a16afa33dc1afc0b1c5540191a563c4b4a8ec Mon Sep 17 00:00:00 2001
+From: Pauli Virtanen <pav@iki.fi>
+Date: Sun, 30 Aug 2026 01:47:58 +0300
+Subject: [PATCH] emulator: bthost: don't crash on ecred_conn_req with too many
+ scid
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+l2cap_ecred_conn_req() crashes if the request contains more SCID than
+specification allows (5).
+
+Respond 0x000C - All connections refused – invalid parameters to such
+invalid requests.
+
+diff --git a/emulator/bthost.c b/emulator/bthost.c
+index 46c6a52f5..d23b709ea 100644
+--- a/emulator/bthost.c
++++ b/emulator/bthost.c
+@@ -2607,6 +2607,13 @@ static bool l2cap_ecred_conn_req(struct bthost *bthost, struct btconn *conn,
+ 	len -= sizeof(rsp.pdu);
+ 	num_scid = len / sizeof(*req->scid);
+ 
++	if (num_scid > (int)ARRAY_SIZE(rsp.dcid)) {
++		rsp.pdu.result = cpu_to_le16(0x000c); /* Refuse all - Invalid */
++		bthost_debug(bthost, "invalid ECRED_CONN_REQ (num_scid = %d)",
++								num_scid);
++		goto respond;
++	}
++
+ 	for (; i < num_scid; i++)
+ 		rsp.dcid[i] = cpu_to_le16(conn->next_cid++);
+
