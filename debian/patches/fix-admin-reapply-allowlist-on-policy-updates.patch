@@ -1,0 +1,23 @@
+From 301a500789ad543d7f83724b1e9285699aab1364 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fr=C3=A9d=C3=A9ric=20Danis?= <frederic.danis@collabora.com>
+Date: Wed, 19 Aug 2026 16:43:34 +0200
+Subject: [PATCH] plugins/admin: reapply allowlist on policy updates
+
+Invoke adapter allowlist reapply after SetServiceAllowList updates
+so runtime state follows policy changes immediately.
+
+Assisted-by: GPT:GPT-5.3-Codex
+
+diff --git a/plugins/admin.c b/plugins/admin.c
+index 6c5c8d97f..07bd0bf3d 100644
+--- a/plugins/admin.c
++++ b/plugins/admin.c
+@@ -203,6 +203,7 @@ static bool service_allowlist_set(struct btd_admin_policy *admin_policy,
+ 
+ 	free_service_allowlist(admin_policy->service_allowlist);
+ 	admin_policy->service_allowlist = uuid_list;
++	btd_adapter_reapply_allowed_uuids(adapter);
+ 
+ 	return true;
+ }
+
