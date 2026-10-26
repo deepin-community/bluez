@@ -1,0 +1,59 @@
+From e9caa7d3e2bf746203348e50654e7758fc84285d Mon Sep 17 00:00:00 2001
+From: Bastien Nocera <hadess@hadess.net>
+Date: Wed, 12 Aug 2026 10:01:39 +0200
+Subject: [PATCH] sdp-xml: Fix stack overflow when converting large sequences
+ to XML
+
+Don't make convert_raw_data_to_xml() call itself recursively X times
+if there are X elements in a sequence.
+
+AddressSanitizer:DEADLYSIGNAL
+=================================================================
+==1684518==ERROR: AddressSanitizer: stack-overflow on address 0x7fff7fb40d98 (pc 0x7fbe1ee95c2b bp 0x7fff7fb41610 sp 0x7fff7fb40d70 T0)
+    #0 0x7fbe1ee95c2b in printf_common(void*, char const*, __va_list_tag*) (/lib64/libasan.so.8+0x95c2b) (BuildId: 5395ec74f54d9ec7bf97c06583dd39a96c230822)
+    #1 0x7fbe1eeb72d6 in vsnprintf (/lib64/libasan.so.8+0xb72d6) (BuildId: 5395ec74f54d9ec7bf97c06583dd39a96c230822)
+    #2 0x7fbe1eeb94f4 in snprintf (/lib64/libasan.so.8+0xb94f4) (BuildId: 5395ec74f54d9ec7bf97c06583dd39a96c230822)
+    #3 0x000000401fc2 in convert_raw_data_to_xml ../../../../Projects/jhbuild/bluez/src/sdp-xml.c:709
+    #4 0x000000401c4f in convert_raw_data_to_xml ../../../../Projects/jhbuild/bluez/src/sdp-xml.c:994
+[...]
+    #246 0x000000401c4f in convert_raw_data_to_xml ../../../../Projects/jhbuild/bluez/src/sdp-xml.c:994
+
+SUMMARY: AddressSanitizer: stack-overflow ../../../../Projects/jhbuild/bluez/src/sdp-xml.c:709 in convert_raw_data_to_xml
+
+diff --git a/src/sdp-xml.c b/src/sdp-xml.c
+index fb8417b3f..5b448fe83 100644
+--- a/src/sdp-xml.c
++++ b/src/sdp-xml.c
+@@ -682,9 +682,12 @@ sdp_record_t *sdp_xml_parse_record(const char *data, int size)
+ 	return record;
+ }
+ 
+-
+ static void convert_raw_data_to_xml(sdp_data_t *value, int indent_level,
+-		void *data, void (*appender)(void *, const char *))
++		void *data, void (*appender)(void *, const char *));
++
++static inline void convert_raw_data_to_xml_element(sdp_data_t *value,
++		int indent_level,void *data,
++		void (*appender)(void *, const char *))
+ {
+ 	int i, hex;
+ 	char buf[STRBUFSIZE];
+@@ -1002,8 +1005,15 @@ static void convert_raw_data_to_xml(sdp_data_t *value, int indent_level,
+ 
+ 		break;
+ 	}
++}
+ 
+-	convert_raw_data_to_xml(value->next, indent_level, data, appender);
++static void convert_raw_data_to_xml(sdp_data_t *value, int indent_level,
++		void *data, void (*appender)(void *, const char *))
++{
++	for (; value != NULL; value = value->next) {
++		convert_raw_data_to_xml_element(value, indent_level,
++			data, appender);
++	}
+ }
+ 
+ struct conversion_data {
+

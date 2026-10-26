@@ -1,3 +1,9 @@
+bluez (5.85-3deepin13) unstable; urgency=medium
+
+  * sdp-xml: Fix stack overflow when converting large sequences to XML
+
+ -- deepin-ci-robot <packages@deepin.org>  Mon, 26 Oct 2026 15:16:39 +0800
+
 bluez (5.85-3deepin12) unstable; urgency=medium
 
   * Aggregate 45 backport PRs (#16-#66, excluding #18 #29 #61 #62 #64 #65)
