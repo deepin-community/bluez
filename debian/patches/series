@@ -1,3 +1,4 @@
+fix-agent-crash-cancel-no-pending-request.patch
 work-around-Logitech-diNovo-Edge-keyboard-firmware-i.patch
 obex-Use-GLib-helper-function-to-manipulate-paths.patch
 agent-Assert-possible-infinite-loop.patch
