@@ -1,3 +1,9 @@
+bluez (5.85-3deepin13) unstable; urgency=medium
+
+  * fix(client): do not prompt for LE Audio settings on A2DP endpoints (Upstream: https://github.com/bluez/bluez/commit/45b123f3a9c2971d3470a88bb52cfdf35b272c05)
+
+ -- deepin-ci-robot <packages@deepin.org>  Mon, 26 Oct 2026 12:14:47 +0800
+
 bluez (5.85-3deepin12) unstable; urgency=medium
 
   * Aggregate 45 backport PRs (#16-#66, excluding #18 #29 #61 #62 #64 #65)

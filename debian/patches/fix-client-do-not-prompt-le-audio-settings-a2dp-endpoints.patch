@@ -1,0 +1,59 @@
+From 45b123f3a9c2971d3470a88bb52cfdf35b272c05 Mon Sep 17 00:00:00 2001
+From: Luiz Augusto von Dentz <luiz.von.dentz@intel.com>
+Date: Wed, 9 Sep 2026 15:22:59 -0400
+Subject: [PATCH] client: do not prompt for LE Audio settings on A2DP endpoints
+
+Registering an A2DP endpoint prompted for Locations, Supported
+Context, Context, CIG and CIS, which are LE Audio/ISO specific and
+have no meaning for A2DP. Worse, answering Locations with a single
+location pushes an LC3_CHAN_COUNT LTV into the capabilities, which
+corrupts the SBC capabilities.
+
+Register A2DP endpoints right after Max Transports instead, and use
+the same helper in endpoint_init_defaults(), which compared against
+A2DP_SOURCE_UUID twice and therefore left A2DP Sink endpoints with
+ISO and broadcast defaults.
+
+Assisted-by: opencode:claude-opus-5
+
+diff --git a/client/player.c b/client/player.c
+index c5e4beef0..6cd5aeb4a 100644
+--- a/client/player.c
++++ b/client/player.c
+@@ -3506,6 +3506,12 @@ static void endpoint_locations(const char *input, void *user_data)
+ 				endpoint_supported_context, ep);
+ }
+ 
++static bool endpoint_is_a2dp(struct endpoint *ep)
++{
++	return !strcasecmp(ep->uuid, A2DP_SOURCE_UUID) ||
++			!strcasecmp(ep->uuid, A2DP_SINK_UUID);
++}
++
+ static void endpoint_max_transports(const char *input, void *user_data)
+ {
+ 	struct endpoint *ep = user_data;
+@@ -3525,6 +3531,12 @@ static void endpoint_max_transports(const char *input, void *user_data)
+ 		ep->max_transports = value;
+ 	}
+ 
++	/* Locations, contexts and ISO settings only apply to LE Audio */
++	if (endpoint_is_a2dp(ep)) {
++		endpoint_register(ep);
++		return;
++	}
++
+ 	bt_shell_prompt_input(ep->path, "Locations:", endpoint_locations, ep);
+ }
+ 
+@@ -4629,8 +4641,7 @@ static void endpoint_init_defaults(struct endpoint *ep)
+ 	ep->max_transports = UINT8_MAX;
+ 	ep->auto_accept = true;
+ 
+-	if (!strcmp(ep->uuid, A2DP_SOURCE_UUID) ||
+-			!strcmp(ep->uuid, A2DP_SOURCE_UUID))
++	if (endpoint_is_a2dp(ep))
+ 		return;
+ 
+ 	ep->iso_group = BT_ISO_QOS_GROUP_UNSET;
+
