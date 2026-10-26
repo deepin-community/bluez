@@ -1,0 +1,78 @@
+From 9965f36c6318e3a6f9879f5b0d842791a290e3ee Mon Sep 17 00:00:00 2001
+From: Philipp Dunkel <pip@pipobscure.com>
+Date: Fri, 17 Jul 2026 10:23:47 +0200
+Subject: [PATCH] adapter: Infer BR/EDR only at public LE addresses
+
+btd_adapter_device_found() records BR/EDR support for any LE device
+whose advertising Flags lack "BR/EDR Not Supported" (EIR_BREDR_UNSUP).
+The address type is not considered:
+
+    if (bdaddr_type != BDADDR_BREDR && eir_data.flags &&
+                    !(eir_data.flags & EIR_BREDR_UNSUP)) {
+            device_set_bredr_support(dev);
+
+When the advertisement uses a random address the device gets a BR/EDR
+bearer whose address is that random address, and start_discovery_cb()
+then prefers SDP over GATT:
+
+    if (device->bredr)
+            device_browse_sdp(device, NULL);
+    else
+            device_browse_gatt(device, NULL);
+
+SDP requires a BR/EDR ACL, so bluetoothd pages the random address. A
+random address is not a BD_ADDR and cannot be paged, so the attempt
+always ends in Page Timeout, and the failure tears down the working LE
+link:
+
+  connect_failed_callback() hci0 5A:B4:98:1F:CC:04 status 4
+  bonding_attempt_complete() hci0 bdaddr 5A:B4:98:1F:CC:04
+      type 0 status 0x4
+  device_bonding_complete() bonding (nil) status 0x04
+  browse_request_cancel()
+  btd_gatt_database_att_disconnected()
+
+Nothing requested the connection ("bonding (nil)") and the LE link was
+healthy. Any LE association that outlives the page timeout is killed by
+it; measured on one host, applications get about 4.7 s from connect
+before the link disappears, of which GATT discovery already takes 2.3 s.
+
+Current phones advertise Flags 0x1a (LE General Discoverable plus
+Simultaneous LE and BR/EDR, with BR/EDR Not Supported clear) from
+resolvable private addresses, so this triggers routinely rather than in
+some corner case.
+
+The Flags bits describe what the device supports. They do not promise
+that the address it is advertising from is a BD_ADDR. A dual-mode device
+uses the same Public Device Address for BR/EDR and LE, so the inference
+is sound only for BDADDR_LE_PUBLIC. Restrict it to that.
+
+The other two device_set_bredr_support() callers already require the
+device to have been seen over BR/EDR (bdaddr_type == BDADDR_BREDR), so
+they are unaffected. A device later seen over BR/EDR, or whose RPA is
+resolved to a public identity, still gets BR/EDR support recorded there.
+
+diff --git a/src/adapter.c b/src/adapter.c
+index 411006e61..d93d819c4 100644
+--- a/src/adapter.c
++++ b/src/adapter.c
+@@ -7431,8 +7431,17 @@ void btd_adapter_device_found(struct btd_adapter *adapter,
+ 	 * older kernels send separate adv_ind and scan_rsp. Newer
+ 	 * kernels send them merged, so once we know which mgmt version
+ 	 * supports this we can make the non-zero check conditional.
++	 *
++	 * Only infer BR/EDR support when the LE address is a Public Device
++	 * Address. A dual-mode device uses the same Public Device Address for
++	 * BR/EDR and LE, so in that case the advertised address is also a valid
++	 * BD_ADDR to page. A random address (static, resolvable or
++	 * non-resolvable) has no defined relationship to the device's BD_ADDR,
++	 * so recording BR/EDR support against it makes the device look pageable
++	 * at an address that can never be paged: SDP discovery then fails with
++	 * Page Timeout and takes the working LE link down with it.
+ 	 */
+-	if (bdaddr_type != BDADDR_BREDR && eir_data.flags &&
++	if (bdaddr_type == BDADDR_LE_PUBLIC && eir_data.flags &&
+ 					!(eir_data.flags & EIR_BREDR_UNSUP)) {
+ 		device_set_bredr_support(dev);
+ 		/* Update last seen for BR/EDR in case its flag is set */
+
