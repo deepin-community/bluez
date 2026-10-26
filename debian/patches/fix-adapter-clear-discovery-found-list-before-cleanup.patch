@@ -1,0 +1,49 @@
+From 7e3212fa233edbdcfd69f93e2a7418819172c599 Mon Sep 17 00:00:00 2001
+From: Pauli Virtanen <pav@iki.fi>
+Date: Fri, 4 Sep 2026 00:50:33 +0300
+Subject: [PATCH] adapter: clear discovery_found list before
+ discovery_cleanup()
+
+discovery_cleanup() tries to reset RSSI of devices in
+adapter->discovery_found list.  When called from adapter_remove(), the
+list contains only stale pointers as devices have been already freed,
+leading to UAF.
+
+Fix by freeing the discovery_found list in adapter_remove().
+
+Fixes AddressSanitizer: heap-use-after-free
+READ of size 1 at 0x7d5b585e033d thread T0
+    #0 0x000000772b1a in device_set_rssi_with_delta src/device.c:7121
+    #1 0x000000772daa in device_set_rssi src/device.c:7150
+    #2 0x0000006aa808 in invalidate_rssi_and_tx_power src/adapter.c:1732
+    #3 0x7feb5a35557f in g_slist_foreach (/lib64/libglib-2.0.so.0+0x6257f)
+    #4 0x7feb5a355b56 in g_slist_free_full (/lib64/libglib-2.0.so.0+0x62b56)
+    #5 0x0000006f67d2 in discovery_cleanup src/adapter.c:1747
+    #6 0x0000006f904f in adapter_remove src/adapter.c:7219
+    #7 0x0000006f9de2 in adapter_cleanup src/adapter.c:11165
+    #8 0x000000418ca9 in main src/main.c:1719
+
+freed by thread T0 here:
+    #0 0x7feb5a5434cf in free.part.0 (/lib64/libasan.so.8+0xee4cf)
+    #1 0x7feb5a337bb4 in g_free (/lib64/libglib-2.0.so.0+0x44bb4)
+    #2 0x0000007519d7 in device_free src/device.c:963
+
+previously allocated by thread T0 here:
+    #0 0x7feb5a54424f in calloc (/lib64/libasan.so.8+0xef24f)
+    #1 0x000000751fee in device_new src/device.c:4963
+
+diff --git a/src/adapter.c b/src/adapter.c
+index 7390ceeee..d6eaa814b 100644
+--- a/src/adapter.c
++++ b/src/adapter.c
+@@ -7216,6 +7216,9 @@ static void adapter_remove(struct btd_adapter *adapter)
+ 	g_slist_free(adapter->devices);
+ 	adapter->devices = NULL;
+ 
++	g_slist_free(adapter->discovery_found);
++	adapter->discovery_found = NULL;
++
+ 	discovery_cleanup(adapter, 0);
+ 
+ 	unload_drivers(adapter);
+
