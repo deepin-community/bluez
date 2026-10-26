@@ -1,3 +1,9 @@
+bluez (5.85-3deepin13) unstable; urgency=medium
+
+  * fix(device): Fix NULL pointer dereference in dev_property_get_uuids - skip NULL entries in the device UUID list before calling dbus_message_iter_append_basic() to prevent bluetoothd crash during D-Bus property serialization
+
+ -- deepin-ci-robot <packages@deepin.org>  Mon, 26 Oct 2026 15:56:51 +0800
+
 bluez (5.85-3deepin12) unstable; urgency=medium
 
   * Aggregate 45 backport PRs (#16-#66, excluding #18 #29 #61 #62 #64 #65)
