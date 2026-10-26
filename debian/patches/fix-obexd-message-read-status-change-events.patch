@@ -1,0 +1,53 @@
+From a0580dad5655e86314a0a777eb5f602c237a7e19 Mon Sep 17 00:00:00 2001
+From: Mohammed Sadiq <sadiq@sadiqpk.org>
+Date: Tue, 20 Oct 2026 09:26:17 +0530
+Subject: [PATCH] obexd: Handle message read status change events
+
+obexd is advertised to support Extended Event Report 1.1.  But it was
+not handling "ReadStatusChanged" type which made those events being
+mismarked as MAP_ET_NEW_MESSAGE.  This resulted in existing message to
+be replaced by new message with only "Status" property set instead of
+updating the "Status" of the existing message.
+
+diff --git a/obexd/client/map-event.h b/obexd/client/map-event.h
+index bb127b0f4..ab185eadf 100644
+--- a/obexd/client/map-event.h
++++ b/obexd/client/map-event.h
+@@ -19,7 +19,8 @@ enum map_event_type {
+ 	MAP_ET_MEMORY_FULL,
+ 	MAP_ET_MEMORY_AVAILABLE,
+ 	MAP_ET_MESSAGE_DELETED,
+-	MAP_ET_MESSAGE_SHIFT
++	MAP_ET_MESSAGE_SHIFT,
++	MAP_ET_READ_STATUS_CHANGED
+ };
+ 
+ struct map_event {
+diff --git a/obexd/client/map.c b/obexd/client/map.c
+index 955db9315..487354252 100644
+--- a/obexd/client/map.c
++++ b/obexd/client/map.c
+@@ -2148,6 +2148,9 @@ static void map_handle_notification(struct map_event *event, void *user_data)
+ 	case MAP_ET_MESSAGE_SHIFT:
+ 		map_handle_folder_changed(map, event, event->folder);
+ 		break;
++	case MAP_ET_READ_STATUS_CHANGED:
++		map_handle_status_changed(map, event, "read-status-changed");
++		break;
+ 	case MAP_ET_MEMORY_FULL:
+ 	case MAP_ET_MEMORY_AVAILABLE:
+ 	default:
+diff --git a/obexd/client/mns.c b/obexd/client/mns.c
+index c7f86afdc..6408e48d3 100644
+--- a/obexd/client/mns.c
++++ b/obexd/client/mns.c
+@@ -168,6 +168,8 @@ static void parse_event_report_type(struct map_event *event, const char *value)
+ 		event->type = MAP_ET_MESSAGE_DELETED;
+ 	else if (!g_ascii_strcasecmp(value, "MessageShift"))
+ 		event->type = MAP_ET_MESSAGE_SHIFT;
++	else if (!g_ascii_strcasecmp(value, "ReadStatusChanged"))
++		event->type = MAP_ET_READ_STATUS_CHANGED;
+ }
+ 
+ static void parse_event_report_handle(struct map_event *event,
+
