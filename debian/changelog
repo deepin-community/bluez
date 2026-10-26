@@ -1,3 +1,9 @@
+bluez (5.85-3deepin13) unstable; urgency=medium
+
+  * Fix stale AVDTP connecting state - only return -EBUSY in sink_connect()/source_connect() when the underlying AVDTP session is still connecting, and reject if a stream already exists, preventing dual-role A2DP devices from leaving the unused direction stuck in CONNECTING
+
+ -- deepin-ci-robot <packages@deepin.org>  Mon, 26 Oct 2026 15:36:28 +0800
+
 bluez (5.85-3deepin12) unstable; urgency=medium
 
   * Aggregate 45 backport PRs (#16-#66, excluding #18 #29 #61 #62 #64 #65)
