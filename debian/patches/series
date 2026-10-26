@@ -65,3 +65,4 @@ fix-midi-zero-timestamphigh.patch
 fix-media-dbus-timeouts-only-when-remote-waiting.patch
 CVE-2026-75032.patch
 CVE-2026-85218.patch
+fix-bap-recreate-stream-io-after-early-enable.patch
