@@ -1,0 +1,43 @@
+From e271e0adae507c36ae20c71b7127df7d7ee12e15 Mon Sep 17 00:00:00 2001
+From: Pauli Virtanen <pav@iki.fi>
+Date: Thu, 3 Sep 2026 23:21:17 +0300
+Subject: [PATCH] emulator: btdev: fix inquiry_timeout() inquiry destroy
+
+inquiry_timeout() removes inquiry_id callback, whose destroy removes
+inquiry_timeout_id callback. Doing this from the callback itself frees
+timeout-mainloop.c timeout data under it, leading to crash.
+
+Fix by setting btdev->inquiry_timeout_id = 0 first to avoid the early
+free.
+
+Fixes ERROR: AddressSanitizer: heap-use-after-free
+READ of size 4 at 0x7b9d9cfe0310 thread T0
+    #0 0x00000049ebbe in timeout_callback src/shared/timeout-mainloop.c:33
+    #1 0x00000049f270 in timeout_callback src/shared/mainloop.c:245
+    #2 0x00000049fbbb in mainloop_run src/shared/mainloop.c:104
+    #3 0x0000004a286f in mainloop_run_with_signal src/shared/mainloop-notify.c:196
+    #4 0x000000402a66 in main emulator/main.c:261
+
+freed by thread T0 here:
+    #0 0x7f7a5e6ee4cf in free.part.0 (/lib64/libasan.so.8+0xee4cf)
+    #1 0x00000049f591 in timeout_destroy src/shared/mainloop.c:226
+
+previously allocated by thread T0 here:
+    #0 0x7f7a5e6ef41f in malloc (/lib64/libasan.so.8+0xef41f)
+    #1 0x00000049158a in util_malloc src/shared/util.c:46
+
+diff --git a/emulator/btdev.c b/emulator/btdev.c
+index a53bd8252..bb4d55e74 100644
+--- a/emulator/btdev.c
++++ b/emulator/btdev.c
+@@ -1104,8 +1104,8 @@ static bool inquiry_timeout(void *user_data)
+ 	struct btdev *btdev = data->btdev;
+ 	struct bt_hci_evt_inquiry_complete ic;
+ 
+-	timeout_remove(btdev->inquiry_id);
+ 	btdev->inquiry_timeout_id = 0;
++	timeout_remove(btdev->inquiry_id);
+ 
+ 	/* Inquiry is stopped, send Inquiry complete event. */
+ 	ic.status = BT_HCI_ERR_SUCCESS;
+
