@@ -1,0 +1,95 @@
+From 5cf94acaea718d1955d4bcc16dea57f31fae14ad Mon Sep 17 00:00:00 2001
+From: Bastien Nocera <hadess@hadess.net>
+Date: Thu, 13 Aug 2026 11:16:57 +0200
+Subject: [PATCH] adv_monitor: Fix buffer overflow caused by integer overflow
+
+In src/adv_monitor.c, merged_pattern_send_add_pattern(), and with a
+large merged_pattern->patterns list, it's possible to overflow cp_len,
+an 8-bit integer:
+pattern_count = queue_length(merged_pattern->patterns);
+cp_len = sizeof(*cp) + pattern_count * sizeof(struct mgmt_adv_pattern);
+
+Eight patterns require 273 bytes of command storage, but assigning
+that result to uint8_t cp_len wraps it to 17 before allocation.
+
+The loop that follows does not use the truncated size; it still copies
+all eight 34-byte struct mgmt_adv_pattern records into the heap object.
+The mismatch between the wrapped allocation size and the full copy
+volume produces a large, deterministic heap overwrite.
+
+Fix this in 2 ways in the function itself:
+1) increase the size of cp_len, as 8 patterns would overflow it, and some
+   typical Bluetooth devices can support 16 patterns
+2) Store the result of the multiplication in a 64-bit integer before
+   checking whether it's bigger than our 16-bit cp_len
+
+A similar bug exists in merged_pattern_send_add_pattern_rssi().
+
+Reported-by: @ax-nnlabs (for merged_pattern_send_add_pattern())
+Reported-by: Aisle Research (for merged_pattern_send_add_pattern_rssi())
+Reported-by: @ax-nnlabs (for merged_pattern_send_add_pattern())
+Reported-by: Aisle Research (for merged_pattern_send_add_pattern_rssi())
+
+diff --git a/src/adv_monitor.c b/src/adv_monitor.c
+index 87fa824b3..7f437a0e7 100644
+--- a/src/adv_monitor.c
++++ b/src/adv_monitor.c
+@@ -1106,12 +1106,15 @@ static bool merged_pattern_send_add_pattern(
+ 			struct adv_monitor_merged_pattern *merged_pattern)
+ {
+ 	struct mgmt_cp_add_adv_monitor *cp = NULL;
+-	uint8_t pattern_count, cp_len;
++	uint64_t cp_len;
++	uint8_t pattern_count;
+ 	const struct queue_entry *e;
+ 	bool success = true;
+ 
+ 	pattern_count = queue_length(merged_pattern->patterns);
+ 	cp_len = sizeof(*cp) + pattern_count * sizeof(struct mgmt_adv_pattern);
++	if (cp_len > UINT16_MAX)
++		return false;
+ 
+ 	cp = malloc0(cp_len);
+ 	if (!cp)
+@@ -1126,8 +1129,9 @@ static bool merged_pattern_send_add_pattern(
+ 
+ 	if (!mgmt_send(merged_pattern->manager->mgmt,
+ 			MGMT_OP_ADD_ADV_PATTERNS_MONITOR,
+-			merged_pattern->manager->adapter_id, cp_len, cp,
+-			add_adv_patterns_monitor_cb, merged_pattern, NULL)) {
++			merged_pattern->manager->adapter_id, (uint16_t) cp_len,
++			cp, add_adv_patterns_monitor_cb, merged_pattern,
++			NULL)) {
+ 		error("Unable to send Add Adv Patterns Monitor command");
+ 		success = false;
+ 	}
+@@ -1141,12 +1145,15 @@ static bool merged_pattern_send_add_pattern_rssi(
+ 			struct adv_monitor_merged_pattern *merged_pattern)
+ {
+ 	struct mgmt_cp_add_adv_patterns_monitor_rssi *cp = NULL;
+-	uint8_t pattern_count, cp_len;
++	uint64_t cp_len;
++	uint8_t pattern_count;
+ 	const struct queue_entry *e;
+ 	bool success = true;
+ 
+ 	pattern_count = queue_length(merged_pattern->patterns);
+ 	cp_len = sizeof(*cp) + pattern_count * sizeof(struct mgmt_adv_pattern);
++	if (cp_len > UINT16_MAX)
++		return false;
+ 
+ 	cp = malloc0(cp_len);
+ 	if (!cp)
+@@ -1169,8 +1176,9 @@ static bool merged_pattern_send_add_pattern_rssi(
+ 
+ 	if (!mgmt_send(merged_pattern->manager->mgmt,
+ 			MGMT_OP_ADD_ADV_PATTERNS_MONITOR_RSSI,
+-			merged_pattern->manager->adapter_id, cp_len, cp,
+-			add_adv_patterns_monitor_cb, merged_pattern, NULL)) {
++			merged_pattern->manager->adapter_id, (uint16_t) cp_len,
++			cp, add_adv_patterns_monitor_cb, merged_pattern,
++			NULL)) {
+ 		error("Unable to send Add Adv Patterns Monitor RSSI command");
+ 		success = false;
+ 	}
+
