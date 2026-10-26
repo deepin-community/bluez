@@ -1,3 +1,9 @@
+bluez (5.85-3deepin13) unstable; urgency=medium
+
+  * a2dp: Fix crash on NULL stream in transport_cb - check setup->stream before use when accept completes, avoiding segfault in avdtp_stream_set_transport() when the stream was cleared while the accept was pending
+
+ -- deepin-ci-robot <packages@deepin.org>  Mon, 26 Oct 2026 14:36:31 +0800
+
 bluez (5.85-3deepin12) unstable; urgency=medium
 
   * Aggregate 45 backport PRs (#16-#66, excluding #18 #29 #61 #62 #64 #65)
