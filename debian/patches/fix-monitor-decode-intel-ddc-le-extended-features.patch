@@ -1,0 +1,86 @@
+From e0d2a5bfe1625ab18d88b066953948c0df07b7ae Mon Sep 17 00:00:00 2001
+From: Luiz Augusto von Dentz <luiz.von.dentz@intel.com>
+Date: Thu, 30 Jul 2026 13:21:00 -0400
+Subject: [PATCH] monitor: Decode Intel DDC LE extended features
+
+The Intel DDC Config Write command (0x3f|0x008b) can carry identifier
+0x031f which holds the 248 octet LE extended features array, using the
+same layout as LE Read All Local Features: page 0 is 8 octets followed
+by 10 pages of 24 octets each.
+
+Decode it with the existing LE feature tables instead of dumping raw
+hex, and make the parameter loop stop on truncated/padded entries.
+
+Example, setting only the SCI bits on page 1 (bits 8 and 9):
+
+  hcitool cmd 0x3F 0x008B 0xFA 0x1F 0x03 \
+      0xFF 0xF9 0x01 0x3F 0xBE 0x00 0x00 0x80 \
+      0x00 0x03 0x00 0x00 ... (padding up to 248 octets)
+
+  < HCI Command: Intel DDC Config Write (0x3f|0x008b) plen 251
+          Identifier: 0x031f
+          Features[0/0][8]:
+          ff f9 01 3f be 00 00 80                          ...?....
+            LE Encryption
+            Connection Parameter Request Procedure
+            ...
+            LL Extended Feature Set
+          Features[1/0][8]:
+          00 03 00 00 00 00 00 00                          ........
+            Shorter Connection Intervals
+            Shorter Connection Intervals (Host Support)
+          Features[1/1][8]:
+          00 00 00 00 00 00 00 00                          ........
+          ...
+
+diff --git a/monitor/intel.c b/monitor/intel.c
+index cd997d24b..782fda675 100644
+--- a/monitor/intel.c
++++ b/monitor/intel.c
+@@ -681,14 +681,43 @@ static void set_event_mask_cmd(uint16_t index, const void *data, uint8_t size)
+ 						"(0x%16.16" PRIx64 ")", mask);
+ }
+ 
++#define DDC_ID_LE_EXT_FEATURES	0x031f
++
++/* LE extended features: page 0 is 8 octets, pages 1-10 are 24 octets each */
++static void print_ddc_le_ext_features(const uint8_t *features, uint8_t len)
++{
++	uint8_t i;
++
++	if (len < 8) {
++		packet_hexdump(features, len);
++		return;
++	}
++
++	packet_print_features_ext_ll(0, features);
++
++	for (i = 0; i < 10 && len >= 8 + (i + 1) * 24; i++)
++		packet_print_features_ext_ll(i + 1, features + 8 + i * 24);
++}
++
+ static void ddc_config_write_cmd(uint16_t index, const void *data, uint8_t size)
+ {
+-	while (size > 0) {
++	while (size > 2) {
+ 		uint8_t param_len = get_u8(data);
+ 		uint16_t param_id = get_le16(data + 1);
+ 
++		if (param_len < 2 || param_len + 1 > size)
++			break;
++
+ 		print_field("Identifier: 0x%4.4x", param_id);
+-		packet_hexdump(data + 3, param_len - 2);
++
++		switch (param_id) {
++		case DDC_ID_LE_EXT_FEATURES:
++			print_ddc_le_ext_features(data + 3, param_len - 2);
++			break;
++		default:
++			packet_hexdump(data + 3, param_len - 2);
++			break;
++		}
+ 
+ 		data += param_len + 1;
+ 		size -= param_len + 1;
+
