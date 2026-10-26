@@ -1,0 +1,202 @@
+From 74bc1ca27a7c1efcf236fd63e9e5c238fa524c80 Mon Sep 17 00:00:00 2001
+From: Paul Menzel <pmenzel@molgen.mpg.de>
+Date: Mon, 17 Aug 2026 17:48:10 +0200
+Subject: [PATCH] obexd: Reference count the phonebook back-end setup and
+ teardown
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Stopping obexd on Debian sid/unstable with *bluez* 5.87-1 logs a GObject
+critical:
+
+    obexd[10687]: Terminating
+    systemd[1804]: Stopping obex.service - Bluetooth OBEX service...
+    obexd[10687]: g_object_unref: assertion 'G_IS_OBJECT (object)' failed
+    systemd[1804]: Stopped obex.service - Bluetooth OBEX service.
+
+Two builtin plugins use the phonebook back-end: pbap (pbap_init() at
+obexd/plugins/pbap.c:962, pbap_exit() at :1002) and irmc (irmc_init() at
+obexd/plugins/irmc.c:446, irmc_exit() at :473). Each calls phonebook_init()
+when it is loaded and phonebook_exit() when it is unloaded, but neither the
+callers nor the back-end track ownership of the singleton they share.
+plugin_init() therefore sets the back-end up twice and plugin_cleanup()
+tears it down twice. A gdb trace of the shutdown path confirms both pairs
+of calls.
+
+The dummy back-end tolerates this by accident: phonebook_init() bails out
+early when root_folder is already set, and the second phonebook_exit() only
+repeats a g_free()/NULL assignment. The ebook back-end, which Debian builds
+(*bluez-obexd* depends on *libebook-1.2* and *libedataserver*), does not.
+Its phonebook_init() stores three GObject references in static variables
+and phonebook_exit() unconditionally drops all three, so the second
+teardown unrefs objects that were already finalized. The registry and the
+address book are effectively singletons in evolution-data-server and merely
+gain a second reference, but e_book_client_connect_sync() hands back a
+fresh client on every call, so the first client leaks and the second one is
+unreffed twice – hence a single critical rather than three.
+
+Put the ownership tracking in one place instead of duplicating it in every
+back-end: phonebook_init() and phonebook_exit() now live in a new shared
+obexd/plugins/phonebook.c and reference count the back-end, so only the
+first init and the last exit reach it. The back-end entry points are
+renamed to phonebook_driver_init()/phonebook_driver_exit() so that they
+cannot be called directly by mistake.
+
+Assisted-by: Claude Code:claude-opus-5
+
+diff --git a/Makefile.obexd b/Makefile.obexd
+index 7ad74e128..9daa5aac2 100644
+--- a/Makefile.obexd
++++ b/Makefile.obexd
+@@ -48,6 +48,7 @@ obexd_builtin_modules += pbap
+ obexd_builtin_sources += obexd/plugins/pbap.c \
+ 				obexd/plugins/vcard.h obexd/plugins/vcard.c \
+ 				obexd/plugins/phonebook.h \
++				obexd/plugins/phonebook.c \
+ 				obexd/plugins/phonebook-@PLUGIN_PHONEBOOK@.c
+ EXTRA_DIST += obexd/plugins/phonebook-dummy.c obexd/plugins/phonebook-ebook.c \
+ 				obexd/plugins/phonebook-tracker.c
+diff --git a/obexd/plugins/phonebook-dummy.c b/obexd/plugins/phonebook-dummy.c
+index 0dce13f66..f308ea701 100644
+--- a/obexd/plugins/phonebook-dummy.c
++++ b/obexd/plugins/phonebook-dummy.c
+@@ -73,7 +73,7 @@ static void query_free(void *user_data)
+ 	g_free(query);
+ }
+ 
+-int phonebook_init(void)
++int phonebook_driver_init(void)
+ {
+ 	if (root_folder)
+ 		return 0;
+@@ -84,7 +84,7 @@ int phonebook_init(void)
+ 	return 0;
+ }
+ 
+-void phonebook_exit(void)
++void phonebook_driver_exit(void)
+ {
+ 	g_free(root_folder);
+ 	root_folder = NULL;
+diff --git a/obexd/plugins/phonebook-ebook.c b/obexd/plugins/phonebook-ebook.c
+index 5fc0498c1..beb72b22b 100644
+--- a/obexd/plugins/phonebook-ebook.c
++++ b/obexd/plugins/phonebook-ebook.c
+@@ -625,7 +625,7 @@ next:
+ 	return data;
+ }
+ 
+-int phonebook_init(void)
++int phonebook_driver_init(void)
+ {
+ 	EClient *client;
+ 	GError *gerr = NULL;
+@@ -662,7 +662,7 @@ int phonebook_init(void)
+ 	return 0;
+ }
+ 
+-void phonebook_exit(void)
++void phonebook_driver_exit(void)
+ {
+ 	g_object_unref(book_client);
+ 	g_object_unref(address_book);
+diff --git a/obexd/plugins/phonebook-tracker.c b/obexd/plugins/phonebook-tracker.c
+index eb7a84f46..36e73db77 100644
+--- a/obexd/plugins/phonebook-tracker.c
++++ b/obexd/plugins/phonebook-tracker.c
+@@ -1420,14 +1420,14 @@ done:
+ 	 */
+ }
+ 
+-int phonebook_init(void)
++int phonebook_driver_init(void)
+ {
+ 	g_type_init();
+ 
+ 	return 0;
+ }
+ 
+-void phonebook_exit(void)
++void phonebook_driver_exit(void)
+ {
+ }
+ 
+diff --git a/obexd/plugins/phonebook.c b/obexd/plugins/phonebook.c
+new file mode 100644
+index 000000000..6afdb7abb
+--- /dev/null
++++ b/obexd/plugins/phonebook.c
+@@ -0,0 +1,47 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ *
++ *  OBEX Server
++ *
++ *  Copyright (C) 2007-2010  Marcel Holtmann <marcel@holtmann.org>
++ *
++ *
++ */
++
++#ifdef HAVE_CONFIG_H
++#include <config.h>
++#endif
++
++#include <stdint.h>
++
++#include <glib.h>
++
++#include "phonebook.h"
++
++static unsigned int refcount = 0;
++
++int phonebook_init(void)
++{
++	int err;
++
++	if (refcount > 0) {
++		refcount++;
++		return 0;
++	}
++
++	err = phonebook_driver_init();
++	if (err < 0)
++		return err;
++
++	refcount = 1;
++
++	return 0;
++}
++
++void phonebook_exit(void)
++{
++	if (refcount == 0 || --refcount > 0)
++		return;
++
++	phonebook_driver_exit();
++}
+diff --git a/obexd/plugins/phonebook.h b/obexd/plugins/phonebook.h
+index c73ae73b8..b878b143d 100644
+--- a/obexd/plugins/phonebook.h
++++ b/obexd/plugins/phonebook.h
+@@ -79,9 +79,19 @@ typedef void (*phonebook_entry_cb) (const char *id, uint32_t handle,
+ typedef void (*phonebook_cache_ready_cb) (void *user_data);
+ 
+ 
++/*
++ * Set up and tear down the phonebook back-end. The back-end is shared by
++ * the pbap and the irmc plugin, which are loaded and unloaded independently
++ * of each other, so the calls are reference counted: only the first
++ * phonebook_init() and the last phonebook_exit() reach the back-end.
++ */
+ int phonebook_init(void);
+ void phonebook_exit(void);
+ 
++/* Implemented by the back-end, only called through the pair above. */
++int phonebook_driver_init(void);
++void phonebook_driver_exit(void);
++
+ /*
+  * Changes the current folder in the phonebook back-end. The PBAP core
+  * doesn't validate or restrict the possible values for the folders,
+
