@@ -1,0 +1,165 @@
+From da088621411a0ab55e9983eb72c32fa3eb18846c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fr=C3=A9d=C3=A9ric=20Danis?= <frederic.danis@collabora.com>
+Date: Wed, 19 Aug 2026 16:43:37 +0200
+Subject: [PATCH] profiles/audio: make A2DP admin allowlist enforcement
+ role-safe
+
+Unify audio-side allowlist enforcement so A2DP behavior remains correct
+across dynamic policy updates, reconnects, and role-specific endpoint
+negotiation.
+
+Why:
+- Dynamic allowlist reapply could leave stale A2DP role state and dangling
+  role lists, leading to invalid reuse and instability during subsequent
+  signaling/SEP handling.
+- Policy enforcement happening late (at SetConfiguration time) allowed
+  blocked roles to remain visible during capability negotiation, which caused
+  retry/disconnect behavior until session managers were restarted.
+
+What changed:
+- Harden A2DP server role removal bookkeeping:
+  - clear source_enabled/sink_enabled flags on remove
+  - clear server->sources/server->sinks list heads after free
+  - unregister shared server only when both roles are disabled
+- Enforce admin policy at SEP negotiation boundaries:
+  - add role-aware helper mapping local SEP type to policy UUID
+  - reject blocked roles in Get_Capability path
+  - reject blocked roles early in Set_Configuration path
+- Keep endpoint registration resilient when partial allowlists block specific
+  A2DP records, so allowed endpoints continue to register.
+
+Result:
+- A2DP policy decisions are consistent with local role semantics.
+- Blocked roles are filtered earlier and more predictably.
+- Runtime policy transitions are stable, without requiring daemon/session
+  manager restarts to recover expected reconnect behavior.
+
+Assisted-by: GPT:GPT-5.3-Codex
+
+diff --git a/profiles/audio/a2dp.c b/profiles/audio/a2dp.c
+--- a/profiles/audio/a2dp.c
++++ b/profiles/audio/a2dp.c
+@@ -811,6 +811,20 @@ static void reverse_discover(struct avdt
+ 	DBG("err %d", err);
+ }
+ 
++static bool a2dp_sep_policy_allowed(struct avdtp *session,
++					const struct a2dp_sep *sep)
++{
++	struct btd_adapter *adapter = avdtp_get_adapter(session);
++	const char *uuid;
++
++	if (sep->type == AVDTP_SEP_TYPE_SOURCE)
++		uuid = A2DP_SOURCE_UUID;
++	else
++		uuid = A2DP_SINK_UUID;
++
++	return btd_adapter_is_uuid_allowed(adapter, uuid);
++}
++
+ static gboolean endpoint_setconf_ind(struct avdtp *session,
+ 						struct avdtp_local_sep *sep,
+ 						struct avdtp_stream *stream,
+@@ -827,6 +841,9 @@ static gboolean endpoint_setconf_ind(str
+ 	else
+ 		DBG("Source %p: Set_Configuration_Ind", sep);
+ 
++	if (!a2dp_sep_policy_allowed(session, a2dp_sep))
++		return FALSE;
++
+ 	a2dp_stream = a2dp_stream_get(a2dp_sep, session);
+ 	if (!a2dp_stream)
+ 		return FALSE;
+@@ -905,6 +922,11 @@ static gboolean endpoint_getcap_ind(stru
+ 	else
+ 		DBG("Source %p: Get_Capability_Ind", sep);
+ 
++	if (!a2dp_sep_policy_allowed(session, a2dp_sep)) {
++		*err = AVDTP_BAD_ACP_SEID;
++		return FALSE;
++	}
++
+ 	*caps = NULL;
+ 
+ 	media_transport = avdtp_service_cap_new(AVDTP_MEDIA_TRANSPORT,
+@@ -2851,6 +2873,7 @@ struct a2dp_sep *a2dp_add_sep(struct btd
+ 	GSList **l;
+ 	uint32_t *record_id;
+ 	sdp_record_t *record;
++	int ret;
+ 
+ 	server = find_server(servers, adapter);
+ 	if (server == NULL) {
+@@ -2911,12 +2934,13 @@ struct a2dp_sep *a2dp_add_sep(struct btd
+ 		return NULL;
+ 	}
+ 
+-	if (adapter_service_add(server->adapter, record) < 0) {
++	ret = adapter_service_add(server->adapter, record);
++	if (ret < 0) {
+ 		error("Unable to register A2DP service record");
+ 		sdp_record_free(record);
+ 		a2dp_unregister_sep(sep);
+ 		if (err)
+-			*err = -EINVAL;
++			*err = ret;
+ 		return NULL;
+ 	}
+ 
+@@ -3680,8 +3704,11 @@ static void a2dp_source_server_remove(st
+ 	if (!server)
+ 		return;
+ 
++	server->source_enabled = FALSE;
++
+ 	g_slist_free_full(server->sources,
+ 					(GDestroyNotify) a2dp_unregister_sep);
++	server->sources = NULL;
+ 
+ 	if (server->source_record_id) {
+ 		adapter_service_remove(server->adapter,
+@@ -3689,7 +3716,7 @@ static void a2dp_source_server_remove(st
+ 		server->source_record_id = 0;
+ 	}
+ 
+-	if (server->sink_record_id)
++	if (server->sink_enabled)
+ 		return;
+ 
+ 	a2dp_server_unregister(server);
+@@ -3727,14 +3754,17 @@ static void a2dp_sink_server_remove(stru
+ 	if (!server)
+ 		return;
+ 
++	server->sink_enabled = FALSE;
++
+ 	g_slist_free_full(server->sinks, (GDestroyNotify) a2dp_unregister_sep);
++	server->sinks = NULL;
+ 
+ 	if (server->sink_record_id) {
+ 		adapter_service_remove(server->adapter, server->sink_record_id);
+ 		server->sink_record_id = 0;
+ 	}
+ 
+-	if (server->source_record_id)
++	if (server->source_enabled)
+ 		return;
+ 
+ 	a2dp_server_unregister(server);
+diff --git a/profiles/audio/media.c b/profiles/audio/media.c
+--- a/profiles/audio/media.c
++++ b/profiles/audio/media.c
+@@ -2936,6 +2936,13 @@ static void app_register_endpoint(void *
+ 						metadata, metadata_size,
+ 						&app->err);
+ 	if (!endpoint) {
++		if (app->err == -EPERM) {
++			info("Skipping endpoint %s:%s (%s) blocked by admin allowlist",
++				app->sender, path, uuid);
++			app->err = 0;
++			return;
++		}
++
+ 		error("Unable to register endpoint %s:%s: %s", app->sender,
+ 						path, strerror(-app->err));
+ 		return;
