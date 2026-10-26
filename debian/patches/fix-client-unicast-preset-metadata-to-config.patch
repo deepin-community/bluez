@@ -1,0 +1,66 @@
+From 72a5ce497f34b2e5f1e8e8d831d7f7e5a5ec403b Mon Sep 17 00:00:00 2001
+From: Derek Tern <1263187-dt@users.noreply.gitlab.freedesktop.org>
+Date: Thu, 17 Sep 2026 19:15:56 +0000
+Subject: [PATCH] client: Pass unicast preset metadata to config
+
+Custom presets retain metadata, but endpoint.config copies only their
+codec capabilities and QoS into SetConfiguration. Copy the metadata too,
+and free configuration buffers on completion and immediate failure.
+
+diff --git a/client/player.c b/client/player.c
+index 6cd5aeb4a..ae2ce66f0 100644
+--- a/client/player.c
++++ b/client/player.c
+@@ -3797,15 +3797,20 @@ static void config_endpoint_setup(DBusMessageIter *iter, void *user_data)
+ 	append_properties(iter, cfg);
+ }
+ 
++static void config_endpoint_free(struct endpoint_config *cfg)
++{
++	util_iov_free(cfg->caps, 1);
++	util_iov_free(cfg->meta, 1);
++	free(cfg);
++}
++
+ static void config_endpoint_reply(DBusMessage *message, void *user_data)
+ {
+ 	struct endpoint_config *cfg = user_data;
+ 	struct endpoint *ep = cfg->ep;
+ 	DBusError error;
+ 
+-	free(cfg->caps->iov_base);
+-	free(cfg->caps);
+-	free(cfg);
++	config_endpoint_free(cfg);
+ 
+ 	dbus_error_init(&error);
+ 
+@@ -3827,6 +3832,7 @@ static void endpoint_set_config(struct endpoint_config *cfg)
+ 						config_endpoint_setup,
+ 						config_endpoint_reply,
+ 						cfg, NULL)) {
++		config_endpoint_free(cfg);
+ 		bt_shell_printf("Failed to config endpoint\n");
+ 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+ 	}
+@@ -4050,8 +4056,10 @@ static void cmd_config_endpoint(int argc, char *argv[])
+ 
+ 		if (cfg->ep->broadcast)
+ 			endpoint_set_config_bcast(cfg);
+-		else
++		else {
++			cfg->meta = util_iov_dup(&preset->meta, 1);
+ 			endpoint_set_config(cfg);
++		}
+ 
+ 		return;
+ 	}
+@@ -4062,7 +4070,7 @@ static void cmd_config_endpoint(int argc, char *argv[])
+ 	return;
+ 
+ fail:
+-	g_free(cfg);
++	config_endpoint_free(cfg);
+ 	return bt_shell_noninteractive_quit(EXIT_FAILURE);
+ }
+
