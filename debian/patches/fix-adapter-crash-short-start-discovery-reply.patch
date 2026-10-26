@@ -1,0 +1,104 @@
+From a734b06059cbe0d0f00442c901506ef17e960960 Mon Sep 17 00:00:00 2001
+From: Iaroslav Voitovych <yaroslav.voytovych@gmail.com>
+Date: Sat, 19 Sep 2026 20:44:25 +0200
+Subject: [PATCH] adapter: Fix crash on short start discovery reply
+
+start_discovery_complete() validates the reply length before using the
+returned parameters:
+
+	if (length < sizeof(*rp)) {
+		btd_error(adapter->dev_id,
+			"Wrong size of start discovery return parameters");
+		discovery_complete(adapter, MGMT_STATUS_FAILED);
+		return;
+	}
+
+but that check sits below the branch taken when the discovery client
+list has emptied while the command was pending, and that branch has
+already dereferenced the reply:
+
+	if (!adapter->discovery_list) {
+		struct mgmt_cp_stop_discovery cp;
+
+		if (status != MGMT_STATUS_SUCCESS)
+			return;
+
+		/* Stop discovering as there are no clients left */
+		cp.type = rp->type;      <-- rp may be NULL here
+
+mgmt_cp_start_discovery is a single uint8_t, so rp->type is a one-byte
+read at offset 0 and a NULL rp faults immediately.
+
+The mgmt layer can invoke a command callback with no reply parameters:
+src/shared/mgmt.c passes length 0 and a NULL param on the Command
+Status path:
+
+	case MGMT_EV_CMD_STATUS:
+		...
+		DBG(mgmt, "[0x%04x] command 0x%02x status: 0x%02x", ...);
+		request_complete(mgmt, cs->status, opcode, index, 0, NULL);
+
+Observed as a crash on a QCA9377 (13d3:3503) whose controller stops
+answering HCI during audio use. The archived session logs show exactly
+that sequence: the daemon's debug log (bluez 5.72) ends with the
+Command Status delivery and the callback entry, for the Start Discovery
+it had sent 2.05 s earlier, ten seconds after its last discovery client
+had gone; the contemporaneous kernel log records the resulting fault:
+
+  bluetoothd:
+  21:03:16.750  discovery_remove() owner :1.125
+  21:03:24.943  send_request() [0x0000] command 0x0023
+  21:03:26.994  can_read_data() [0x0000] command 0x23 status: 0x00
+  21:03:26.994  start_discovery_complete() status 0x00
+  kernel:
+  21:03:26.995  bluetoothd[2821]: segfault at 0 ...
+
+"command ... status:" is the Command Status branch (Command Complete
+logs "complete:"), so the callback ran with status 0, length 0 and a
+NULL param, found discovery_list empty, and faulted on rp->type. The
+crash site was resolved from the shipped binary:
+
+  bluetoothd[2821]: segfault at 0 ip 00005d6eb1ad1986 sp 00007ffef8e784b0 \
+      error 4 in bluetoothd[a6986,5d6eb1a50000+f3000]
+
+  a6986:  41 0f b6 45 00    movzbl 0x0(%r13),%eax     <-- cp.type = rp->type
+  a698b:  0f b7 53 04       movzwl 0x4(%rbx),%edx     <-- adapter->dev_id
+  a6992:  4c 8d 45 d7       lea    -0x29(%rbp),%r8    <-- &cp
+
+The same delivery, a Command Status with status 0x00 answering a Start
+Discovery just sent, was logged five more times on that machine: four
+in the crashing daemon's own lifetime and once on a later day. On each
+of those the client list was non-empty, so the existing check below
+the branch handled it ("Wrong size of start discovery return
+parameters"); when the list is empty the branch above is reached
+first.
+
+Why the kernel answers Start Discovery with a successful Command
+Status rather than the usual one-byte Command Complete is not
+established here. The crashing instance arrived while the controller
+was timing out HCI commands; the fix does not depend on the cause.
+
+Perform the same length validation before using the reply in the
+no-clients branch. The check is added inside that branch rather than
+hoisted above it, so that no other path changes behaviour.
+
+Fixes: 3597d1377723 ("adapter: Fix not waiting for start discovery result")
+
+diff --git a/src/adapter.c b/src/adapter.c
+index 50b4dc6d7..33e1ff07a 100644
+--- a/src/adapter.c
++++ b/src/adapter.c
+@@ -1881,6 +1881,12 @@ static void start_discovery_complete(uint8_t status, uint16_t length,
+ 		if (status != MGMT_STATUS_SUCCESS)
+ 			return;
+ 
++		if (length < sizeof(*rp)) {
++			btd_error(adapter->dev_id,
++				"Wrong size of start discovery return parameters");
++			return;
++		}
++
+ 		/* Stop discovering as there are no clients left */
+ 		cp.type = rp->type;
+ 		mgmt_send(adapter->mgmt, MGMT_OP_STOP_DISCOVERY,
+
