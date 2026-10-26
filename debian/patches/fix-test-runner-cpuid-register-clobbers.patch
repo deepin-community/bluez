@@ -1,0 +1,46 @@
+From c8e2b951b07fc9b84fa7f3e70dcde2b61aab3ad8 Mon Sep 17 00:00:00 2001
+From: Pauli Virtanen <pav@iki.fi>
+Date: Sat, 12 Sep 2026 21:18:23 +0300
+Subject: [PATCH] tools/test-runner: Fix CPUID register clobbers
+
+CPUID modifies EAX, EBX, ECX and EDX, but the inline asm clobber list is
+incomplete.  Use the __get_cpuid() intrinsic instead.
+
+Fixes rootfs_setup(r, argv) crashing due to impossible r != &rootfs due
+to clobbered registers.
+
+Assisted-by: qwen3.8-flash-next  # finding the bug
+
+diff --git a/tools/test-runner.c b/tools/test-runner.c
+index 9eaf39d35..2de05e26d 100644
+--- a/tools/test-runner.c
++++ b/tools/test-runner.c
+@@ -33,6 +33,11 @@
+ #include <sys/param.h>
+ #include <sys/reboot.h>
+ 
++#if defined(__GNUC__) && (defined(__i386__) || defined(__amd64__))
++#include <cpuid.h>
++#define HAVE_GET_CPUID
++#endif
++
+ #include "bluetooth/bluetooth.h"
+ #include "bluetooth/hci.h"
+ #include "bluetooth/hci_lib.h"
+@@ -306,12 +311,10 @@ static char *const qemu_envp[] = {
+ 
+ static void check_virtualization(void)
+ {
+-#if defined(__GNUC__) && (defined(__i386__) || defined(__amd64__))
+-	uint32_t ecx;
+-
+-	__asm__ __volatile__("cpuid" : "=c" (ecx) : "a" (1) : "memory");
++#ifdef HAVE_GET_CPUID
++	unsigned int eax, ebx, ecx, edx;
+ 
+-	if (!!(ecx & (1 << 5)))
++	if (__get_cpuid(1, &eax, &ebx, &ecx, &edx) && (ecx & (1 << 5)))
+ 		printf("Found support for Virtual Machine eXtensions\n");
+ #endif
+ }
+
