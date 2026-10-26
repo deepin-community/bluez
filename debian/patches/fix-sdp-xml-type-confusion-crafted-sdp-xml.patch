@@ -1,11 +1,31 @@
-Description: CVE-2026-80185 (medium) - sdp-xml: Fix crash caused by type confusion when parsing crafted SDP XML
-Author: Bastien Nocera <hadess@hadess.net>
-Origin: https://github.com/bluez/bluez/commit/985e643d78b09afc81d606bc0a08581fc05b1b15.patch
-Bug: https://nvd.nist.gov/vuln/detail/CVE-2026-80185
-Last-Update: Wed, 12 Aug 2026 10:01:33 +0200
----
+From 985e643d78b09afc81d606bc0a08581fc05b1b15 Mon Sep 17 00:00:00 2001
+From: Bastien Nocera <hadess@hadess.net>
+Date: Wed, 12 Aug 2026 10:01:33 +0200
+Subject: [PATCH] sdp-xml: Fix crash caused by type confusion when parsing
+ crafted SDP XML
+
+When element_end() processes </attribute>, it frees ctx_data->stack_head
+and clears the stack even if parsing is still nested inside a parent
+container.
+
+If a crafted ServiceRecord places a nested <attribute> inside <sequence>,
+a later sibling scalar element such as <uint64> can become the new stack
+head. When the closing </sequence> is then processed, compute_seq_size()
+is reached without first validating that the current node is actually
+a sequence.
+
+sdp_data_t.val stores both scalar members such as uint64 and the
+dataseq pointer in the same union. As a result, attacker-controlled
+scalar data can be reinterpreted as a linked-list pointer and traversed
+until bluetoothd crashes.
+
+See https://github.com/bluez/bluez/security/advisories/GHSA-7mmr-gwqx-vc34
+
+Reported-by: Aisle Research
+Co-authored-by: Aisle Research
+
 diff --git a/src/sdp-xml.c b/src/sdp-xml.c
-index e5b30e8..c8f9ed0 100644
+index e5b30e885..c8f9ed013 100644
 --- a/src/sdp-xml.c
 +++ b/src/sdp-xml.c
 @@ -529,7 +529,9 @@ static void element_end(GMarkupParseContext *context,
@@ -59,3 +79,4 @@ index e5b30e8..c8f9ed0 100644
  		ctx_data->stack_head->data->unitSize = compute_seq_size(ctx_data->stack_head->data);
  
  		if (ctx_data->stack_head->data->unitSize > USHRT_MAX) {
+

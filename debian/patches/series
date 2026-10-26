@@ -18,7 +18,7 @@ fix-inverted-NULL-check-in-gatt_db-clone.patch
 fix-integer-overflow-in-sdp_extract_seqtype.patch
 fix-pbap-databaseid-check-gatt-client-use-after-free.patch
 CVE-2026-80186.patch
-CVE-2026-80185.patch
+fix-sdp-xml-type-confusion-crafted-sdp-xml.patch
 CVE-2026-19774.patch
 feat-monitor-hci-event-encryption-change-v2.patch
 fix-tester-config-add-missing-crypto-aes.patch
