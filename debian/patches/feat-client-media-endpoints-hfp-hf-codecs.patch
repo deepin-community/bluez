@@ -1,0 +1,44 @@
+From 9e2a7ddbb178591ec3e30bf9bb942581c317f713 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fr=C3=A9d=C3=A9ric=20Danis?= <frederic.danis.oss@gmail.com>
+Date: Thu, 1 Oct 2026 23:10:27 +0200
+Subject: [PATCH] client/player: Add MediaEndpoints for HFP HF codecs
+
+Assisted-by: Claude:claude-sonnet-5
+
+diff --git a/client/player.c b/client/player.c
+index ae2ce66f0..88221076c 100644
+--- a/client/player.c
++++ b/client/player.c
+@@ -1363,6 +1363,18 @@ static const struct capabilities {
+ 				LC3_DATA(LC3_FREQ_ANY, LC3_DURATION_ANY, 26,
+ 					240),
+ 				UTIL_IOV_INIT()),
++
++	/* SCO CVSD:
++	 */
++	CODEC_CAPABILITIES("hfp_ag/cvsd", HFP_AG_UUID, 1,
++				UTIL_IOV_INIT(),
++				UTIL_IOV_INIT()),
++
++	/* SCO mSBC:
++	 */
++	CODEC_CAPABILITIES("hfp_ag/msbc", HFP_AG_UUID, 2,
++				UTIL_IOV_INIT(),
++				UTIL_IOV_INIT()),
+ };
+ 
+ struct codec_preset {
+@@ -3069,8 +3081,10 @@ static void endpoint_free(void *data)
+ 	if (ep->msg)
+ 		dbus_message_unref(ep->msg);
+ 
+-	queue_destroy(ep->preset->custom, free);
+-	ep->preset->custom = NULL;
++	if (ep->preset) {
++		queue_destroy(ep->preset->custom, free);
++		ep->preset->custom = NULL;
++	}
+ 
+ 	if (ep->codec == 0xff)
+ 		free(ep->preset);
+
