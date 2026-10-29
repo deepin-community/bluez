@@ -1,0 +1,31 @@
+From f26da4389e2dc9dac340182b5f618a63c0c96c08 Mon Sep 17 00:00:00 2001
+From: Tao Cai <294305068@qq.com>
+Date: Tue, 22 Sep 2026 11:10:17 +0800
+Subject: [PATCH] device: Fix NULL pointer dereference in
+ dev_property_get_uuids
+
+The bluetoothd process crashes during D-Bus property serialization when
+the device UUID list contains a NULL entry. Add a NULL check before
+calling dbus_message_iter_append_basic().
+
+diff --git a/src/device.c b/src/device.c
+index 6d82ea3e2..c5d8e4c6e 100644
+--- a/src/device.c
++++ b/src/device.c
+@@ -1455,9 +1455,13 @@ static gboolean dev_property_get_uuids(const GDBusPropertyTable *property,
+ 	else
+ 		l = dev->uuids;
+ 
+-	for (; l != NULL; l = l->next)
+-		dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING,
+-							&l->data);
++	for (; l != NULL; l = l->next) {
++		const char *uuid = l->data;
++		if (uuid != NULL) {
++			dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING,
++							&uuid);
++		}
++	}
+ 
+ 	dbus_message_iter_close_container(iter, &entry);
+
