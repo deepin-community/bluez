@@ -1,0 +1,62 @@
+From 776026c41f67243b07d2731dac65baa383d5b57c Mon Sep 17 00:00:00 2001
+From: Zijun Hu <zijun.hu@oss.qualcomm.com>
+Date: Tue, 15 Sep 2026 02:13:20 -0700
+Subject: [PATCH] monitor: Fix btmon heap-buffer-overflow triggered by HCI
+ devcoredump
+
+Kernel HCI devcoredump can accumulate a large amount of dump data from MANY
+packets, then send it as a SINGLE DIAG packet to the monitor channel, so
+cause payload length @len in the header exceed BTSNOOP_MAX_PACKET_SIZE, but
+btmon uses @len to access the payload in @buf without validating that
+@len fits within @buf, causing a heap-buffer-overflow.
+
+Kernel:
+include/net/bluetooth/hci_mon.h
+struct hci_mon_hdr {
+	__le16  opcode;
+	__le16  index;
+	__le16  len;
+} __packed;
+
+BlueZ:
+src/shared/btsnoop.h
+#define BTSNOOP_MAX_PACKET_SIZE            (1486 + 4)
+monitor/control.c
+struct control_data {
+	uint16_t channel;
+	int fd;
+	unsigned char buf[BTSNOOP_MAX_PACKET_SIZE];
+	uint16_t offset;
+};
+
+The heap-buffer-overflow Issue:
+ERROR: AddressSanitizer: heap-buffer-overflow on address 0x51b00000065c at pc 0x7f50b987a029 bp 0x7ffde88dc8d0 sp 0x7ffde88dc088
+READ of size 17916 at 0x51b00000065c thread T0
+    #0 0x7f50b987a028 in write ../../../../src/libsanitizer/sanitizer_common/sanitizer_common_interceptors.inc:1096
+    #1 0x5b4f3443ae3a in btsnoop_write ../src/shared/btsnoop.c:289
+    #2 0x5b4f3429cbf0 in data_callback ../monitor/control.c:969
+    #3 0x5b4f3444fa9d in mainloop_run ../src/shared/mainloop.c:104
+    #4 0x5b4f34451da6 in mainloop_run_with_signal ../src/shared/mainloop-notify.c:196
+    #5 0x5b4f342953fc in main ../monitor/main.c:303
+    #6 0x7f50b8c2a1c9 in __libc_start_call_main ../sysdeps/nptl/libc_start_call_main.h:58
+    #7 0x7f50b8c2a28a in __libc_start_main_impl ../csu/libc-start.c:360
+    #8 0x5b4f34295ed4 in _start (/usr/bin/btmon+0x29fed4) (BuildId: b41caafb24db693946c283eaea48112186863d2d)
+
+Fix by clamping @len to the amount of data received before accessing
+@buf.
+
+diff --git a/monitor/control.c b/monitor/control.c
+index 83347d5db..1eab9c4fe 100644
+--- a/monitor/control.c
++++ b/monitor/control.c
+@@ -966,6 +966,9 @@ static void data_callback(int fd, uint32_t events, void *user_data)
+ 							data->buf, pktlen);
+ 			break;
+ 		case HCI_CHANNEL_MONITOR:
++			if (pktlen > (len - MGMT_HDR_SIZE))
++				pktlen = (len - MGMT_HDR_SIZE);
++
+ 			btsnoop_write_hci(btsnoop_file, tv, index, opcode, 0,
+ 							data->buf, pktlen);
+ 			ellisys_inject_hci(tv, index, opcode,
+

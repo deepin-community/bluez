@@ -1,0 +1,45 @@
+From ae6c543e892f1fc55d16584ce1ef02e1969352af Mon Sep 17 00:00:00 2001
+From: Bastien Nocera <hadess@hadess.net>
+Date: Wed, 12 Aug 2026 10:01:35 +0200
+Subject: [PATCH] sdp-xml: Fix memory leak when adding duplicate attributes
+
+When sdp_attr_add() fails because an attribute is duplicated, don't
+unset its pointer in the parsing context data. As the attribute wasn't
+added to the record, the ownership of the attribute didn't get passed
+to the record either.
+
+Don't set the pointer to NULL so it gets freed when cleaning up the
+context.
+
+Fixes those 2 ASan warnings:
+Direct leak of 48 byte(s) in 1 object(s) allocated from:
+    #0 0x7f896a8ef24f in calloc (/lib64/libasan.so.8+0xef24f) (BuildId: 5395ec74f54d9ec7bf97c06583dd39a96c230822)
+    #1 0x562042b747f2 in sdp_data_alloc_with_length lib/bluetooth/sdp.c:350
+
+Indirect leak of 2 byte(s) in 1 object(s) allocated from:
+    #0 0x7f896a8ef24f in calloc (/lib64/libasan.so.8+0xef24f) (BuildId: 5395ec74f54d9ec7bf97c06583dd39a96c230822)
+    #1 0x562042b74bd7 in sdp_data_alloc_with_length lib/bluetooth/sdp.c:425
+
+See https://github.com/bluez/bluez/security/advisories/GHSA-75v6-6q44-57hc
+
+Reported-by: Aisle Research
+Co-authored-by: Aisle Research
+
+diff --git a/src/sdp-xml.c b/src/sdp-xml.c
+index c8f9ed013..816d19611 100644
+--- a/src/sdp-xml.c
++++ b/src/sdp-xml.c
+@@ -537,8 +537,11 @@ static void element_end(GMarkupParseContext *context,
+ 			if (ret == -1)
+ 				DBG("Could not add attribute 0x%04x",
+ 							ctx_data->attr_id);
++			else {
++				/* ownership transferred to record */
++				ctx_data->stack_head->data = NULL;
++			}
+ 
+-			ctx_data->stack_head->data = NULL;
+ 			sdp_xml_data_free(ctx_data->stack_head);
+ 			ctx_data->stack_head = NULL;
+ 		} else if (ctx_data->stack_head && ctx_data->stack_head->next) {
+

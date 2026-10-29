@@ -1,0 +1,44 @@
+From 2faee1f504ce85807bacf4267838d728493345d8 Mon Sep 17 00:00:00 2001
+From: Zijun Hu <zijun.hu@oss.qualcomm.com>
+Date: Tue, 15 Sep 2026 02:13:21 -0700
+Subject: [PATCH] tools: Fix btmon-logger heap-buffer-overflow triggered by HCI
+ devcoredump
+
+Kernel HCI devcoredump can accumulate a large amount of dump data from MANY
+packets, then send it as a SINGLE DIAG packet to the monitor channel, so
+cause payload length @len in the header exceed BTSNOOP_MAX_PACKET_SIZE, but
+btmon-logger uses @len to access the payload in @buf without validating that
+@len fits within @buf, causing a heap-buffer-overflow.
+
+Kernel:
+include/net/bluetooth/hci_mon.h
+struct hci_mon_hdr {
+	__le16  opcode;
+	__le16  index;
+	__le16  len;
+} __packed;
+
+BlueZ:
+src/shared/btsnoop.h
+#define BTSNOOP_MAX_PACKET_SIZE            (1486 + 4)
+tools/btmon-logger.c
+uint8_t buf[BTSNOOP_MAX_PACKET_SIZE];
+
+Fix by clamping the payload length to the amount of data received before
+accessing @buf.
+
+diff --git a/tools/btmon-logger.c b/tools/btmon-logger.c
+index 261d998a6..b9a81965a 100644
+--- a/tools/btmon-logger.c
++++ b/tools/btmon-logger.c
+@@ -99,6 +99,9 @@ static void data_callback(int fd, uint32_t events, void *user_data)
+ 		index  = le16_to_cpu(hdr.index);
+ 		pktlen = le16_to_cpu(hdr.len);
+ 
++		if (pktlen > (len - sizeof(hdr)))
++			pktlen = (len - sizeof(hdr));
++
+ 		btsnoop_write_hci(btsnoop_file, tv, index, opcode, 0, buf,
+ 									pktlen);
+ 	}
+
