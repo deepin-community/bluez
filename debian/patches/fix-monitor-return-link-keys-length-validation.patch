@@ -1,0 +1,41 @@
+From 6475b75e7e0e4f62b032e743df11a6f76836d564 Mon Sep 17 00:00:00 2001
+From: Capsize Security <contact@capsize.online>
+Date: Mon, 26 Oct 2026 21:28:21 -0600
+Subject: [PATCH] monitor: validate Return Link Keys length before parsing
+
+return_link_keys_evt() loops i < evt->num_keys dereferencing
+keys + i*22 while the dispatcher only enforces plen >= 1.  A crafted
+btsnoop capture (evt 0x15, plen=3, num_keys=85) overflows the on-stack
+packet buffer (ASan stack-buffer-overflow in print_hexdump via
+print_link_key).
+
+Reject payloads shorter than 1 + num_keys*22 bytes with the file's
+existing too-short-packet idiom.  No integer-overflow hazard: uint8
+promotes to int, max 1+255*22=5611.
+
+Verified: pristine HEAD btmon + crafted capture -> ASan
+stack-buffer-overflow; patched btmon -> 'too short packet', exit 0,
+ASan-clean.  Boundary matrix (valid 1-key, zero keys, exact-fit 2-key,
+short-by-one, num_keys=255) all exit 0 ASan-clean.  make check passes
+on the scratch build.
+
+Fixes: 7d103ce15295 ("monitor: Add support for decoding the return link keys event")
+Assisted-by: Muse-Code:muse-spark
+
+diff --git a/monitor/packet.c b/monitor/packet.c
+index e2f0073e5..8a0e49ff4 100644
+--- a/monitor/packet.c
++++ b/monitor/packet.c
+@@ -12224,6 +12224,11 @@ static void return_link_keys_evt(struct timeval *tv, uint16_t index,
+ 
+ 	print_field("Num keys: %d", evt->num_keys);
+ 
++	if (size < 1u + (unsigned int) evt->num_keys * 22u) {
++		print_text(COLOR_ERROR, "too short packet");
++		return;
++	}
++
+ 	for (i = 0; i < evt->num_keys; i++) {
+ 		print_bdaddr(evt->keys + (i * 22));
+ 		print_link_key(evt->keys + (i * 22) + 6);
+
