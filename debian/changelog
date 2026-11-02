@@ -1,3 +1,12 @@
+bluez (5.85-3deepin14) unstable; urgency=medium
+
+  * Aggregate 5 backport PRs (#125-#128, #131) into debian/patches/
+    for batch review. All patches imported via quilt into
+    debian/patches/series in ascending PR-number order. Upstream source
+    tree unchanged; changes confined to debian/ directory only.
+
+ -- deepin-ci-robot <packages@deepin.org>  Mon, 02 Nov 2026 10:05:00 +0800
+
 bluez (5.85-3deepin13) unstable; urgency=medium
 
   * Aggregate 21 backport PRs (#69-#124, excluding #85 #110) into

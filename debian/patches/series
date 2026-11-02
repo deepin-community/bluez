@@ -86,3 +86,8 @@ fix-sdp-xml-stack-overflow-large-sequences-xml.patch
 fix-a2dp-uaf-after-rejected-set-configuration.patch
 fix-device-null-pointer-dereference-dev-property-get-uuids.patch
 fix-gatt-database-freeing-wrong-client-notify-io.patch
+fix-obexd-register-profiles-after-bluez-appeared.patch
+fix-adapter-discovering-stays-true-after-rejected-stop.patch
+fix-adapter-discovering-staying-true-after-failed-stop.patch
+fix-monitor-return-link-keys-length-validation.patch
+fix-gatt-setting-descriptor-value-from-scripts.patch
