@@ -1,0 +1,109 @@
+From 737e84da251a739993ae426d15c8e68bb1d32096 Mon Sep 17 00:00:00 2001
+From: RasmusML <rasmusml@hotmail.dk>
+Date: Mon, 2 Nov 2026 23:12:22 +0100
+Subject: [PATCH] profiles/midi: Fix running status across channels
+
+When two MIDI messages of the same type but on different channels end
+up in the same BLE-MIDI packet, read_ev_others() writes the second
+status byte without the timestampLow byte that must precede every
+status byte. A receiver then reads that status byte as the timestamp
+and applies the following data bytes to the previous message's channel
+through running status, e.g.:
+
+  sent:    ch1 NoteOff 60, ch2 NoteOff 64, ch3 CC123, ch4 CC123
+  packet:  B5 94 81 3C 00 82 40 00 94 B3 7B 00 B4 7B 00
+  decoded: ch1 NoteOff 60, ch1 NoteOff 64, ch3 CC123, ch3 CC123
+
+This happens because rstatus holds the ALSA event type, which carries
+no channel, so the writer assumes running status while
+snd_midi_event_decode() correctly emits a new status byte.
+
+Fix this by decoding each message into a local buffer first and
+appending timestampLow whenever the decoder actually wrote a status
+byte. If the message does not fit, flush the packet and, if it relied
+on running status, decode it again with a reset decoder so the new
+packet starts with a full status byte. This replaces the -ENOMEM retry
+path.
+
+Closes: https://github.com/bluez/bluez/issues/2630
+Assisted-by: Claude:claude-opus-5-5
+
+diff --git a/profiles/midi/libmidi.c b/profiles/midi/libmidi.c
+index ef33f7dfd..349f5f7b2 100644
+--- a/profiles/midi/libmidi.c
++++ b/profiles/midi/libmidi.c
+@@ -191,40 +191,47 @@ static void read_ev_sysex(struct midi_write_parser *parser, const snd_seq_event_
+ static void read_ev_others(struct midi_write_parser *parser, const snd_seq_event_t *ev,
+                            midi_read_ev_cb write_cb, void *user_data)
+ {
+-	int length;
++	uint8_t msg[MIDI_MSG_MAX_SIZE];
++	long length;
++	bool status;
+ 
+-	/* check for running status */
+-	if (parser->rstatus != ev->type) {
++	/* running status only ever continues the same event type */
++	if (parser->rstatus != ev->type)
+ 		snd_midi_event_reset_decode(parser->midi_ev);
+-		append_timestamp_low(parser);
+-	}
+ 
+-	/* each midi message has timestampLow byte to follow */
+-	length = snd_midi_event_decode(parser->midi_ev,
+-	                               parser->midi_stream.data +
+-	                               parser->midi_stream.len,
+-	                               parser_get_available_size(parser),
+-	                               ev);
+-
+-	if (length == -ENOMEM) {
+-		/* remove previously added timestampLow */
+-		if (parser->rstatus != ev->type)
+-			parser->midi_stream.len--;
++	length = snd_midi_event_decode(parser->midi_ev, msg, sizeof(msg), ev);
++	if (length <= 0)
++		return;
++
++	/*
++	 * The decoder leaves the status byte out only when it repeats the
++	 * previous one, channel included, and every status byte it does write
++	 * needs a timestampLow before it. Decide that from the decoded message,
++	 * not from the event type: two note-ons on different channels share a
++	 * type but not a status byte.
++	 */
++	status = msg[0] & 0x80;
++
++	if (parser_get_available_size(parser) < (size_t) length + status) {
+ 		write_cb(parser, user_data);
+-		/* cleanup state for next packet */
+-		snd_midi_event_reset_decode(parser->midi_ev);
+ 		midi_write_reset(parser);
+ 		append_timestamp_high_maybe(parser);
+-		append_timestamp_low(parser);
+-		length = snd_midi_event_decode(parser->midi_ev,
+-		                               parser->midi_stream.data +
+-		                               parser->midi_stream.len,
+-		                               parser_get_available_size(parser),
+-		                               ev);
++
++		/* a new packet cannot continue running status */
++		if (!status) {
++			snd_midi_event_reset_decode(parser->midi_ev);
++			length = snd_midi_event_decode(parser->midi_ev, msg,
++							sizeof(msg), ev);
++			if (length <= 0)
++				return;
++			status = true;
++		}
+ 	}
+ 
+-	if (length > 0)
+-		parser->midi_stream.len += length;
++	if (status)
++		append_timestamp_low(parser);
++
++	buffer_append_data(&parser->midi_stream, msg, length);
+ }
+ 
+ void midi_read_ev(struct midi_write_parser *parser, const snd_seq_event_t *ev,
+
