@@ -1,3 +1,9 @@
+bluez (5.85-3deepin15) unstable; urgency=medium
+
+  * shared/bap: Wait for ASE state before completing requests. As BAP client, keep requests outstanding until each ASE leaves its prior state (with 1000ms BAP_STATE_TIMEOUT fallback) instead of completing on the Control Point notification alone, fixing stale-state I/O errors on Release/Acquire; serialize queue processing and handle per-request cancel/detach.
+
+ -- deepin-ci-robot <packages@deepin.org>  Thu, 05 Nov 2026 15:07:01 +0800
+
 bluez (5.85-3deepin14) unstable; urgency=medium
 
   * Aggregate 5 backport PRs (#125-#128, #131) into debian/patches/
