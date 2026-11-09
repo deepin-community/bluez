@@ -1,3 +1,9 @@
+bluez (5.85-3deepin15) unstable; urgency=medium
+
+  * Fix handling of short notifications in shared/gatt-client: a Handle Value Notification or Indication shorter than a handle made notify_cb read the handle past the PDU and wrap the value length to 65534, passing a value larger than the received buffer to registered handlers. Such PDUs are now ignored.
+
+ -- deepin-ci-robot <packages@deepin.org>  Mon, 09 Nov 2026 10:32:55 +0800
+
 bluez (5.85-3deepin14) unstable; urgency=medium
 
   * Aggregate 5 backport PRs (#125-#128, #131) into debian/patches/
