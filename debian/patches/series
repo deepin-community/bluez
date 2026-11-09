@@ -91,3 +91,4 @@ fix-adapter-discovering-stays-true-after-rejected-stop.patch
 fix-adapter-discovering-staying-true-after-failed-stop.patch
 fix-monitor-return-link-keys-length-validation.patch
 fix-gatt-setting-descriptor-value-from-scripts.patch
+fix-gatt-client-read-multiple-variable-length-parsing.patch
