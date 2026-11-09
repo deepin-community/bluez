@@ -1,3 +1,9 @@
+bluez (5.85-3deepin15) unstable; urgency=medium
+
+  * shared/gatt: Validate Read By Type responses - reject peer-provided Attribute Data Length of 0 (division by zero) or shorter than a handle/PDU (out-of-bounds read) in read_by_type_cb, and check iterator result and value length before reading Server Features (security fix, P0)
+
+ -- deepin-ci-robot <packages@deepin.org>  Mon, 09 Nov 2026 10:33:29 +0800
+
 bluez (5.85-3deepin14) unstable; urgency=medium
 
   * Aggregate 5 backport PRs (#125-#128, #131) into debian/patches/
