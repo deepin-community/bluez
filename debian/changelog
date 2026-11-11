@@ -1,3 +1,9 @@
+bluez (5.85-3deepin15) unstable; urgency=medium
+
+  * shared/att: Fix signature length subtracted once per handler (backport upstream 8f8bbbff)
+
+ -- deepin-ci-robot <packages@deepin.org>  Wed, 11 Nov 2026 10:14:14 +0800
+
 bluez (5.85-3deepin14) unstable; urgency=medium
 
   * Aggregate 5 backport PRs (#125-#128, #131) into debian/patches/
