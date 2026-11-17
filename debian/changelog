@@ -1,3 +1,9 @@
+bluez (5.85-3deepin15) unstable; urgency=medium
+
+  * advertising: Fix double-free in client_free (backport upstream de977a4eb953): remember the g_idle_add() free id to avoid queueing a second client_free and drop the pending idle source when the client is freed directly
+
+ -- deepin-ci-robot <packages@deepin.org>  Tue, 17 Nov 2026 10:32:11 +0800
+
 bluez (5.85-3deepin14) unstable; urgency=medium
 
   * Aggregate 5 backport PRs (#125-#128, #131) into debian/patches/
