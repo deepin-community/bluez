@@ -1,3 +1,9 @@
+bluez (5.85-3deepin15) unstable; urgency=medium
+
+  * Fix reading Mute State from an empty notification in shared/micp (out-of-bounds read when a notification carries no value)
+
+ -- deepin-ci-robot <packages@deepin.org>  Tue, 17 Nov 2026 10:29:59 +0800
+
 bluez (5.85-3deepin14) unstable; urgency=medium
 
   * Aggregate 5 backport PRs (#125-#128, #131) into debian/patches/
