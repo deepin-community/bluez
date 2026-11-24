@@ -1,0 +1,25 @@
+From 52b654072a9db07187c4335c20d82a2c7c361db7 Mon Sep 17 00:00:00 2001
+From: Jinwang Li <jinwang.li@oss.qualcomm.com>
+Date: Mon, 16 Nov 2026 17:06:17 +0800
+Subject: [PATCH] obexd/pbap: Fix crash counting vCards in dummy backend
+
+Skip the vCard callback when none is given. Counting the vCards of the
+missed calls folder passes none and crashed.
+
+Fixes: f34bc5d924ec ("obexd: Add PBAP PullPhoneBook function for dummy back-end")
+Assisted-by: Claude:claude-sonnet-5-5
+
+diff --git a/obexd/plugins/phonebook-dummy.c b/obexd/plugins/phonebook-dummy.c
+--- a/obexd/plugins/phonebook-dummy.c
++++ b/obexd/plugins/phonebook-dummy.c
+@@ -166,7 +166,9 @@ static int foreach_vcard(DIR *dp, vcard_
+ 		fp = fdopen(fd, "r");
+ 		v = Parse_MIME_FromFile(fp);
+ 		if (v != NULL) {
+-			func(filename, v, user_data);
++			if (func)
++				func(filename, v, user_data);
++
+ 			deleteVObject(v);
+ 			n++;
+ 		}
