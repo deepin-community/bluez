@@ -1,3 +1,9 @@
+bluez (5.85-3deepin15) unstable; urgency=medium
+
+  * Add SecurityLevel and EncryptionType experimental properties to org.bluez.Device1, driven by the new MGMT security level changed event (0x0034). The MGMT event definitions are folded into the patch so it builds on the 5.85 baseline (prerequisite upstream commit bb98c3e02282c0383aa75651d754afd50fc385d2). Upstream source tree unchanged; changes confined to debian/ directory only.
+
+ -- deepin-ci-robot <packages@deepin.org>  Wed, 25 Nov 2026 14:00:20 +0800
+
 bluez (5.85-3deepin14) unstable; urgency=medium
 
   * Aggregate 5 backport PRs (#125-#128, #131) into debian/patches/
